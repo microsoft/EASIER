@@ -13,9 +13,6 @@ import os
 
 from easier.examples.models import Poisson
 import easier as esr
-from easier.core.passes.tensor_partition import parallel_partition_graph
-from easier.core.passes.sparse_encoding.sparse_encoding import \
-    encode_sparsity, build_cascade_reorder_plan
 
 from ..utils import \
     mpirun_singlenode, get_random_str, assert_tensor_list_equal, \
@@ -77,40 +74,6 @@ class Model2(esr.Module):
         self.tensor2[:] = res * 1.5
 
 
-def _stub_naive_parallel_partition_graph(
-    world_size: int, rank: int,
-    subadjmat_height: int, adjmat_width: int, vtxdist: torch.Tensor,
-    rowcolids_and_causes
-):
-    ncuts = 999
-    local_membership = torch.zeros([subadjmat_height], dtype=torch.int64)
-
-    for i in range(world_size):
-        local_membership[i::world_size] = i
-
-    # almost all on rank-0
-    return ncuts, local_membership
-
-
-def _stub_empty_reorder_plan(*args):
-    return []
-
-
-@contextlib.contextmanager
-def _patch_naivepart_offspenc():
-    # Use naive partition and turn off sparse encoding,
-    # force reordering Selectors to appear.
-    with patch(
-        f'{parallel_partition_graph.__module__}.{parallel_partition_graph.__name__}',
-        new=_stub_naive_parallel_partition_graph
-    ), patch(
-        # the build() method is imported, patch at the importing module.
-        f'{encode_sparsity.__module__}.{build_cascade_reorder_plan.__name__}',
-        new=_stub_empty_reorder_plan
-    ):
-        yield
-
-
 def _equal_jitted_selector(s1: esr.Selector, s2: esr.Selector):
     assert torch.equal(s1.idx, s2.idx)
     assert s1.easier_index_status == s2.easier_index_status == 'rewritten'
@@ -139,14 +102,15 @@ def worker__test_jitted_dump(
 
     m = Model(3, model_dev)  # type: ignore
 
-    with _patch_naivepart_offspenc():
-        jm1, = esr.compile([m], 'torch')  # type: ignore
+    jm1, = esr.compile([m], 'torch', partition_mode='naive')  # type: ignore
     esr.dump([jm1], dumpdir)
     jm1: Model
 
     torch.manual_seed(2345)
     m = Model(3, model_dev)  # type: ignore
-    jm2, = esr.compile([m], 'torch', dumpdir)  # type: ignore
+    jm2, = esr.compile(
+        [m], 'torch', dumpdir, partition_mode='naive'  # type: ignore
+    )
     jm2: Model
 
     _equal_jitted_selector(jm1.selector_src, jm2.selector_src)
@@ -177,8 +141,9 @@ def worker__test_jitted_shared(
     m1 = Model(3, model_dev)  # type: ignore
     m2 = Model2(m1, 3)
     # Only naive partition, cause reordering Selectors to appear.
-    with _patch_naivepart_offspenc():
-        jm1a, jm2a = esr.compile([m1, m2], 'torch')  # type: ignore
+    jm1a, jm2a = esr.compile(
+        [m1, m2], 'torch', partition_mode='naive'  # type: ignore
+    )
     esr.dump([jm1a, jm2a], dumpdir)
     jm1a: Model
     jm2a: Model2
@@ -186,7 +151,9 @@ def worker__test_jitted_shared(
     torch.manual_seed(2345)
     m1 = Model(3, model_dev)  # type: ignore
     m2 = Model2(m1, 3)
-    jm1b, jm2b = esr.compile([m1, m2], 'torch', dumpdir)  # type: ignore
+    jm1b, jm2b = esr.compile(
+        [m1, m2], 'torch', dumpdir, partition_mode='naive'  # type: ignore
+    )
     jm1b: Model
     jm2b: Model2
 
@@ -209,6 +176,7 @@ def worker__test_jitted_shared(
         getattr(jm1a, 'reordering_selector1reducer_src'),
         getattr(jm1b, 'reordering_selector1reducer_src'),
     )
+
 
 @pytest.mark.parametrize('dev_type', [
     'cpu',

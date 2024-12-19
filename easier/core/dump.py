@@ -39,6 +39,23 @@ from easier.core.passes.dataflow_distribution import \
 from easier.core.utils import logger, get_random_str, EasierJitException
 
 
+class BadDumpFormatException(Exception):
+    """
+    Indicates the input dump file is corrupted or
+    incompatible with the current version of dump/load subprocedure.
+
+    Such specific errors will only be reported to users currently,
+    and EASIER will stop loading and compile from the scratch.
+    """
+    # TODO file can be corrupted in many detailed ways, such as
+    # 1) bad H5, 2) bad H5 path, 3) unexcepted/missed field, 4) bad value, etc.
+    # Some will leads to SkipLoadDump handler, while for some others we'd better
+    # treat them as fatal exceptions.
+    #
+    # Now, we only handle a few of the most significant cases.
+    pass
+
+
 # For easier.core.dump module only.
 _json_reflection_registry: Dict[str, Type['JsonBase']] = {}
 
@@ -103,7 +120,15 @@ def _deserialize_json_dataset(
     """
     assert dataclasses.is_dataclass(dataclass_cls)
     json_str: str = h5grp[dataset_name].asstr()[0]  # type: ignore
-    obj = json.loads(json_str, object_hook=_json_object_hook)
+
+    try:
+        obj = json.loads(json_str, object_hook=_json_object_hook)
+    except TypeError as type_error:
+        # TypeError means the parsed JSON dict does not match the
+        # parameter list of the dataclass constructor, which will occur
+        # when we add/remove fields to the JSON dataclass definition.
+        raise BadDumpFormatException(str(type_error.args[0])) from type_error
+
     assert isinstance(obj, dataclass_cls)
     return obj
 
@@ -171,7 +196,7 @@ class GlobalConfig(JsonBase):
     world_size: int
 
     # The version of the dump files.
-    version: Tuple[int, int] = (0, 1)  # v0.1
+    version: Tuple[int, int] = (0, 2)  # v0.2
 
     def __eq__(self, value) -> bool:
         if not isinstance(value, GlobalConfig):
@@ -481,6 +506,12 @@ class ElemPartInfo(JsonBase):
 
     lengths: List[int]
 
+    # These fields are dedicated to validation:
+    #
+    # The globally specified `partition_mode` argument to `compile()`,
+    # independent from how a single ElemPart is partitioned/calculated.
+    partition_mode: Literal['metis', 'naive']
+
 
 def dump_elemparts(
     modules: List[esr.Module], h5_ep_root: h5py.Group
@@ -540,7 +571,8 @@ def dump_elemparts(
             elempart_type=elempart_type,
             h5_group_basepath=grp_basepath,
             parameter_bindings=binding_paths,
-            lengths=elempart.lengths
+            lengths=elempart.lengths,
+            partition_mode=elempart.partition_mode
         )
         result.append(ep_info)
 
@@ -772,7 +804,10 @@ def _get_data_loader_repr(data_loader: DataLoaderBase) -> Tuple[
 
 
 def load_dumps(
-    modules: List[esr.Module], dump_dir: str, raw_graphs: List[Graph]
+    modules: List[esr.Module],
+    dump_dir: str,
+    raw_graphs: List[Graph],
+    partition_mode: Literal['metis', 'naive']
 ) -> Optional[List[Graph]]:
     """
     This is not a user API.
@@ -792,12 +827,25 @@ def load_dumps(
     jit_dir = os.path.join(dump_dir, 'jit')
 
     try:
+        valid_format = True
         if rank == 0:
-            jit_fpath0 = os.path.join(jit_dir, 'jit_0.hdf5')
-            with h5py.File(jit_fpath0, 'r') as jit_f0:
-                dump_info = _deserialize_json_dataset(
-                    jit_f0, H5_DATASET_DUMP_INFO, EasierDump
-                )
+            try:
+                jit_fpath0 = os.path.join(jit_dir, 'jit_0.hdf5')
+                with h5py.File(jit_fpath0, 'r') as jit_f0:
+                    dump_info = _deserialize_json_dataset(
+                        jit_f0, H5_DATASET_DUMP_INFO, EasierDump
+                    )
+            except BadDumpFormatException as bad_format:
+                logger.debug(str(bad_format.args[0]))
+                valid_format = False
+
+        _coll_check(
+            valid_format,
+            _SkipLoadingDump,
+            'Dump is incompatible or is corrupted'
+        )
+
+        if rank == 0:
             cur_global_config = _get_current_global_config()
             global_config_is_same = \
                 dump_info.global_config == cur_global_config
@@ -820,7 +868,7 @@ def load_dumps(
             # do loading-time validation on rank-0.
             with h5py.File(jit_fpath0, 'r') as jit_f0:
                 dump_valid = rank0_validates_dumps(
-                    modules, raw_graphs, jit_f0, dump_info
+                    modules, raw_graphs, jit_f0, dump_info, partition_mode
                 )
         else:
             dump_valid = True
@@ -946,13 +994,15 @@ def rank0_validates_dumps(
     modules: List[esr.Module],
     raw_graphs: List[Graph],
     h5root: h5py.Group,
-    dump_info: EasierDump
+    dump_info: EasierDump,
+    partition_mode: Literal['metis', 'naive']
 ) -> bool:
     """
     Rank-0 validates its own dump (i.e. 'jit_0.hdf5').
 
     Validate between dumps and newly initialized modules:
     -   raw IRs are equal
+    -   partition modes are equal
     -   Selector/Reducer.idx definition are equal
     If any of these criteria are not met, we need to warn users about
     the details, and break loading to compile from the scratch using the
@@ -981,6 +1031,14 @@ def rank0_validates_dumps(
     )
     if ir_changes:
         return False
+
+    for ep_info in dump_info.elemparts:
+        if ep_info.partition_mode != partition_mode:
+            logger.debug(
+                "Partition mode changes:"
+                f" {ep_info.partition_mode} => {partition_mode}"
+            )
+            return False
 
     # 1) We have checked the IR equality,
     # so all call_module Nodes (i.e. attr names) have valid submods bound,
@@ -1090,7 +1148,8 @@ def load_elemparts(
         elempart = ElemPart(
             idx_desc=idx_desc,
             lengths=ep_info.lengths,
-            hint=ep_info.hint
+            hint=ep_info.hint,
+            partition_mode=ep_info.partition_mode
         )
 
         for rooti, tensorpath in ep_info.parameter_bindings:

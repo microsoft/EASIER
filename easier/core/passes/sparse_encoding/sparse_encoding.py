@@ -542,6 +542,7 @@ def encode_sparsity(modules: List[esr.Module], graphs: List[Graph]):
             reordered_elempart = ElemPart(
                 idx_desc=reordered_elempart_idx,
                 lengths=target_elempart_raw.lengths,
+                partition_mode=target_elempart_raw.partition_mode,
                 hint=target_elempart_raw.hint
             )
             elemparts[_rel.target] = reordered_elempart

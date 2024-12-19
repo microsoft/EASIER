@@ -7,12 +7,16 @@ from unittest.mock import MagicMock, Mock, patch, call, ANY
 import more_itertools
 
 import torch
+
+import easier
+from easier.core import passes
+from easier.core.jit import EasierTracer
 from easier.core.passes.tensor_grouping import EasierTensorGroup
 import easier.core.runtime.dist_env as _JitRuntimeDistEnv
 from easier.core.runtime.dist_env import DistEnv
 from easier.core.passes.tensor_partition import \
     CommPair, partition_tensor_groups_with_adjmat, parallel_partition_graph, \
-    synchronize_partition_result, get_cpu_dist_env
+    synchronize_partition_result, get_cpu_dist_env, ElemPartArangeIdx
 from easier.core.passes.tensor_grouping import \
     EasierTensorGroup
 from tests.utils import assert_tensor_list_equal
@@ -350,11 +354,17 @@ def test_sync_parmetis_result(mock_mpi_dist_env):
     g7 = EasierTensorGroup(fake_defset, 8,  'g7')  # type: ignore
 
     def run(local_membership: torch.Tensor):
-        return synchronize_partition_result(
+        r = synchronize_partition_result(
             {g5: 0, g6: 9, g7: 9 + 26},  # type: ignore
             9 + 26 + 8,  # per_work=[15, 15, 13]
-            local_membership
+            local_membership,
+            'metis'
         )
+        for k, v in r.items():
+            assert isinstance(v.idx_desc, torch.Tensor)
+            assert v.partition_mode == 'metis'
+
+        return r
 
     g5_w0_to_w0 = vec(0, 1, 6)
     g5_w0_to_w1 = vec(2, 3, 7)
@@ -454,3 +464,46 @@ def test_sync_parmetis_result(mock_mpi_dist_env):
                              [g6_w2_to_w0, g6_w2_to_w1, g6_w2_to_w2])
     assert_tensor_list_equal(get_call_arg0(next(it)),
                              [g7_w2_to_w0, g7_w2_to_w1, g7_w2_to_w2])
+
+
+def test_naive_mode():
+    class M(easier.Module):
+        def __init__(self):
+            super().__init__()
+            self.s1 = easier.Selector(torch.ones(10, dtype=torch.int64))
+            self.s2 = easier.Selector(torch.ones(10, dtype=torch.int64))
+            self.s3 = easier.Selector(torch.ones(10, dtype=torch.int64))
+            self.r = easier.Reducer(torch.ones(10, dtype=torch.int64), n=55)
+
+            self.v = easier.Tensor(torch.zeros(55), mode='partition')
+
+        def forward(self):
+            v1 = self.s1(self.v)
+            v2 = self.s2(v1)
+            v3 = self.s3(v2)
+            self.r(v3, out=self.v)
+
+    m = M()
+    g = EasierTracer().trace(m)
+    [m], [g] = passes.propagate_metadata([m], [g])  # type: ignore
+    [m], [g] = passes.group_tensors([m], [g])  # type: ignore
+    [m], [g] = passes.partition_tensor_groups(
+        [m], [g], 'naive'
+    )  # type: ignore
+    m: M
+
+    grpv = m.v.easier_tensor_group
+    grp1 = m.s1.easier_tensor_group
+    grp2 = m.s2.easier_tensor_group
+    grp3 = m.s3.easier_tensor_group
+    grpr = m.r.easier_tensor_group  # == grpv
+
+    assert grpv is grpr
+    grps = set([grpv, grp1, grp2, grp3])
+    assert len(grps) == 4
+
+    assert set(m.easier_elemparts.keys()) == grps
+
+    for k, v in m.easier_elemparts.items():
+        assert isinstance(v.idx_desc, ElemPartArangeIdx)
+        assert v.partition_mode == 'naive'

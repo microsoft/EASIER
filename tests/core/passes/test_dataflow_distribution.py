@@ -12,7 +12,7 @@ from torch.fx.node import Node
 from easier.core import passes
 from easier.core.jit import EasierTracer
 from easier.core.passes.tensor_grouping import EasierTensorGroup
-from easier.core.passes.tensor_partition import ElemPart
+from easier.core.passes.tensor_partition import ElemPart as _EP_raw
 import easier.core.runtime.dist_env as _JitRuntimeDistEnv
 from easier.core.runtime.dist_env import DistEnv
 from easier.core.module import Selector, Reducer
@@ -28,6 +28,10 @@ import easier
 
 def vec(*longs):
     return torch.LongTensor(longs)
+
+
+def ElemPart(idx, lengths):
+    return _EP_raw(idx, lengths, 'metis', 'NOHINT')
 
 
 def worker__test_halo_exchanger_insertion_for_selector(

@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 import torch
 from easier.core.passes.tensor_grouping import EasierTensorGroup
-from easier.core.passes.tensor_partition import ElemPart
+from easier.core.passes.tensor_partition import ElemPart as _EP_raw
 import easier.core.runtime.dist_env as _JitRuntimeDistEnv
 from easier.core.runtime.dist_env import DistEnv
 from easier.core.module import Selector, Reducer
@@ -24,6 +24,10 @@ from tests.utils import assert_tensor_list_equal, mpirun_singlenode
 
 def vec(*longs):
     return torch.LongTensor(longs)
+
+
+def ElemPart(idx, lengths):
+    return _EP_raw(idx, lengths, 'metis', 'NOHINT')
 
 
 def test_break_reducer_cycle():
