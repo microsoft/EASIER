@@ -6,7 +6,7 @@ FROM mcr.microsoft.com/azureml/curated/acpt-pytorch-2.2-cuda12.1:22
 RUN apt-get update && apt-get install -y \
     git \
     zip \
-	vim
+    vim
 
 WORKDIR /app/
 RUN wget https://developer.download.nvidia.com/devtools/nsight-systems/NsightSystems-linux-cli-public-2023.4.1.97-3355750.deb
