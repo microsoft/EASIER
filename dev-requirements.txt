@@ -19,9 +19,16 @@
 #
 #   sudo apt-get install libopenmpi-dev
 #
-#   pip install Cython mpi4py                   # see below
+#   pip install Cython==3.0.11 mpi4py==3.1.5    # see remarks
 #   pip install -r dev-requirements.txt
 #
+#
+# Remarks:
+# mgmetis wrongly specifies Cython a "install time" requirement and mpi4py
+# as optional but they should both be "setup time" requirements.
+# Therefore we need to install them separatedly before
+# `pip install mgmetis` or `pip install -r dev-requirements.txt`
+# so that ParMETIS support can be added.
 
 pytest==8.3.2
 more-itertools==10.4.0
@@ -30,7 +37,7 @@ scipy==1.10.1
 matplotlib==3.7.5
 
 --find-links https://download.pytorch.org/whl/torch_stable.html
-torch==2.0.1+cu117
+torch==2.2.1+cu121
 
 # To profile using PyTorch integration of tensorboard
 # Both packages need to be installed on the machine where TensorBoard will be
@@ -40,15 +47,6 @@ torch-tb-profiler
 
 # To profile using Nsight Systems
 nvtx
-
-# WARNING
-# mgmetis wrongly specifies Cython a "install time" requirement and mpi4py
-# as optional but they should both be "setup time" requirements.
-# Therefore we need to install them separatedly before
-# `pip install mgmetis` or `pip install -r dev-requirements.txt`
-# so that ParMETIS support can be added.
-Cython==3.0.11
-mpi4py==3.1.5
 
 mgmetis==0.1.1
 

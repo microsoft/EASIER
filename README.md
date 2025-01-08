@@ -16,6 +16,9 @@ The Python itself should be fixed to 3.8:
 conda create -n ENV_NAME python=3.8
 conda activate ENV_NAME
 
+# for conda, only run this if you see compile/link errors with `pip install`
+conda install gcc_linux-64
+
 # for other venvs
 # TODO
 ```
@@ -23,9 +26,12 @@ conda activate ENV_NAME
 To install the dependencies for development:
 
 ```shell
-pip install Cython mpi4py               # must be installed separately
+# for Ubuntu
+sudo apt-get install libopenmpi-dev
+
+pip install Cython==3.0.11 mpi4py==3.1.5    # must be installed separately
 pip install -r dev-requirements.txt
-pip install -e .                        # equals `python setup.py develop`
+pip install -e .                            # equals `python setup.py develop`
 ```
 
 ## Project folder structure

@@ -27,7 +27,20 @@ jobs:
     #   - https://gh.io/supported-runners-and-hardware-resources
     #   - https://gh.io/using-larger-runners (GitHub.com only)
     # Consider using larger runners or machines with greater resources for possible analysis time improvements.
-    runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
+
+    # The image 'ubuntu-22.04' has Python 3.10 by default,
+    # compatible with EASIER development minimum requirements, namely numpy==1.24 for Python 3.8.
+    #
+    # The image 'ubuntu-latest' is `ubuntu-24.04', see:
+    #   - https://github.com/actions/runner-images/issues/10636
+    # it has Python 3.12 by default,
+    # and there is no numpy version compatible with Python 3.12
+    # and Python 3.8 which we use for EASIER development.
+    #
+    # (P.S. please see `actions/setup-python@v5` comment for more about fixing ubuntu version)
+    #
+    runs-on: 'ubuntu-22.04'
+
     permissions:
       # required for all workflows
       security-events: write
@@ -60,6 +73,12 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
+    # NOTE
+    # We rely on `runs-on: 'ubuntu-22.04'` to offer the proper Python
+    # installation, i.e. Python 3.10.
+    # Setting up Python using `actions/setup-python` will cause mgmetis
+    # unable to be installed.
+    #
     #- name: Setup Python
     #  uses: actions/setup-python@v5
     #  with:
@@ -67,9 +86,8 @@ jobs:
 
     - name: Install EASIER
       run: |
-        sudo apt-get install openmpi-bin libopenmpi-dev
+        sudo apt-get install libopenmpi-dev
         pip install Cython==3.0.11 mpi4py==3.1.5
-        pip install mgmetis==0.1.1
         pip install -r dev-requirements.txt
         pip install -e .
 
