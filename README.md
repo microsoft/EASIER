@@ -16,8 +16,8 @@ The Python itself should be fixed to 3.8:
 conda create -n ENV_NAME python=3.8
 conda activate ENV_NAME
 
-# for conda, only run this if you see compile/link errors with `pip install`
-conda install gcc_linux-64
+# for conda, only run this if you see compile/link errors with `pip` commands
+conda install gxx_linux-64
 
 # for other venvs
 # TODO
