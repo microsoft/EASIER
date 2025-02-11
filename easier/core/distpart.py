@@ -27,7 +27,7 @@ from easier.core.utils import EasierJitException, logger
 
 
 
-UNMATCHED = torch.iinfo(torch.int64).min
+MASKVALUE = -1
 
 @dataclass
 class CoarseningLevel:
@@ -117,12 +117,12 @@ class DistSHEMMatcher:
         adjmat = self.masked_adj_lists.clone()
         adjw = self.masked_adj_weights.clone()
 
-        adjmat[adj_mask] = UNMATCHED
-        adjw[adj_mask] = UNMATCHED
+        adjmat[adj_mask] = MASKVALUE
+        adjw[adj_mask] = MASKVALUE
 
         for _ in range(self.vertexes_ids.shape[0]):
             # bool(V,)  s.t. nonzero() == P
-            row_flags = torch.logical_and(matched == UNMATCHED, matched < max_vertex_weight)
+            row_flags = torch.logical_and(matched == MASKVALUE, matched < max_vertex_weight)
 
             # int(P,)
             unmatched_vids = self.vertexes_ids[row_flags]
@@ -160,7 +160,7 @@ class DistSHEMMatcher:
             # heavy_adjw may be -1 (e.g. all matching are overweight),
             # we leave this vertex as unmatched, by temporarily setting the
             # matched ID to itself.
-            matched_vids = torch.where(heavy_adjw == UNMATCHED, active_vids, adj_vids)
+            matched_vids = torch.where(heavy_adjw == MASKVALUE, active_vids, adj_vids)
             matched[active_vids] = matched_vids
 
         else:
@@ -187,7 +187,7 @@ class DistSHEMMatcher:
 
         # Reset all temporary self-matching to be unmatched
         self_matching_flags = self.matched == self.vertexes_ids
-        self.matched[self_matching_flags] = UNMATCHED
+        self.matched[self_matching_flags] = MASKVALUE
 
     
     def sync_matched(self, src_rank):
@@ -222,8 +222,8 @@ class DistSHEMMatcher:
         # then we deduplicate among all independent matching results
         
         # argmax returns the first pos if there are multiple maximals
-        lb_pos = torch.argmax(hop_adjmat != UNMATCHED, dim=1)
-        ub_pos = -torch.argmax((hop_adjmat != UNMATCHED).fliplr(), dim=1) - 1
+        lb_pos = torch.argmax(hop_adjmat != MASKVALUE, dim=1)
+        ub_pos = -torch.argmax((hop_adjmat != MASKVALUE).fliplr(), dim=1) - 1
 
         unmatched_vids_lb = hop_adjmat[:, lb_pos]
         unmatched_vids_ub = hop_adjmat[:, ub_pos]
@@ -283,9 +283,9 @@ class DistSHEMMatcher:
         create a new adjmat where for each 
         """
         row_flags = torch.logical_and(
-            self.matched == UNMATCHED,
+            self.matched == MASKVALUE,
             # Count on raw adjmat, not on the masked adjmat.
-            torch.count_nonzero(self.adj_lists != UNMATCHED, dim=1) < maxdegree
+            torch.count_nonzero(self.adj_lists != MASKVALUE, dim=1) < maxdegree
         )
 
         unmatched_vids = self.vertexes_ids[row_flags]
@@ -329,10 +329,10 @@ class DistSHEMMatcher:
             flat_offsets = concat_aranges(counts) + \
                 torch.repeat_interleave(torch.arange(n_active), counts)
 
-            active = torch.full((n_active, max_count), fill_value=UNMATCHED, dtype=torch.int64)
+            active = torch.full((n_active, max_count), fill_value=MASKVALUE, dtype=torch.int64)
             active.reshape(-1).scatter_(dim=0, index=flat_offsets, src=w_vids_reordered)
 
-            column_wise_sub_adjmat = torch.full((self.vertexes_ids.shape[0], max_count), fill_value=UNMATCHED, dtype=torch.int64)
+            column_wise_sub_adjmat = torch.full((self.vertexes_ids.shape[0], max_count), fill_value=MASKVALUE, dtype=torch.int64)
             column_wise_sub_adjmat[unique_adj_vids, :] = active
 
             active_adj_vids_subs.append(unique_adj_vids)
@@ -399,53 +399,95 @@ def create_coaser_graph():
     cmapped_adj_lists = torch.empty()
 
 
+@dataclass
+class DistConfig:
+    nv: int
 
+    # No matter the division is rounding up or down,
+    # first (worldsize-1) workers always have per_worker_nv vertexes.
+    per_worker_nv: int
+
+    def get_start_end(self, rank=None):
+        dist_env = get_runtime_dist_env()
+        if rank == None:
+            rank = dist_env.rank
+
+        start = self.per_worker_nv * rank
+        end = min(self.per_worker_nv * (rank + 1), self.nv)
+        return start, end
+        
 
 
 def coarsen(
-    adjpart: AdjPart, rowptr, colidx, adjwgt,
+    rowptr: torch.Tensor, colidx: torch.Tensor, adjwgt: torch.Tensor, dist_config: DistConfig,
     # max_v_weight: float
-):
+) -> CoarseningLevel:
     """
+    Do multi-level coarsening on all workers.
+    On each level, it's run in a sequential manner from worker-0 to the last
+    worker, with each worker coarsening its own part of adjacency matrix and
+    broadcasting its matching result to others.
+
     Remarks:
-    -   As the graph is being coarsened, the weights of vertexes may be accumulated and no longer be 1, the default weight;
-        and the vertex weight may exceed max_v_weight, making it not matchable in this turn of coarsening.
-    -   Unlike METIS, we don't match orphan vertexes (whose degree == 0), including orphans clustered by previou coarsening steps.
-        Such orphans have no effect on edge cutting, we just keep them as they are, and leave them on the current coarseninng level,
-        without sending them to next coarsening level.
+    -   Given the nature of vertex degrees of the mesh, we don't sort vertexes
+        by degrees first.
+    -   As we aim to coarsen to certain level and then delegate
+        deeper coarsening and partitioning to METIS, we only do
+        heavy-edge matching (HEM) here, without 2-hop matching (i.e. match
+        vertexes that both are neighbours of same vertex.)
     """
-    degrees = colidx[1:] - colidx[:-1]
-    avg_degree: int = int(4.0)
-    repr_degrees = torch.min(avg_degree, degrees)
+    dist_env = get_runtime_dist_env()
 
-    sorted_repr_degrees, sorted_rows = torch.sort(repr_degrees)
-    # sorted_idx = adjpart.idx[sorted_rows]
-
-    # skip orphans
-    'TODO'
-
-    # max_v_weight should be calculated against the shrunk graph without those orphans
-    max_v_weight = 1.1
-
-    num_orphans = (sorted_repr_degrees > 0).sum().item()
-
-    # match_local(rowptr, colidx, sorted_repr_degrees[num_orphans:], sorted_rows[num_orphans:])
-
-    match_global(rowptr, colidx, sorted_repr_degrees[num_orphans:], sorted_rows[num_orphans:])
-
-
-    match_2hop_by_any_adj()
-    match_2hop_by_all_adj()
-
+    start, end = dist_config.get_start_end()
+    assert rowptr.shape[0] -1 == end - start
     
+    # local vids to global vids
+    matched = torch.full((end - start,), fill_value=MASKVALUE, dtype=torch.int64)
+    masked_colidx = colidx.clone()
+
+    for w in range(dist_env.world_size):
+        if w == dist_env.rank:
+            # int(?, 2): both values are global IDs, but the [:, 0] are held by this worker.
+            matched_vid_pairs = torch.full((end - start, 2), fill_value=MASKVALUE, dtype=torch.int64)
 
 
+            n_new_matches = print(matched, rowptr, masked_colidx, adjwgt, matched_vid_pairs)
+            matched_vid_pairs = matched_vid_pairs[:n_new_matches, :]
 
+            matched[matched_vid_pairs[:, 0] - start] = matched_vid_pairs[:, 1]
+
+            # TODO is broadcast necessary which includes previous workers?
+            #
+            # Broadcast the whole result, to mask out adj list for each worker.
+            dist_env.broadcast_object_list(w, [matched_vid_pairs.shape[0]])
+            w_matched_pairs = dist_env.broadcast(w, matched_vid_pairs)
+
+        else:
+            [npairs] = dist_env.broadcast_object_list(w)
+            w_matched_pairs = dist_env.broadcast(w, shape=(npairs, 2), dtype=torch.int64)
+
+        # update matched records
+        to_this_mask = (w_matched_pairs[:, 1] - start) >= 0
+        to_this_pairs = w_matched_pairs[to_this_mask]
+        matched[to_this_pairs[:, 1] - start] = to_this_pairs[:, 0]
+
+        # mask out matched adj cells
+        masked_colidx[torch.isin(masked_colidx, w_matched_pairs)] = MASKVALUE
+        
+    this_unmatched_n = (matched == -1).count_nonzero()
+    # TODO will be self-match?
+    this_matched_n = end - start - this_unmatched_n
+    coarser_vid_map = torch.full((end - start,), fill_value=MASKVALUE, dtype=torch.int64)
+
+
+@dataclass
+class CoarseningLevel:
+    dist_config: DistConfig
 
 
 
 
 def part_kway(
-    adjpart: AdjPart, rowptr, colidx, adjwgt
+    rowptr, colidx, adjwgt
 ):
     pass

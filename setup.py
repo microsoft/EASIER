@@ -22,7 +22,12 @@ setup(
     ext_modules=[
         cpp_extension.CppExtension(
             name='easier.cpp_extension',
-            sources=['csrc/triangular_mesh.cpp'],
-            extra_compile_args=['-fopenmp'])],
+            sources=[
+                'csrc/triangular_mesh.cpp',
+                'csrc/distpart.cpp'
+            ],
+            extra_compile_args=['-fopenmp']
+        )
+    ],
     cmdclass={'build_ext': cpp_extension.BuildExtension}
 )
