@@ -1,10 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-void match_hem(matched, rowptr, masked_colidx, adjwgt, matched_vid_pairs) {
-    // TODO the masked_colidx is expected to be masked at each step here too
+void locally_match_heavy_edge(matched, rowptr, masked_colidx, adjwgt, matched_vid_pairs) {
+    // TODO the matched and masked_colidx are expected to be masked at each step here too
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("match_hem", &match_hem, "Match heavy edge");
+    m.def(
+        "locally_match_heavy_edge",
+        &match_hem,
+        "Locally match heavy edge for each worker in a sequential manner"
+    );
 }

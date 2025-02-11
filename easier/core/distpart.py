@@ -444,41 +444,120 @@ def coarsen(
     # local vids to global vids
     matched = torch.full((end - start,), fill_value=MASKVALUE, dtype=torch.int64)
     masked_colidx = colidx.clone()
+    
+    # old IDs to coarser IDs
+    coarser_vid_map = torch.full((end - start,), fill_value=MASKVALUE, dtype=torch.int64)
+
+    cnv_allocated = 0
 
     for w in range(dist_env.world_size):
         if w == dist_env.rank:
             # int(?, 2): both values are global IDs, but the [:, 0] are held by this worker.
             matched_vid_pairs = torch.full((end - start, 2), fill_value=MASKVALUE, dtype=torch.int64)
 
-
             n_new_matches = print(matched, rowptr, masked_colidx, adjwgt, matched_vid_pairs)
             matched_vid_pairs = matched_vid_pairs[:n_new_matches, :]
 
-            matched[matched_vid_pairs[:, 0] - start] = matched_vid_pairs[:, 1]
+            assert torch.all(matched_vid_pairs[:, 1] >= start), \
+                "never result in matching with vertexes on previous workers"
 
-            # TODO is broadcast necessary which includes previous workers?
-            #
+            ########
             # Broadcast the whole result, to mask out adj list for each worker.
+            ########
             dist_env.broadcast_object_list(w, [matched_vid_pairs.shape[0]])
             w_matched_pairs = dist_env.broadcast(w, matched_vid_pairs)
 
+            # TODO matched is writeable in HEM cpp
+            matched[matched_vid_pairs[:, 0] - start] = matched_vid_pairs[:, 1]
+
+            ########
+            # Assign new vertex IDs for the coarser graph
+            # and broadcast the ID assignments to where the vertexes are held
+            ########
+            unmatched_mask = matched == -1
+            this_unmatched_n = int(unmatched_mask.count_nonzero())
+            coarser_vid_map[unmatched_mask] = torch.arange(
+                cnv_allocated,
+                cnv_allocated + this_unmatched_n,
+                dtype=torch.int64
+            )
+
+            # A matching will be stored twice, we only count once on the
+            # less-than case (including two vertexes are both on this worker,
+            # or the other is remote).
+            this_assigned_mask = matched_vid_pairs[:, 0] < matched_vid_pairs[:, 1]
+            this_assigned_to = matched_vid_pairs[:, 0][this_assigned_mask]
+            tell_cvids_to = matched_vid_pairs[:, 1][this_assigned_mask]
+
+            this_assigned_n = this_assigned_to.shape[0]
+            this_assigned_cvids = torch.arange(
+                cnv_allocated,
+                cnv_allocated + this_assigned_n,
+                dtype=torch.int64
+            )
+            coarser_vid_map[this_assigned_to - start] = this_assigned_cvids
+
+            # Update coarser vid map for [:,0]>[:,1] part
+            self_tell_mask = torch.logical_and(
+                start <= tell_cvids_to,
+                tell_cvids_to < end
+            )
+            coarser_vid_map[
+                tell_cvids_to[self_tell_mask] - start
+            ] = this_assigned_cvids[self_tell_mask]
+
+            [
+                w_last_cnv_allocated, w_assigned_n, w_unmatched_n 
+            ] = dist_env.broadcast_object_list(w, [
+                cnv_allocated, this_assigned_n, this_unmatched_n
+            ])
+
+            w_tell_cvids_to = dist_env.broadcast(w, tell_cvids_to)
+
         else:
+            # TODO all previous workers are involved in this broadcast, but
             [npairs] = dist_env.broadcast_object_list(w)
             w_matched_pairs = dist_env.broadcast(w, shape=(npairs, 2), dtype=torch.int64)
 
-        # update matched records
-        to_this_mask = (w_matched_pairs[:, 1] - start) >= 0
-        to_this_pairs = w_matched_pairs[to_this_mask]
-        matched[to_this_pairs[:, 1] - start] = to_this_pairs[:, 0]
+            # Till it reaches the point when this worker runs HEM matching,
+            # it keeps overwriting these values the worker received.
+            [ 
+                w_last_cnv_allocated, w_assigned_n, w_unmatched_n
+            ] = dist_env.broadcast_object_list(w)
+            w_tell_cvids_to = dist_env.broadcast(w, shape=(w_assigned_n,), dtype=torch.int64)
 
-        # mask out matched adj cells
-        masked_colidx[torch.isin(masked_colidx, w_matched_pairs)] = MASKVALUE
+        cnv_allocated = w_last_cnv_allocated + w_assigned_n + w_unmatched_n
+
+        if dist_env.rank > w:
+            # Subsequent workers update their matched records
+            to_this_mask = torch.logical_and(
+                start <= w_matched_pairs[:, 1],
+                w_matched_pairs[:, 1] < end
+            )
+            to_this_pairs = w_matched_pairs[to_this_mask]
+            matched[to_this_pairs[:, 1] - start] = to_this_pairs[:, 0]
+
+            # ... and mask out their adjmat cells
+            masked_colidx[torch.isin(masked_colidx, w_matched_pairs)] = MASKVALUE
+
+            # Update coarser vid map for matching resulted by prev workers.
+            w_tell_mask = torch.logical_and(
+                start <= w_tell_cvids_to,
+                w_tell_cvids_to < end
+            )
+            coarser_vid_map[
+                w_tell_cvids_to[w_tell_mask] - start
+            ] = torch.arange(
+                w_last_cnv_allocated, w_last_cnv_allocated + w_assigned_n
+            )[w_tell_cvids_to]
+
         
-    this_unmatched_n = (matched == -1).count_nonzero()
-    # TODO will be self-match?
-    this_matched_n = end - start - this_unmatched_n
-    coarser_vid_map = torch.full((end - start,), fill_value=MASKVALUE, dtype=torch.int64)
+    # end for
+    masked_colidx = None
+    cnv_allocated = None
 
+    cnv: int = \
+        w_last_cnv_allocated + w_assigned_n + w_unmatched_n  # type: ignore
 
 @dataclass
 class CoarseningLevel:
