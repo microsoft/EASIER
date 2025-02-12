@@ -142,7 +142,3 @@ py::tuple get_mesh(torch::Tensor mesh_size) {
   return py::make_tuple(SRC, DST, CELLS, BCELLS, BPOINTS, POINTS);
   // return py::make_tuple(src_t, dst_t, A_t, b_t);
 }
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("generate_triangular_mesh", &get_mesh, "Get mesh");
-}

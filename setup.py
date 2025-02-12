@@ -23,8 +23,9 @@ setup(
         cpp_extension.CppExtension(
             name='easier.cpp_extension',
             sources=[
+                'csrc/init.cpp',
                 'csrc/triangular_mesh.cpp',
-                'csrc/distpart.cpp'
+                'csrc/distpart.cpp',
             ],
             extra_compile_args=['-fopenmp']
         )
