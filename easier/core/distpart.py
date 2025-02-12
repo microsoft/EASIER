@@ -267,10 +267,13 @@ def merge_vertexes(prev_lv: CoarseningLevel, cnv: int, cmap: torch.Tensor) -> Co
     vwgts_unmerged_to_others = []
     for w in range(dist_env.world_size):
         c_start_w, c_end_w = c_dist_config.get_start_end(w)
-        mask_to_w = torch.logical_and(c_start_w <= cvids_unmerged, cvids_unmerged < c_end_w)
+        mask_row_to_w = torch.logical_and(
+            c_start_w <= cvids_unmerged,
+            cvids_unmerged < c_end_w
+        )
 
-        cvids_unmerged_w = cvids_unmerged[mask_to_w]
-        vwgts_unmerged_w = prev_lv.vertex_weights[mask_to_w]
+        cvids_unmerged_w = cvids_unmerged[mask_row_to_w]
+        vwgts_unmerged_w = prev_lv.vertex_weights[mask_row_to_w]
         cvids_unmerged_to_others.append(cvids_unmerged_w)
         vwgts_unmerged_to_others.append(vwgts_unmerged_w)
 
@@ -309,14 +312,137 @@ def merge_vertexes(prev_lv: CoarseningLevel, cnv: int, cmap: torch.Tensor) -> Co
 
     assert torch.all(colidx_cmapped[mask_mappable_w] != -1, "all mapped")
 
+    # TODO may be too wasty, but having the same padded length simplify
+    # the use of index_copy_, otherwise we have to use scatter_ to deal with
+    # different padded lengths.
+    gmax_row_size = (rowptr[1:] - rowptr[:-1]).max()
+    gmax_row_size = int(dist_env.all_gather_into_tensor(gmax_row_size).sum())
+
+    cadj_lists_to_others = []
+    cadjw_lists_to_others = []
+
     # reuse cvids_unmerged = cmap[arange(start,end)]
+    for w in range(dist_env.world_size):
+        c_start_w, c_end_w = c_dist_config.get_start_end(w)
+        # TODO this is calculated again, maybe we can merge this loop with
+        # the above loop, but balancing clarity.
+        mask_row_to_w = torch.logical_and(
+            c_start_w <= cvids_unmerged,
+            cvids_unmerged < c_end_w
+        )
+        rowptr_begins_to_w = rowptr[:-1][mask_row_to_w]
+        rowptr_ends_to_w = rowptr[1:][mask_row_to_w]
+        # for begin_end in zip(rowptr_begins, rowptr_ends):
+        # each such pair decides a range we need to slice out from
+        # `colidx_cmapped`, which preserves the CSR format and structure.
+
+        csr_stacker = CsrRowsStacker(rowptr_begins_to_w, rowptr_ends_to_w, colidx_length=colidx_cmapped.shape[0], width=gmax_row_size,)
+        # Both these have their rows 1:1 corresponding
+        # to rows of cvids_unmerged_on_this[w]
+        cadj_to_w = csr_stacker.stack(colidx_cmapped)
+        cadjw_to_w = csr_stacker.stack(adjwgt)
+
+        cadj_lists_to_others.append(cadj_to_w)
+        cadjw_lists_to_others.append(cadjw_to_w)
+
+    # reuse cvids_unmerged_on_this, the All2All result
+    cvids_unmerged_on_this: List[torch.Tensor]
+    cadj_lists_on_this = dist_env.all_to_all(cadj_lists_to_others)
+    cadjw_lists_on_this = dist_env.all_to_all(cadjw_lists_to_others)
+
+    # Count for each coarser vertexes, how many workers send adjlists to this.
+    c_adjlists_ns = torch.zeros((c_end - c_start,), dtype=torch.int64)
+    for w in range(dist_env.world_size):
+        c_adjlists_ns.scatter_add_(
+            dim=0,
+            index=cvids_unmerged_on_this[w] - c_start,
+            src=torch.tensor([1], dtype=torch.int64).expand((cvids_unmerged_on_this[w].shape[0],))
+        )
+    # or simply, use world_size as the max
+    max_adjlists_n = int(c_adjlists_ns.max())
+
+    def _groupby_cvids(whatlist):
+        buffer = torch.full((c_end - c_start, max_adjlists_n, gmax_row_size), fill_value=-1, dtype=torch.int64)
+        # values in range(0, maxn)
+        row_seen = torch.zeros((c_end - c_start,), dtype=torch.int64)
+        for w in range(dist_env.world_size):
+            # NOTE c_rows contains duplicate! CANNOT be used directly as index
+            c_rows = cvids_unmerged_on_this[w] - c_start
+
+            # for cr in c_rows:
+            #   seen = row_seen[cr]
+            #   idx.append(cr * width + seen)
+            #   row_seen[cr] += 1
+
+        return buffer.reshape((c_end - c_start, -1))
+
+    cadj_unmerged = _groupby_cvids(cadj_lists_on_this)
+    cadjw_unmerged = _groupby_cvids(cadjw_lists_on_this)
+
+    # filter out cells of cadj which is cvids owned by this worker,
+    # these mean interior edges, such edges and their adjweights are discarded.
+    interior_edge_mask = torch.logical_and(c_start <= cadj_unmerged, cadj_unmerged < c_end)
+    cadj_unmerged[interior_edge_mask] = -1
+
+    # NOTE there may be some rows do not have -1 padding at all.
+    cadj_to_unique, sort_pos = cadj_unmerged.sort(dim=1)
+
+
+
+
     
+
+
+def get_histogram_mask(row_sizes: torch.Tensor, width: int):
+    nrows = row_sizes.shape[0]
+
+    # This "rises" resemble the point where data jumps to 1 or falls to 0 in
+    # signal encoding.
+    rises = torch.zeros((nrows * width,), dtype=torch.int8)
+    rises[torch.arange(nrows) * width] = 1
+    rises.scatter_add_(
+        dim=0,
+        index=(torch.arange(nrows) * width + row_sizes),
+        src=torch.tensor([-1], dtype=torch.int8).expand((nrows,))
+    )
+    levels = torch.cumsum(rises, dim=0, dtype=torch.int8)
+
+    return levels == 1
+
+class CsrRowsStacker:
+    """
+    Select rows with padding, and densely stack all padded rows.
+    """
+    def __init__(self, rowptr_begins: torch.Tensor, rowptr_ends: torch.Tensor, colidx_length: int, width: Optional[int] = None) -> None:
+        row_sizes = rowptr_ends - rowptr_begins
+        max_row_size = int(row_sizes.max())
+        if width is None:
+            width = max_row_size
+        else:
+            assert width >= max_row_size
+        nrows = rowptr_begins.shape[0]
+
+        self.nrows = nrows
+        self.width = width
+
+        self.out_mask = get_histogram_mask(row_sizes, width)
+
+        col_rises = torch.zeros((colidx_length,), dtype=torch.int8)
+        col_rises[rowptr_begins] = 1
+        col_rises.scatter_add_(
+            dim=0,
+            index=rowptr_ends,
+            src=torch.tensor([-1], dtype=torch.int8).expand((colidx_length,))
+        )
+        col_levels = torch.cumsum(col_rises, dim=0, dtype=torch.int8)
+        self.col_mask = col_levels == 1
+
+    def stack(self, col_data: torch.Tensor, padding_value = -1):
+        buffer = torch.full((self.nrows, self.width), fill_value=padding_value, dtype=col_data.dtype)
+        buffer.view(-1)[self.out_mask] = col_data[self.col_mask]
+        return buffer
+
         
-
-
-
-
-
 
 def part_kway(
     rowptr, colidx, adjwgt
