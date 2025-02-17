@@ -76,8 +76,10 @@ class CoarseningLevel:
     # the value of cmap is the global ID of coarser vertex in this level.
     cmap: torch.Tensor
 
+
+
 # TODO move cmap out of CoarseningLevel, then we can group most args into CnLv.
-def coarsen_level(
+def coarsen_level2(
     rowptr: torch.Tensor,
     colidx: torch.Tensor,
     rowwgt: torch.Tensor,
@@ -240,6 +242,147 @@ def coarsen_level(
         w_last_cnv_allocated + w_assigned_n + w_unmatched_n  # type: ignore
     
     return merge_vertexes(rowptr, colidx, rowwgt, adjwgt, dist_config, cnv, coarser_vid_map)
+
+
+def coarsen_level(
+    rowptr: torch.Tensor,
+    colidx: torch.Tensor,
+    rowwgt: torch.Tensor,
+    adjwgt: torch.Tensor,
+    dist_config: DistConfig,
+    max_vertex_weight: int
+) -> CoarseningLevel:
+    dist_env = get_runtime_dist_env()
+
+    start, end = dist_config.get_start_end()
+    assert rowptr.shape[0] -1 == end - start
+
+    ########
+    # Each worker independently calculates heavy-edge matching
+    ########
+
+    # local vids to global vids
+    matched = torch.full((end - start,), fill_value=-1, dtype=torch.int64)
+
+    # int(?, 2): both values are global IDs, but the [:, 0] are held by this worker.
+    # matched_vid_pairs = torch.full((end - start, 2), fill_value=-1, dtype=torch.int64)
+
+    # TODO make later workers have more rows to process
+
+    # NOTE `matched` and `matched_vid_pairs` vectors are updated
+    # within this C call.
+    n_matches = _C.locally_match_heavy_edge(
+        start,
+        end,
+        matched,
+        rowptr,
+        colidx,
+        rowwgt,
+        adjwgt,
+        max_vertex_weight,
+        matched_vid_pairs
+    )
+    # Possible value of matched[x]:
+    # -1 
+    #   unmatched
+    # end <= matched[x]
+    #   matched with remote vertexes
+    # x + start < matched[x] < end
+    #   matching invoker, matched with local vertexes (colocated)
+    # start <= matched[x] < start + x
+    #   matched-with vertexes, colocated
+    
+    ########
+    # Assign new vertex IDs for the coarser graph
+    # xxxx and broadcast the ID assignments to where the vertexes are held
+    ########
+
+    # Replicated parameter
+    cnv_allocated = 0
+
+    # Old IDs of local vertexes to coarser IDs
+    coarser_vid_map = torch.full((end - start,), fill_value=-1, dtype=torch.int64)
+    def _assert_cmap_no_overlap(new_range):
+        assert torch.all(coarser_vid_map[new_range] == -1)
+
+    for w in range(dist_env.world_size - 1, -1, -1):
+        w_start, w_end = dist_config.get_start_end(w)
+
+        if w == dist_env.rank:
+            # Vertexes of too big weights are skipped or not matched with
+            unmatched_mask = matched == -1
+            this_unmatched_n = int(unmatched_mask.count_nonzero())
+            _assert_cmap_no_overlap(unmatched_mask)
+            coarser_vid_map[unmatched_mask] = torch.arange(
+                cnv_allocated,
+                cnv_allocated + this_unmatched_n,
+                dtype=torch.int64
+            )
+
+            # "Colocated pairs" are match pairs whose vertexes are both on
+            # this worker, their cmap[x] values are the same.
+            #
+            # Such vertexes will have no remoting matching, so here we are
+            # the first time processing and assigning coarser IDs for them.
+            colocated_mask = torch.logical_and(
+                matched < end,  # be in colocated pairs
+                torch.arange(start, end) < matched  # be matching invokers
+                # not `arange() <=` because of no self-edge
+            )
+            colocated_from_lvid = torch.arange(start, end)[colocated_mask]
+            colocated_to_gvid = matched[colocated_mask]
+            this_colocated_n = colocated_from_lvid.shape[0]
+            colocated_cvids = torch.arange(
+                cnv_allocated + this_unmatched_n,
+                cnv_allocated + this_unmatched_n + this_colocated_n,
+                dtype=torch.int64
+            )
+            _assert_cmap_no_overlap(colocated_from_lvid)
+            coarser_vid_map[colocated_from_lvid] = colocated_cvids
+            _assert_cmap_no_overlap(colocated_to_gvid - start)
+            coarser_vid_map[colocated_to_gvid - start] = colocated_cvids
+
+            # NOTE Remaining `matched` elements are local vertexes
+            # that are matching with remote vertexes (on subsequent workers),
+            # they are processed in the `if rank < w:` part beblow in previous
+            # iterations of those subsequent workers.
+            assert torch.all(coarser_vid_map != -1), \
+                "All local vertexes should be assigned with coarser IDs"
+
+            # TODO make a masked broadcast for only (rank < w) workers.
+            w_cmap = dist_env.broadcast(w, coarser_vid_map)
+
+            [cnv_allocated] = dist_env.broadcast_object_list(w, [
+                cnv_allocated + this_unmatched_n + this_colocated_n
+            ])
+
+        else:
+            w_cmap = dist_env.broadcast(w, shape=(w_end - w_start,), dtype=torch.int64)
+
+            [cnv_allocated] = dist_env.broadcast_object_list(w)
+        # end if rank == w
+
+        if dist_env.rank < w:
+            # Align with w's cvids
+            remote_matching_on_w_mask = torch.logical_and(
+                w_start <= matched,
+                matched < w_end
+            )
+            _assert_cmap_no_overlap(remote_matching_on_w_mask)
+            coarser_vid_map.masked_scatter_(
+                remote_matching_on_w_mask,
+                w_cmap[remote_matching_on_w_mask]
+            )
+        # end if rank < w
+    # end for w in range(world_size)
+
+    return merge_vertexes(rowptr, colidx, rowwgt, adjwgt, dist_config, cnv_allocated, coarser_vid_map)
+
+
+
+
+        
+
 
 
 def merge_vertexes(
@@ -511,10 +654,10 @@ def part_kway(
     nv = sum(local_nvs)
     per_worker_n = local_nvs[0]
 
-    cur_rowptr = rowptr
-    cur_colidx = colidx
-    cur_vwgt = torch.ones_like(rowptr)
-    cur_adjw = adjwgt
+    cur_rowptr = rowptr.to(torch.int64)
+    cur_colidx = colidx.to(torch.int64)
+    cur_vwgt = torch.ones_like(rowptr, dtype=torch.int64)
+    cur_adjw = adjwgt.to(torch.int64)
     cur_dist_config = DistConfig(nv, per_worker_n)
 
     levels: List[CoarseningLevel] = []

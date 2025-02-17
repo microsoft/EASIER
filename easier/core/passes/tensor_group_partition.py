@@ -98,18 +98,25 @@ def parallel_partition_graph(
     graph.setdiag(0, off_diag)
     graph = graph.tocsr()
 
-    comm = get_mpi_communicator()
-    # `ncuts` is already summed up and replicated;
-    # `local_membership` works like this:
-    #   the result of`AllGather(local_membership)` is the result of
-    #   non-distributed version of graph partitioning.
-    ncuts, local_membership = parmetis.part_kway(
-        world_size, graph.indptr, graph.indices, vtxdist, comm,
-        adjwgt=graph.data)
+    # comm = get_mpi_communicator()
+    # # `ncuts` is already summed up and replicated;
+    # # `local_membership` works like this:
+    # #   the result of`AllGather(local_membership)` is the result of
+    # #   non-distributed version of graph partitioning.
+    # ncuts, local_membership = parmetis.part_kway(
+    #     world_size, graph.indptr, graph.indices, vtxdist, comm,
+    #     adjwgt=graph.data)
 
-    local_membership = torch.tensor(local_membership)
+    # local_membership = torch.tensor(local_membership)
 
-    return ncuts, local_membership
+    from easier.core.distpart import part_kway
+    local_membership = part_kway(
+torch.from_numpy(        graph.indptr),
+torch.from_numpy(        graph.indices),
+torch.from_numpy(        graph.data)
+    )
+
+    return 0, local_membership
 
 
 @dataclass
