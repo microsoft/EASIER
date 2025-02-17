@@ -47,6 +47,8 @@ class DistConfig:
             end = self.nv
         return start, end
 
+class _OneRankDistConfig(DistConfig):
+    pass
 
 @dataclass
 class CoarseningLevel:
@@ -70,217 +72,55 @@ class CoarseningLevel:
     colidx: torch.Tensor
     adjwgt: torch.Tensor
 
-    # For CoarseningLevel-i to CoarsenLevel-(i+1), the cmap is stored in
-    # level (i+1).
-    # The length of cmap is the local vertex number for previous level,
-    # the value of cmap is the global ID of coarser vertex in this level.
-    cmap: torch.Tensor
+    def gather(self, dst_rank: int):
+        """
+        Gather all pieces from all workers, reconstruct them into a valid
+        individual CSR data.
+        """
+        dist_env = get_runtime_dist_env()
+        rowptrs = dist_env.gather(dst_rank, self.rowptr)
+        colidxs = dist_env.gather(dst_rank, self.colidx)
+        vwgts = dist_env.gather(dst_rank, self.vertex_weights)
+        adjws = dist_env.gather(dst_rank, self.adjwgt)
+        if dist_env.rank == dst_rank:
+            assert rowptrs is not None
+            assert colidxs is not None
+            assert vwgts is not None
+            assert adjws is not None
 
 
-
-# TODO move cmap out of CoarseningLevel, then we can group most args into CnLv.
-def coarsen_level2(
-    rowptr: torch.Tensor,
-    colidx: torch.Tensor,
-    rowwgt: torch.Tensor,
-    adjwgt: torch.Tensor,
-    dist_config: DistConfig,
-    max_vertex_weight: int
-) -> CoarseningLevel:
-    """
-    # Do multi-level coarsening on all workers.
-    Coarsen for one level on all workers,
-    Rather than fully collectively, it's run in a sequential manner
-    from worker-0 to the last worker,
-    with each worker coarsening its own part of adjacency matrix and
-    broadcasting its matching result to others.
-
-    Remarks:
-    -   Given the nature of vertex degrees of the mesh, we don't sort vertexes
-        by degrees first.
-    -   As we aim to coarsen to certain level and then delegate
-        deeper coarsening and partitioning to METIS, we only do
-        heavy-edge matching (HEM) here, without 2-hop matching (i.e. match
-        vertexes that both are neighbours of same vertex.)
-    """
-    dist_env = get_runtime_dist_env()
-
-    start, end = dist_config.get_start_end()
-    assert rowptr.shape[0] -1 == end - start
-
-    # max_vertex_weight = int(1.5 * total_vwgt // coarsen_to)
-    
-    # local vids to global vids
-    matched = torch.full((end - start,), fill_value=-1, dtype=torch.int64)
-    masked_colidx = colidx.clone()
-    
-    # old IDs to coarser IDs
-    coarser_vid_map = torch.full((end - start,), fill_value=-1, dtype=torch.int64)
-
-    cnv_allocated = 0
-
-    for w in range(dist_env.world_size):
-        if w == dist_env.rank:
-            # int(?, 2): both values are global IDs, but the [:, 0] are held by this worker.
-            matched_vid_pairs = torch.full((end - start, 2), fill_value=-1, dtype=torch.int64)
-
-            # NOTE `matched` vector is updated within this C call
-            n_new_matches = _C.locally_match_heavy_edge(
-                start,
-                end,
-                matched,
-                rowptr,
-                masked_colidx,
-                rowwgt,
-                adjwgt,
-                max_vertex_weight,
-                matched_vid_pairs
-            )
-            matched_vid_pairs = matched_vid_pairs[:n_new_matches, :]
-
-            assert torch.all(
-                start < matched_vid_pairs[:, 1]
-            ), "Never result in matching with vertexes on previous workers"
-
-            ########
-            # Broadcast the whole result, to mask out adj list for each worker.
-            ########
-            dist_env.broadcast_object_list(w, [matched_vid_pairs.shape[0]])
-            w_matched_pairs = dist_env.broadcast(w, matched_vid_pairs)
-
-            ########
-            # Assign new vertex IDs for the coarser graph
-            # and broadcast the ID assignments to where the vertexes are held
-            ########
-            unmatched_mask = matched == -1
-            this_unmatched_n = int(unmatched_mask.count_nonzero())
-            coarser_vid_map[unmatched_mask] = torch.arange(
-                cnv_allocated,
-                cnv_allocated + this_unmatched_n,
-                dtype=torch.int64
-            )
-
-            # A matching will be stored twice, we only count once on the
-            # less-than case (including two vertexes are both on this worker,
-            # or the other is remote).
-            this_assigned_to = matched_vid_pairs[:, 0]
-            tell_cvids_to = matched_vid_pairs[:, 1]
-            assert torch.all(
-                this_assigned_to < tell_cvids_to
-            ), \
-                "Symmetric adjmat and adjw should always lead to" \
-                "match with subsequent row"
-
-            this_assigned_cvids = torch.arange(
-                cnv_allocated,
-                cnv_allocated + n_new_matches,
-                dtype=torch.int64
-            )
-            coarser_vid_map[this_assigned_to - start] = this_assigned_cvids
-
-            # Update coarser vid map for local part
-            self_tell_mask = torch.logical_and(
-                start <= tell_cvids_to,
-                tell_cvids_to < end
-            )
-            coarser_vid_map[
-                tell_cvids_to[self_tell_mask] - start
-            ] = this_assigned_cvids[self_tell_mask]
-
-            [
-                w_last_cnv_allocated, w_assigned_n, w_unmatched_n 
-            ] = dist_env.broadcast_object_list(w, [
-                cnv_allocated, n_new_matches, this_unmatched_n
-            ])
-
-            w_tell_cvids_to = dist_env.broadcast(w, tell_cvids_to)
+            return CoarseningLevel()
 
         else:
-            # TODO all previous workers are involved in this broadcast, but
-            [npairs] = dist_env.broadcast_object_list(w)
-            w_matched_pairs = dist_env.broadcast(w, shape=(npairs, 2), dtype=torch.int64)
+            return None
 
-            # Till it reaches the point when this worker runs HEM matching,
-            # it keeps overwriting these values the worker received.
-            [ 
-                w_last_cnv_allocated, w_assigned_n, w_unmatched_n
-            ] = dist_env.broadcast_object_list(w)
-            w_tell_cvids_to = dist_env.broadcast(w, shape=(w_assigned_n,), dtype=torch.int64)
-        # end if w == rank
-
-        cnv_allocated = w_last_cnv_allocated + w_assigned_n + w_unmatched_n
-
-        if dist_env.rank > w:
-            # Subsequent workers update their matched records
-            to_this_mask = torch.logical_and(
-                start <= w_matched_pairs[:, 1],
-                w_matched_pairs[:, 1] < end
-            )
-            to_this_pairs = w_matched_pairs[to_this_mask]
-            matched[to_this_pairs[:, 1] - start] = to_this_pairs[:, 0]
-
-            # ... and mask out their adjmat cells
-            masked_colidx[torch.isin(masked_colidx, w_matched_pairs)] = -1
-
-            # Update coarser vid map for matching resulted by prev workers.
-            w_tell_mask = torch.logical_and(
-                start <= w_tell_cvids_to,
-                w_tell_cvids_to < end
-            )
-            coarser_vid_map[
-                w_tell_cvids_to[w_tell_mask] - start
-            ] = torch.arange(
-                w_last_cnv_allocated, w_last_cnv_allocated + w_assigned_n
-            )[w_tell_cvids_to]
-        # end if rank > w
-    # end for w in range(world_size)
-    matched = None
-    masked_colidx = None
-    cnv_allocated = None
-
-    cnv: int = \
-        w_last_cnv_allocated + w_assigned_n + w_unmatched_n  # type: ignore
-    
-    return merge_vertexes(rowptr, colidx, rowwgt, adjwgt, dist_config, cnv, coarser_vid_map)
 
 
 def coarsen_level(
-    rowptr: torch.Tensor,
-    colidx: torch.Tensor,
-    rowwgt: torch.Tensor,
-    adjwgt: torch.Tensor,
-    dist_config: DistConfig,
-    max_vertex_weight: int
-) -> CoarseningLevel:
+    prev_lv: CoarseningLevel, max_vertex_weight: int
+) -> Tuple[CoarseningLevel, torch.Tensor]:
+
     dist_env = get_runtime_dist_env()
 
-    start, end = dist_config.get_start_end()
-    assert rowptr.shape[0] -1 == end - start
+    # TODO make later workers have more rows to process
+    start, end = prev_lv.dist_config.get_start_end()
+    assert prev_lv.rowptr.shape[0] -1 == end - start
 
     ########
     # Each worker independently calculates heavy-edge matching
     ########
-
     # local vids to global vids
     matched = torch.full((end - start,), fill_value=-1, dtype=torch.int64)
-
-    # int(?, 2): both values are global IDs, but the [:, 0] are held by this worker.
-    # matched_vid_pairs = torch.full((end - start, 2), fill_value=-1, dtype=torch.int64)
-
-    # TODO make later workers have more rows to process
-
-    # NOTE `matched` and `matched_vid_pairs` vectors are updated
-    # within this C call.
-    n_matches = _C.locally_match_heavy_edge(
+    # NOTE `matched` vector is updated within this C call.
+    _C.locally_match_heavy_edge(
         start,
         end,
         matched,
-        rowptr,
-        colidx,
-        rowwgt,
-        adjwgt,
-        max_vertex_weight,
-        matched_vid_pairs
+        prev_lv.rowptr,
+        prev_lv.colidx,
+        prev_lv.vertex_weights,
+        prev_lv.adjwgt,
+        max_vertex_weight
     )
     # Possible value of matched[x]:
     # -1 
@@ -296,17 +136,15 @@ def coarsen_level(
     # Assign new vertex IDs for the coarser graph
     # xxxx and broadcast the ID assignments to where the vertexes are held
     ########
+    cnv_allocated = 0  # replicated
 
-    # Replicated parameter
-    cnv_allocated = 0
-
-    # Old IDs of local vertexes to coarser IDs
+    # Old local IDs of owned vertexes to coarser IDs
     coarser_vid_map = torch.full((end - start,), fill_value=-1, dtype=torch.int64)
     def _assert_cmap_no_overlap(new_range):
         assert torch.all(coarser_vid_map[new_range] == -1)
 
     for w in range(dist_env.world_size - 1, -1, -1):
-        w_start, w_end = dist_config.get_start_end(w)
+        w_start, w_end = prev_lv.dist_config.get_start_end(w)
 
         if w == dist_env.rank:
             # Vertexes of too big weights are skipped or not matched with
@@ -364,46 +202,77 @@ def coarsen_level(
 
         if dist_env.rank < w:
             # Align with w's cvids
-            remote_matching_on_w_mask = torch.logical_and(
+            remote_matched_on_w_mask = torch.logical_and(
                 w_start <= matched,
                 matched < w_end
             )
-            _assert_cmap_no_overlap(remote_matching_on_w_mask)
+            _assert_cmap_no_overlap(remote_matched_on_w_mask)
             coarser_vid_map.masked_scatter_(
-                remote_matching_on_w_mask,
-                w_cmap[remote_matching_on_w_mask]
+                remote_matched_on_w_mask,
+                w_cmap[matched[remote_matched_on_w_mask]]
             )
         # end if rank < w
     # end for w in range(world_size)
 
-    return merge_vertexes(rowptr, colidx, rowwgt, adjwgt, dist_config, cnv_allocated, coarser_vid_map)
-
-
-
-
-        
-
-
+    new_lv = merge_vertexes(
+        prev_lv, cnv_allocated, coarser_vid_map
+    )
+    return new_lv, coarser_vid_map
 
 def merge_vertexes(
-    rowptr: torch.Tensor,
-    colidx: torch.Tensor,
-    rowwgt: torch.Tensor,
-    adjwgt: torch.Tensor,
-    dist_config: DistConfig,
-    cnv: int,
-    cmap: torch.Tensor
+    prev_lv: CoarseningLevel, cnv: int, cmap: torch.Tensor
 ) -> CoarseningLevel:
     """
-    Collectively merge vertexes into coarser vertexes, summing up their weights
-    and unifying edges.
+    Collectively merge vertexes into coarser vertexes, sum up their weights,
+    merge their adj lists.
+
+    E.g.
+    Given cmap { 2=>A, 5=>B, 6=>A } on this worker and many cmaps
+    from other workers,
+    we can map the adj mat:
+
+    | 2 |  5  6  8  9
+    | 5 |  9 11 15
+    | 6 |  9 15
+
+    to (cX are for other coarser vertexes)
+
+    #cvids_unmerged
+         #cadj_unmerged
+    #~~~ #~~~~~~~~~~~    
+    | A |  B  A c8 c9           # row_size = 4
+    | B | c9 c1 c5
+    | A | c9 c5                 # row_size = 2
+
+    Then on the worker that coarser vertex A is located:
+
+         # concat(cadj_on_this)
+         #~~~~~~~~~~~~~~~~~
+    | A |  B  A c8 c9 c9 c5     # row_size = 4+2
+
+    By repeating coarser ID for row, A, by row_size times, and pair with
+    coarser adjacent IDs, we get the COO data:
+
+    [
+        (A, B),
+        (A, A),
+        (A, c8),
+        (A, c9),
+        (A, c9),
+        (A, c5),
+    ]
+
+    Then construct csr_matrix with the COO data, and remove self-edges:
+
+    | A |  B c8 c9 c5
 
     Args:
     - cnv: the number of vertexes in the coarser graph, coarser vertexes
         are evenly distributed.
     - cmap: size of (end-start,) for old graph, mapping local vertex ID to
         new ID (in `range(cnv)`) in the coarser graph.
-        To each new ID there are at most 2 old vertexes mapped.
+        To each new ID there may be many (even more than world_size)
+        old vertexes mapped.
     """
     dist_env = get_runtime_dist_env()
 
@@ -414,20 +283,24 @@ def merge_vertexes(
     ########
     # All2All to collect old vwgts for coarser vertexes
     ########
-    start, end = dist_config.get_start_end()
+    start, end = prev_lv.dist_config.get_start_end()
 
-    cvids_unmerged = cmap[torch.arange(start, end)]
+    # Collect mapped coarser vertexes to where they are located (in a sense of
+    # coarser graph).
+    #
+    # "Unmerged" means, given cmap is a many-1 mapping, several old vertexes
+    # are mapped to the same coarser vertex, we are yet to merge
+    # old vertexes' weights and adj lists.
     cvids_unmerged_to_others = []
     vwgts_unmerged_to_others = []
     for w in range(dist_env.world_size):
         c_start_w, c_end_w = c_dist_config.get_start_end(w)
-        mask_row_to_w = torch.logical_and(
-            c_start_w <= cvids_unmerged,
-            cvids_unmerged < c_end_w
+        row_coarsened_to_w_mask = torch.logical_and(
+            c_start_w <= cmap, cmap < c_end_w
         )
 
-        cvids_unmerged_to_w = cvids_unmerged[mask_row_to_w]
-        vwgts_unmerged_to_w = rowwgt[mask_row_to_w]
+        cvids_unmerged_to_w = cmap[row_coarsened_to_w_mask]
+        vwgts_unmerged_to_w = prev_lv.vertex_weights[row_coarsened_to_w_mask]
         cvids_unmerged_to_others.append(cvids_unmerged_to_w)
         vwgts_unmerged_to_others.append(vwgts_unmerged_to_w)
 
@@ -447,9 +320,9 @@ def merge_vertexes(
     # Broadcast all cmaps, each worker uses it to map its adjmat CSR,
     # then All2All to store new adjmat along with coarser vertexes.
     ########
-    cadj_unmerged = torch.full_like(colidx, fill_value=-1)
+    cadj_unmerged = torch.full_like(prev_lv.colidx, fill_value=-1, dtype=torch.int64)
     for w in range(dist_env.world_size):
-        start_w, end_w = dist_config.get_start_end(w)
+        start_w, end_w = prev_lv.dist_config.get_start_end(w)
         if w == dist_env.rank:
             cmap_w = dist_env.broadcast(w, cmap)
         else:
@@ -457,59 +330,51 @@ def merge_vertexes(
                 w, shape=(end_w - start_w,), dtype=torch.int64
             )
 
-        # NOTE do not recursive manipulate adjmat, avoiding mixing vids
-        # of old graph and coarser graph.
-        cmap_w_mappable = torch.logical_and(start_w <= colidx, colidx < end_w)
-        assert torch.all(cadj_unmerged[cmap_w_mappable] == -1, "no overlap")
+        cmap_w_mappable = torch.logical_and(
+            start_w <= prev_lv.colidx, prev_lv.colidx < end_w
+        )
+        assert torch.all(cadj_unmerged[cmap_w_mappable] == -1), "no overlap"
         
         # "by_w" means its mappable part is mapped by cmap held by w, i.e.
         # whose domain is [start_w, end_w), but the codomain crosses workers.
-        cadj_by_w = cmap_w[colidx[cmap_w_mappable]]
+        cadj_by_w = cmap_w[prev_lv.colidx[cmap_w_mappable]]
 
         cadj_unmerged[cmap_w_mappable] = cadj_by_w
-    assert torch.all(cadj_unmerged[cmap_w_mappable] != -1, "all mapped")
-
-    # TODO may be too wasty, but having the same padded length simplify
-    # the use of index_copy_, otherwise we have to use scatter_ to deal with
-    # different padded lengths.
-    gmax_row_size = (rowptr[1:] - rowptr[:-1]).max()
-    gmax_row_size = int(dist_env.all_gather_into_tensor(gmax_row_size).sum())
+    assert torch.all(cadj_unmerged[cmap_w_mappable] != -1), "all mapped"
 
     row_sizes_to_others = []
-    cadj_to_others = []
-    adjw_to_others = []
+    cadj_unmerged_to_others = []
+    adjw_unmerged_to_others = []
 
-    # reuse cvids_unmerged = cmap[arange(start,end)]
+
     for w in range(dist_env.world_size):
         c_start_w, c_end_w = c_dist_config.get_start_end(w)
-        # TODO this is calculated again, maybe we can merge this loop with
+        # TODO this mask is calculated again, maybe we can merge this loop with
         # the above loop, but balancing clarity.
-        mask_row_to_w = torch.logical_and(
-            c_start_w <= cvids_unmerged,
-            cvids_unmerged < c_end_w
+        row_coarsened_to_w_mask = torch.logical_and(
+            c_start_w <= cmap, cmap < c_end_w
         )
-        rowptr_begins_to_w = rowptr[:-1][mask_row_to_w]
-        rowptr_ends_to_w = rowptr[1:][mask_row_to_w]
-        # for begin_end in zip(rowptr_begins, rowptr_ends):
-        # each such pair decides a range we need to slice out from
-        # `colidx_cmapped`, which preserves the CSR format and structure.
+        to_w_rowptr_begins = prev_lv.rowptr[:-1][row_coarsened_to_w_mask]
+        to_w_rowptr_ends = prev_lv.rowptr[1:][row_coarsened_to_w_mask]
 
-        row_sizes_to_w = rowptr_ends_to_w - rowptr_begins_to_w
+        to_w_row_sizes = to_w_rowptr_ends - to_w_rowptr_begins
 
-        col_mask = get_csr_mask_by_rows(rowptr_begins_to_w, rowptr_ends_to_w, cadj_unmerged.shape[0])
-        cadj_to_w = cadj_unmerged[col_mask]
-        adjw_to_w = adjwgt[col_mask]
-        
-        row_sizes_to_others.append(row_sizes_to_w)
-        cadj_to_others.append(cadj_to_w)
-        adjw_to_others.append(adjw_to_w)
+        col_mask = get_csr_mask_by_rows(
+            to_w_rowptr_begins, to_w_rowptr_ends, cadj_unmerged.shape[0]
+        )
+        cadj_unmerged_to_w = cadj_unmerged[col_mask]
+        adjw_unmergedto_w = prev_lv.adjwgt[col_mask]
 
+        row_sizes_to_others.append(to_w_row_sizes)
+        cadj_unmerged_to_others.append(cadj_unmerged_to_w)
+        adjw_unmerged_to_others.append(adjw_unmergedto_w)
 
     # reuse cvids_unmerged_on_this, the All2All result
     cvids_unmerged_on_this: List[torch.Tensor]
+
     row_sizes_on_this = dist_env.all_to_all(row_sizes_to_others)
-    cadj_on_this = dist_env.all_to_all(cadj_to_others)
-    adjw_on_this = dist_env.all_to_all(adjw_to_others)
+    cadj_unmerged_on_this = dist_env.all_to_all(cadj_unmerged_to_others)
+    adjw_unmerged_on_this = dist_env.all_to_all(adjw_unmerged_to_others)
 
     # NOTE either in a single `cvids_unmerged_from_w` or among all
     # `cvids_unmerged_on_this` these are duplicated coarser vids!
@@ -520,14 +385,14 @@ def merge_vertexes(
     # edge weights accordingly.
     xs_pieces = []
     for w in range(dist_env.world_size):
-        cvids_unmerged_from_w = cvids_unmerged_on_this[w] - c_start
-        row_sizes_from_w = row_sizes_on_this[w]
+        cvids_unmerged_submat = cvids_unmerged_on_this[w] - c_start
+        row_sizes_submat = row_sizes_on_this[w]
         xs_pieces.append(
-            torch.repeat_interleave(cvids_unmerged_from_w, row_sizes_from_w)
+            torch.repeat_interleave(cvids_unmerged_submat, row_sizes_submat)
         )
     xs = torch.concat(xs_pieces)
-    ys = torch.concat(cadj_on_this)
-    ws = torch.concat(adjw_on_this)
+    ys = torch.concat(cadj_unmerged_on_this)
+    ws = torch.concat(adjw_unmerged_on_this)
     height = c_end - c_start
     width = c_dist_config.nv
 
@@ -550,7 +415,6 @@ def merge_vertexes(
         c_rowptr,
         c_colidx,
         c_adjw,
-        cmap
     )
     return c_lv
 
@@ -579,60 +443,6 @@ def get_csr_mask_by_rows(rowptr: torch.Tensor, row_mask: torch.Tensor, nnz: int)
     return col_mask
 
 
-    
-
-
-# def get_histogram_mask(row_sizes: torch.Tensor, width: int):
-#     nrows = row_sizes.shape[0]
-
-#     # This "rises" resemble the point where data jumps to 1 or falls to 0 in
-#     # signal encoding.
-#     rises = torch.zeros((nrows * width,), dtype=torch.int8)
-#     rises[torch.arange(nrows) * width] = 1
-#     rises.scatter_add_(
-#         dim=0,
-#         index=(torch.arange(nrows) * width + row_sizes),
-#         src=torch.tensor([-1], dtype=torch.int8).expand((nrows,))
-#     )
-#     levels = torch.cumsum(rises, dim=0, dtype=torch.int8)
-
-#     return levels == 1
-
-# class CsrRowsStacker:
-#     """
-#     Select rows with padding, and densely stack all padded rows.
-#     """
-#     def __init__(self, rowptr_begins: torch.Tensor, rowptr_ends: torch.Tensor, colidx_length: int, width: Optional[int] = None) -> None:
-#         row_sizes = rowptr_ends - rowptr_begins
-#         max_row_size = int(row_sizes.max())
-#         if width is None:
-#             width = max_row_size
-#         else:
-#             assert width >= max_row_size
-#         nrows = rowptr_begins.shape[0]
-
-#         self.nrows = nrows
-#         self.width = width
-
-#         self.out_mask = get_histogram_mask(row_sizes, width)
-
-#         col_rises = torch.zeros((colidx_length,), dtype=torch.int8)
-#         col_rises[rowptr_begins] = 1
-#         col_rises.scatter_add_(
-#             dim=0,
-#             index=rowptr_ends,
-#             src=torch.tensor([-1], dtype=torch.int8).expand((colidx_length,))
-#         )
-#         col_levels = torch.cumsum(col_rises, dim=0, dtype=torch.int8)
-#         self.col_mask = col_levels == 1
-
-#     def stack(self, col_data: torch.Tensor, padding_value = -1):
-#         buffer = torch.full((self.nrows, self.width), fill_value=padding_value, dtype=col_data.dtype)
-#         buffer.view(-1)[self.out_mask] = col_data[self.col_mask]
-#         return buffer
-
-        
-
 def part_kway(
     rowptr: torch.Tensor,
     colidx: torch.Tensor,
@@ -654,33 +464,35 @@ def part_kway(
     nv = sum(local_nvs)
     per_worker_n = local_nvs[0]
 
-    cur_rowptr = rowptr.to(torch.int64)
-    cur_colidx = colidx.to(torch.int64)
-    cur_vwgt = torch.ones_like(rowptr, dtype=torch.int64)
-    cur_adjw = adjwgt.to(torch.int64)
-    cur_dist_config = DistConfig(nv, per_worker_n)
+    cur_lv = CoarseningLevel(
+        dist_config=DistConfig(nv, per_worker_n),
+        rowptr=rowptr.to(torch.int64),
+        colidx=colidx.to(torch.int64),
+        vertex_weights=torch.ones((local_nv,), dtype=torch.int64),
+        adjwgt=adjwgt.to(torch.int64)
+    )
 
-    levels: List[CoarseningLevel] = []
+    # TODO because we use simple, directedly mapped uncoarsening, without
+    # refinement, we don't need store the CoarseningLevel data.
+    # levels: List[CoarseningLevel] = []
+
+    # For CoarseningLevel-i to CoarsenLevel-(i+1), the cmap is stored in
+    # level (i+1).
+    # The length of cmap is the local vertex number for previous level,
+    # the value of cmap is the global ID of coarser vertex in this level. 
+    cmaps: List[torch.Tensor] = []
+
     for ri_lv in range(5):  # TODO fake
-        lv = coarsen_level(cur_rowptr, cur_colidx, cur_vwgt, cur_adjw, cur_dist_config, 10000)
-        levels.append(lv)
+        new_lv, cmap = coarsen_level(cur_lv, 10000)
 
-        cur_rowptr = lv.rowptr
-        cur_colidx = lv.colidx
-        cur_vwgt = lv.vertex_weights
-        cur_adjw = lv.adjwgt
-        cur_dist_config = lv.dist_config
+        # levels.append(new_lv)
+        cmaps.append(cmap)
+
+        cur_lv = new_lv
+
 
     # Gather to worker-0 and call METIS
-    rowptrs = dist_env.gather(0, cur_rowptr)
-    colidxs = dist_env.gather(0, cur_colidx)
-    vwgts = dist_env.gather(0, cur_vwgt)
-    adjws = dist_env.gather(0, cur_adjw)
-    if dist_env.rank == 0:
-        assert rowptrs is not None
-        assert colidxs is not None
-        assert vwgts is not None
-        assert adjws is not None
+
         bases = torch.tensor([0] + local_nvs, dtype=torch.int64)
         for i in range(dist_env.world_size):
             rowptr_i = rowptrs[i] + bases[i]
