@@ -75,11 +75,6 @@ class CoarseningLevel:
     colidx: torch.Tensor
     adjwgt: torch.Tensor
 
-def get_adj_vwgt():
-    """
-    Given the max_vertex_weight constraint, if the sum of two 
-    """
-    pass
 
 def gather_csr_graph(dst_rank: int, clv: CoarseningLevel
 ) -> Optional[Tuple[
@@ -124,7 +119,7 @@ def gather_csr_graph(dst_rank: int, clv: CoarseningLevel
 
 
 def coarsen_level(
-    prev_lv: CoarseningLevel, max_vertex_weight: int
+    prev_lv: CoarseningLevel
 ) -> Tuple[CoarseningLevel, torch.Tensor]:
 
     dist_env = get_runtime_dist_env()
@@ -145,9 +140,7 @@ def coarsen_level(
         matched,
         prev_lv.rowptr,
         prev_lv.colidx,
-        prev_lv.vertex_weights,
         prev_lv.adjwgt,
-        max_vertex_weight
     )
     # Possible value of matched[x]:
     # -1 
@@ -500,7 +493,7 @@ def distpart_kway(
     cmaps: List[torch.Tensor] = []
 
     for i in range(5):  # TODO fake
-        new_lv, cmap = coarsen_level(cur_lv, 10000)
+        new_lv, cmap = coarsen_level(cur_lv)
         # TODO levels.append(new_lv)
         c_dist_configs.append(new_lv.dist_config)
         cmaps.append(cmap)
@@ -515,7 +508,10 @@ def distpart_kway(
 
         from mgmetis import metis
         ncuts, membership = metis.part_graph_kway(
-            1, rowptr0, colidx0,
+            nparts=dist_env.world_size,
+            xadj=rowptr0,
+            adjncy=colidx0,
+            vwgt=vwgt0,
             adjwgt=adjw0
         )
 
@@ -583,9 +579,9 @@ def part_kway(
         from mgmetis import parmetis
         comm: MPI.Intracomm = MPI.COMM_WORLD
         ncuts, local_membership = parmetis.part_kway(
-            comm.size,
-            rowptr,
-            colidx,
+            nparts=comm.size,
+            xadj=rowptr,
+            adjncy=colidx,
             vtxdist=torch.tensor(
                 [0] + dist_config.local_nvs, dtype=torch.int64
             ).cumsum(dim=0),

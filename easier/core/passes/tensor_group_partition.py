@@ -109,8 +109,9 @@ def parallel_partition_graph(
 
     # local_membership = torch.tensor(local_membership)
 
-    from easier.core.distpart import part_kway
+    from easier.core.distpart import part_kway, DistConfig
     local_membership = part_kway(
+DistConfig(int(vtxdist[-1]), (vtxdist[1:] - vtxdist[:-1]).tolist()),
 torch.from_numpy(        graph.indptr),
 torch.from_numpy(        graph.indices),
 torch.from_numpy(        graph.data)
