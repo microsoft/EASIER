@@ -12,19 +12,22 @@ void locally_match_heavy_edge(
     torch::Tensor matched,
     torch::Tensor rowptr,
     torch::Tensor colidx,
-    torch::Tensor rowwgt,
-    torch::Tensor adjwgt,
-    int64_t max_vertex_weight
+    torch::Tensor adjwgt
 ) {
+    // As we are using a "merge-all-merged" policy, without resolving
+    // distributed matching conflicts,
+    // we don't deal with the constraint of the max vertex weights
+    // in the coarser graphs.
+    // TODO torch::Tensor rowwgt;
+    // TODO torch::Tensor adj_vwgt;
+    // TODO int64_t maxvwgt;
     TORCH_CHECK(matched.is_contiguous());
     TORCH_CHECK(rowptr.is_contiguous());
     TORCH_CHECK(colidx.is_contiguous());
-    TORCH_CHECK(rowwgt.is_contiguous());
     TORCH_CHECK(adjwgt.is_contiguous());
     int64_t *matched_data = matched.data_ptr<int64_t>();
     int64_t *rowptr_data = rowptr.data_ptr<int64_t>();
     int64_t *colidx_data = colidx.data_ptr<int64_t>();
-    int64_t *rowwgt_data = rowwgt.data_ptr<int64_t>();
     int64_t *adjwgt_data = adjwgt.data_ptr<int64_t>();
 
     int64_t local_nv = end - start;
@@ -35,7 +38,7 @@ void locally_match_heavy_edge(
         if (matched_data[row] == -1) {
             if (rowptr_data[row] == rowptr_data[row + 1]) {
                 // isolated vertex, matched with the next unmatched local row,
-                // ignoring maxweight constraint.
+                // ignoring max vertex weight constraint.
                 for (int64_t row2 = row + 1; row2 < local_nv; row2++) {
                     if (matched_data[row2] == -1) {
                         matched_data[row] = row2 + start;
@@ -59,15 +62,15 @@ void locally_match_heavy_edge(
                         continue;
                     }
                     bool is_adj_matched =
-                        adjvid < end ?
-                        matched_data[adjvid - start] :
-                        matched_remote_vids.find(
+                        adjvid < end
+                        ? matched_data[adjvid - start] != -1
+                        : matched_remote_vids.find(
                             adjvid
                         ) != matched_remote_vids.end();
-                    if (!is_adj_matched &&
-                        maxadjw < adjwgt_data[pos] &&
-                        rowwgt_data[row] + adjwgt_data[pos] < max_vertex_weight
+                    if (!is_adj_matched
+                        && maxadjw < adjwgt_data[pos] 
                     ) {
+                        // TODO only if rowwgt[row] + adj_vwgt[pos] <= maxvwgt
                         maxadjvid = adjvid;
                         maxadjw = adjw;
                     }
@@ -89,4 +92,12 @@ void locally_match_heavy_edge(
             }
         }
     }
+}
+
+void pybind_distpart(pybind11::module_ m) {
+    m.def(
+        "locally_match_heavy_edge",
+        &locally_match_heavy_edge,
+        "Locally match heavy edge for each worker in a sequential manner"
+    );
 }

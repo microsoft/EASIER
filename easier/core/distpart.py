@@ -31,24 +31,27 @@ import easier.cpp_extension as _C
 @dataclass
 class DistConfig:
     nv: int
+    local_nvs: List[int]
 
-    # No matter the division is rounding up or down,
-    # first (worldsize-1) workers always have per_worker_nv vertexes.
-    per_worker_nv: int
+    @staticmethod
+    def create_default(nv: int):
+        # TODO use an incremental lengths sequence like [N, N+B, N+2B, ...]
+        # since subsequent workers do less remote matching.
+        dist_env = get_runtime_dist_env()
+        per_worker_n, residue = divmod(nv, dist_env.world_size)
+        local_nvs = [per_worker_n] * dist_env.world_size
+        local_nvs[-1] += residue
+        return DistConfig(nv, local_nvs)
 
     def get_start_end(self, rank=None):
         dist_env = get_runtime_dist_env()
         if rank == None:
             rank = dist_env.rank
 
-        start = self.per_worker_nv * rank
-        end = start + self.per_worker_nv
-        if rank + 1 == dist_env.world_size:
-            end = self.nv
+        start = sum(self.local_nvs[:rank])
+        end = start + self.local_nvs[rank]
         return start, end
 
-class _OneRankDistConfig(DistConfig):
-    pass
 
 @dataclass
 class CoarseningLevel:
@@ -72,27 +75,51 @@ class CoarseningLevel:
     colidx: torch.Tensor
     adjwgt: torch.Tensor
 
-    def gather(self, dst_rank: int):
-        """
-        Gather all pieces from all workers, reconstruct them into a valid
-        individual CSR data.
-        """
-        dist_env = get_runtime_dist_env()
-        rowptrs = dist_env.gather(dst_rank, self.rowptr)
-        colidxs = dist_env.gather(dst_rank, self.colidx)
-        vwgts = dist_env.gather(dst_rank, self.vertex_weights)
-        adjws = dist_env.gather(dst_rank, self.adjwgt)
-        if dist_env.rank == dst_rank:
-            assert rowptrs is not None
-            assert colidxs is not None
-            assert vwgts is not None
-            assert adjws is not None
+def get_adj_vwgt():
+    """
+    Given the max_vertex_weight constraint, if the sum of two 
+    """
+    pass
 
+def gather_csr_graph(dst_rank: int, clv: CoarseningLevel
+) -> Optional[Tuple[
+    List[int],
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]]:
+    """
+    Gather all pieces from all workers, reconstruct them into a valid
+    individual CSR data.
+    """
+    dist_env = get_runtime_dist_env()
+    vwgts = dist_env.gather(dst_rank, clv.vertex_weights)
+    rowptrs = dist_env.gather(dst_rank, clv.rowptr)
+    colidxs = dist_env.gather(dst_rank, clv.colidx)
+    adjws = dist_env.gather(dst_rank, clv.adjwgt)
+    if dist_env.rank == dst_rank:
+        assert vwgts is not None
+        assert rowptrs is not None
+        assert colidxs is not None
+        assert vwgts is not None
+        assert adjws is not None
 
-            return CoarseningLevel()
+        sizes = [int(rp[-1]) for rp in rowptrs]
+        bases = torch.tensor([0] + sizes[:-1], dtype=torch.int64)
+        bases = torch.cumsum(bases, dim=0)
 
-        else:
-            return None
+        for i in range(dist_env.world_size):
+            rowptr_i = rowptrs[i] + bases[i]
+            if i + 1 < dist_env.world_size:
+                rowptr_i = rowptr_i[:-1]
+            rowptrs[i] = rowptr_i
+
+        res_vwgt = torch.concat(vwgts)
+        res_rowptr = torch.concat(rowptrs)
+        res_colidx = torch.concat(colidxs)
+        res_adjw = torch.concat(adjws)
+
+        return sizes, res_vwgt, res_rowptr, res_colidx, res_adjw
+    else:
+        return None
 
 
 
@@ -277,7 +304,7 @@ def merge_vertexes(
     dist_env = get_runtime_dist_env()
 
     c_per_worker_n = cnv // dist_env.world_size
-    c_dist_config = DistConfig(cnv, c_per_worker_n)
+    c_dist_config = DistConfig.create_default(cnv)
     c_start, c_end = c_dist_config.get_start_end()
 
     ########
@@ -443,31 +470,20 @@ def get_csr_mask_by_rows(rowptr: torch.Tensor, row_mask: torch.Tensor, nnz: int)
     return col_mask
 
 
-def part_kway(
+def distpart_kway(
+    dist_config: DistConfig,
     rowptr: torch.Tensor,
     colidx: torch.Tensor,
     adjwgt: torch.Tensor,
 ):
     dist_env = get_runtime_dist_env()
-
-    # At the beginning, all vertex weights are 1
-    local_nv = rowptr.shape[0] - 1
-    local_nvs = [
-        int(t) for t in
-        dist_env.all_gather(
-            torch.tensor([local_nv], dtype=torch.int64),
-            shapes=[(1,)] * dist_env.world_size
-        )
-    ]
-    if dist_env.world_size > 1:
-        assert len(set(local_nvs[:-1])) == 1, "require the same per_worker_n"
-    nv = sum(local_nvs)
-    per_worker_n = local_nvs[0]
+    local_nv = dist_config.local_nvs[dist_env.rank]
 
     cur_lv = CoarseningLevel(
-        dist_config=DistConfig(nv, per_worker_n),
+        dist_config=dist_config,
         rowptr=rowptr.to(torch.int64),
         colidx=colidx.to(torch.int64),
+        # At the beginning, all vertex weights are 1
         vertex_weights=torch.ones((local_nv,), dtype=torch.int64),
         adjwgt=adjwgt.to(torch.int64)
     )
@@ -475,6 +491,7 @@ def part_kway(
     # TODO because we use simple, directedly mapped uncoarsening, without
     # refinement, we don't need store the CoarseningLevel data.
     # levels: List[CoarseningLevel] = []
+    c_dist_configs: List[DistConfig] = []
 
     # For CoarseningLevel-i to CoarsenLevel-(i+1), the cmap is stored in
     # level (i+1).
@@ -482,41 +499,30 @@ def part_kway(
     # the value of cmap is the global ID of coarser vertex in this level. 
     cmaps: List[torch.Tensor] = []
 
-    for ri_lv in range(5):  # TODO fake
+    for i in range(5):  # TODO fake
         new_lv, cmap = coarsen_level(cur_lv, 10000)
-
-        # levels.append(new_lv)
+        # TODO levels.append(new_lv)
+        c_dist_configs.append(new_lv.dist_config)
         cmaps.append(cmap)
-
         cur_lv = new_lv
 
-
     # Gather to worker-0 and call METIS
+    cgraph = gather_csr_graph(0, new_lv)
+    if dist_env.rank == 0:
+        assert cgraph is not None
+        nvs, vwgt0, rowptr0, colidx0, adjw0 = cgraph
+        nv0 = int(rowptr0[-1])
 
-        bases = torch.tensor([0] + local_nvs, dtype=torch.int64)
-        for i in range(dist_env.world_size):
-            rowptr_i = rowptrs[i] + bases[i]
-            if i + 1 < dist_env.world_size:
-                rowptr_i = rowptr_i[:-1]
-            rowptrs[i] = rowptr_i
-        rowptr0 = torch.concat(rowptrs)
-        colidx0 = torch.concat(colidxs)
-        vwgt0 = torch.concat(vwgts)
-        adjw0 = torch.concat(adjws)
-
-        from mpi4py import MPI
-        from mgmetis import parmetis  # TODO no longer ParMETIS
-        ncuts, membership = parmetis.part_kway(
+        from mgmetis import metis
+        ncuts, membership = metis.part_graph_kway(
             1, rowptr0, colidx0,
-            vtxdist=torch.tensor([0, cur_dist_config.nv]),
-            comm=MPI.COMM_SELF,
             adjwgt=adjw0
         )
 
         # TODO scatter tensor list API
         c_local_membership = dist_env.scatter_object(
             0,
-            torch.from_numpy(membership).split([v.shape[0] for v in vwgts])
+            torch.from_numpy(membership).split(nvs)
         )
     
     else:
@@ -525,8 +531,9 @@ def part_kway(
     # Uncoarsening
     # TODO now without refinment (i.e. move vertexes around partitions after
     # uncoarsening one level, try achieving better global partition quality)
-    for ri_lv in range(len(levels) - 1, -1, -1):
-        rlv = levels[ri_lv]
+    for i in range(len(cmaps) - 1, -1, -1):
+        cmap = cmaps[i]
+        c_dist_config = c_dist_configs[i]
 
         # lv.cmap's domain is the set of finer vertexes on the same worker
         # (i.e. for the next uncoarsening level)
@@ -536,10 +543,10 @@ def part_kway(
         # as we are now reversing the coarsening map.
 
         # For next uncoarsening level
-        local_membership = torch.full((rlv.cmap.shape[0],), fill_value=-1, dtype=torch.int64)
+        local_membership = torch.full((cmap.shape[0],), fill_value=-1, dtype=torch.int64)
 
         for w in range(dist_env.world_size):
-            c_start_w, c_end_w = rlv.dist_config.get_start_end(w)
+            c_start_w, c_end_w = c_dist_config.get_start_end(w)
             if w == dist_env.rank:
                 c_local_membership_w = dist_env.broadcast(
                     w, c_local_membership
@@ -549,8 +556,8 @@ def part_kway(
                     w, shape=(c_end_w - c_start_w,), dtype=torch.int64
                 )
             
-            inv_mask = torch.logical_and(c_start_w <= rlv.cmap, rlv.cmap < c_end_w)
-            local_membership[inv_mask] = c_local_membership_w[rlv.cmap[inv_mask] - c_start_w]
+            inv_mask = torch.logical_and(c_start_w <= cmap, cmap < c_end_w)
+            local_membership[inv_mask] = c_local_membership_w[cmap[inv_mask] - c_start_w]
             
         assert torch.all(local_membership != -1)
         c_local_membership = local_membership
@@ -559,3 +566,31 @@ def part_kway(
 
     # Returns local_membership for vertexes of the original input graph
     return local_membership
+
+
+def part_kway(
+    dist_config: DistConfig,
+    rowptr: torch.Tensor,
+    colidx: torch.Tensor,
+    adjwgt: torch.Tensor,
+):
+    import os
+    if os.environ.get('PARTITION_METHOD', 'DISTPART').upper() == 'DISTPART':
+        return distpart_kway(dist_config, rowptr, colidx, adjwgt)
+    
+    else:
+        from mpi4py import MPI
+        from mgmetis import parmetis
+        comm: MPI.Intracomm = MPI.COMM_WORLD
+        ncuts, local_membership = parmetis.part_kway(
+            comm.size,
+            rowptr,
+            colidx,
+            vtxdist=torch.tensor(
+                [0] + dist_config.local_nvs, dtype=torch.int64
+            ).cumsum(dim=0),
+            comm=comm,
+            adjwgt=adjwgt
+        )
+
+        return local_membership
