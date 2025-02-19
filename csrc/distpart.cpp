@@ -61,16 +61,17 @@ void locally_match_heavy_edge(
                         // subsequent workers
                         continue;
                     }
+                    TORCH_CHECK(
+                        row + start != adjvid, "CSR cannot have diagonal line"
+                    );
                     bool is_adj_matched =
                         adjvid < end
                         ? matched_data[adjvid - start] != -1
                         : matched_remote_vids.find(
                             adjvid
                         ) != matched_remote_vids.end();
-                    if (!is_adj_matched
-                        && maxadjw < adjwgt_data[pos] 
-                    ) {
-                        // TODO only if rowwgt[row] + adj_vwgt[pos] <= maxvwgt
+                    if (!is_adj_matched && maxadjw < adjw) {
+                        // TODO only if rowwgt[row] + adjw <= maxvwgt
                         maxadjvid = adjvid;
                         maxadjw = adjw;
                     }
