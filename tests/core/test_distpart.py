@@ -14,7 +14,7 @@ import scipy.sparse
 from easier.core.distpart import CoarseningLevel, DistConfig, \
     gather_csr_graph, assign_cvids_unmatched, assign_cvids_colocated, \
     align_coarser_vids, get_csr_mask_by_rows, CoarseningRowDataExchanger, \
-    exchange_cadj_adjw, merge_cadj_adjw, part_kway
+    exchange_cadj_adjw, merge_cadj_adjw, part_kway, uncoarsen_level
 from easier.core.runtime.dist_env import get_cpu_dist_env
 import easier.cpp_extension as _C
 
@@ -182,7 +182,7 @@ class TestCoarserVertexID:
     def test_unmatched_full(self):
         matched = torch.full((10,), -1, dtype=torch.int64)
         cvids = torch.full((10,), -1, dtype=torch.int64)
-        unmatched_n = assign_cvids_unmatched(10, 20, matched, cvids, 33)
+        unmatched_n = assign_cvids_unmatched(matched, cvids, 33)
         assert unmatched_n == 10
         assert torch.all(matched == -1)
         assert torch.equal(cvids, torch.arange(33, 43))
@@ -191,7 +191,7 @@ class TestCoarserVertexID:
         matched = torch.arange(10)
         matched[1:10:3] = -1
         cvids = torch.full((10,), -1, dtype=torch.int64)
-        unmatched_n = assign_cvids_unmatched(10, 20, matched, cvids, 33)
+        unmatched_n = assign_cvids_unmatched(matched, cvids, 33)
         assert unmatched_n == 3
 
         expected_cvids = torch.full((10,), -1, dtype=torch.int64)
@@ -485,8 +485,6 @@ def worker__test_exchange_merge_adj(local_rank: int, world_size: int):
 def test_exchange_merge_adj():
     mpirun_singlenode(3, worker__test_exchange_merge_adj)
 
-
-
 def worker__test_preserve_symmetry(local_rank, world_size):
     """
     Other tests may not maintain the symmetry of the input CSR
@@ -559,3 +557,32 @@ def worker__test_preserve_symmetry(local_rank, world_size):
 
 def test_preserve_symmetry():
     mpirun_singlenode(3, worker__test_preserve_symmetry)
+
+
+def worker__test_uncoarsen_level(local_rank: int, world_size: int):
+    assert world_size == 3
+    c_dist_config = DistConfig(15, [5, 5, 5])
+    c_mb = torch.full((5,), fill_value=2 - local_rank, dtype=torch.int64)
+
+    cvids = torch.arange(5 * local_rank, 5 * (local_rank + 1))
+    mb = uncoarsen_level(c_dist_config, c_mb, cvids)
+    assert torch.equal(mb, c_mb)
+
+    cvids = 14 - torch.arange(5 * local_rank, 5 * (local_rank + 1))
+    mb = uncoarsen_level(c_dist_config, c_mb, cvids)
+    assert torch.equal(mb, 2 - c_mb)
+
+    cvids = vec(2, 4, 6, 8, 10)
+    mb = uncoarsen_level(c_dist_config, c_mb, cvids)
+    assert torch.equal(mb, vec(2, 2, 1, 1, 0))
+
+    cvids = vec(2, 4, 6, 8, 10) + local_rank
+    mb = uncoarsen_level(c_dist_config, c_mb, cvids)
+    assert torch.equal(mb, [
+        vec(2, 2, 1, 1, 0),
+        vec(2, 1, 1, 1, 0),
+        vec(2, 1, 1, 0, 0)
+    ][local_rank])
+
+def test_uncoarsen_level():
+    mpirun_singlenode(3, worker__test_uncoarsen_level)

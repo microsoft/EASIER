@@ -7,6 +7,7 @@ import torch.utils
 from typing_extensions import Literal, OrderedDict, TypeAlias
 import functools
 import more_itertools
+import time
 
 import torch
 from torch.fx.graph import Graph
@@ -72,17 +73,16 @@ class CoarseningLevel:
 
 
 
-def _assert_cvids_no_overlap(cvids, new_range):
+def _assert_local_map_no_overlap(cvids, new_range):
     assert torch.all(cvids[new_range] == -1)
 
 def assign_cvids_unmatched(
-    start: int, end: int,
     matched: torch.Tensor, cvids: torch.Tensor, cnv_allocated: int
 ) -> int:
     # Vertexes of too big weights are skipped or not matched with
     unmatched_mask = matched == -1
     this_unmatched_n = int(unmatched_mask.count_nonzero())
-    _assert_cvids_no_overlap(cvids, unmatched_mask)
+    _assert_local_map_no_overlap(cvids, unmatched_mask)
     cvids[unmatched_mask] = torch.arange(
         cnv_allocated,
         cnv_allocated + this_unmatched_n,
@@ -118,9 +118,9 @@ def assign_cvids_colocated(
         cnv_allocated + this_colocated_n,
         dtype=torch.int64
     )
-    _assert_cvids_no_overlap(cvids, colocated_from - start)
+    _assert_local_map_no_overlap(cvids, colocated_from - start)
     cvids[colocated_from - start] = colocated_cvids
-    _assert_cvids_no_overlap(cvids, colocated_to - start)
+    _assert_local_map_no_overlap(cvids, colocated_to - start)
     cvids[colocated_to - start] = colocated_cvids
 
     return this_colocated_n
@@ -141,7 +141,7 @@ def align_coarser_vids(
         remote_start <= matched,
         matched < remote_end
     )
-    _assert_cvids_no_overlap(cvids, remote_matched_mask)
+    _assert_local_map_no_overlap(cvids, remote_matched_mask)
     cvids.masked_scatter_(
         remote_matched_mask,
         remote_cvids[matched[remote_matched_mask] - remote_start]
@@ -329,7 +329,7 @@ def map_adj_by_cvids(
         w_mappable = torch.logical_and(
             start_w <= colidx, colidx < end_w
         )
-        _assert_cvids_no_overlap(cadj_unmerged, w_mappable)
+        _assert_local_map_no_overlap(cadj_unmerged, w_mappable)
         
         # "by_w" means its mappable part is mapped by cvids held by w, i.e.
         # whose domain is [start_w, end_w), but the codomain crosses workers.
@@ -531,7 +531,7 @@ def coarsen_level(
 
         if w == dist_env.rank:
             this_unmatched_n = assign_cvids_unmatched(
-                start, end, matched, cvids, cnv_allocated
+                matched, cvids, cnv_allocated
             )
             cnv_allocated += this_unmatched_n
 
@@ -603,11 +603,16 @@ def distpart_kway(
     # the value of cvids is the global ID of coarser vertex in this level. 
     cvids_levels: List[torch.Tensor] = []
 
+    coarsening_start = time.time()
+    logger.debug(f"EASIER coarsening started. nv={dist_config.nv}")
+    
     while True:
         new_lv, cvids = coarsen_level(cur_lv)
         # TODO levels.append(new_lv)
         c_dist_configs.append(new_lv.dist_config)
         cvids_levels.append(cvids)
+
+        logger.debug(f"New level coarsened. nv={new_lv.dist_config.nv}")
 
         cur_nv = cur_lv.dist_config.nv
         new_nv = new_lv.dist_config.nv
@@ -618,12 +623,16 @@ def distpart_kway(
 
         cur_lv = new_lv
 
+    coarsening_latency = time.time() - coarsening_start
+    logger.debug(
+        f"EASIER coarsening finished. Total time: {coarsening_latency}sec"
+    )
+
     # Gather to worker-0 and call METIS
     cgraph = gather_csr_graph(0, new_lv)
     if dist_env.rank == 0:
         assert cgraph is not None
         vwgt0, rowptr0, colidx0, adjw0 = cgraph
-        nv0 = int(rowptr0[-1])
 
         from mgmetis import metis
         ncuts, membership = metis.part_graph_kway(
@@ -633,11 +642,16 @@ def distpart_kway(
             vwgt=vwgt0,
             adjwgt=adjw0
         )
+        logger.debug(
+            f"METIS result on EASIER-coarsened graph: ncuts={ncuts}"
+        )
 
         # TODO scatter tensor list API
         c_local_membership = dist_env.scatter_object(
             0,
-            torch.from_numpy(membership).split(new_lv.dist_config.local_nvs)
+            torch.from_numpy(membership).to(torch.int64).split(
+                new_lv.dist_config.local_nvs
+            )
         )
     
     else:
@@ -650,62 +664,42 @@ def distpart_kway(
         cvids = cvids_levels[i]
         c_dist_config = c_dist_configs[i]
 
-        # cvids' domain is the set of finer vertexes on the same worker
-        # (i.e. for the next uncoarsening level)
-        #
-        # Its codomain is the set of coarser vertexes across workers, which is
-        # also the incoming local_membership is about,
-        # as we are now reversing the coarsening map.
+        local_membership = uncoarsen_level(c_dist_config, c_local_membership, cvids)
 
-        # For next uncoarsening level
-        local_membership = torch.full((cvids.shape[0],), fill_value=-1, dtype=torch.int64)
-
-        for w in range(dist_env.world_size):
-            c_start_w, c_end_w = c_dist_config.get_start_end(w)
-            if w == dist_env.rank:
-                c_local_membership_w = dist_env.broadcast(
-                    w, c_local_membership
-                )
-            else:
-                c_local_membership_w = dist_env.broadcast(
-                    w, shape=(c_end_w - c_start_w,), dtype=torch.int64
-                )
-            
-            inv_mask = torch.logical_and(c_start_w <= cvids, cvids < c_end_w)
-            local_membership[inv_mask] = c_local_membership_w[cvids[inv_mask] - c_start_w]
-            
-        assert torch.all(local_membership != -1)
         c_local_membership = local_membership
 
     assert local_membership.shape[0] == local_nv
 
+    distpart_latency = time.time() - coarsening_start
+    logger.debug(
+        f"EASIER partition finished. Total time: {distpart_latency}sec"
+    )
+
     # Returns local_membership for vertexes of the original input graph
     return local_membership
 
+def uncoarsen_level(c_dist_config: DistConfig, c_local_membership: torch.Tensor, cvids: torch.Tensor):
+    """
+    To uncoarsen level-(i+1) back to level-i, the cvids length is about
+    local vertexes in level-i, its values are level-(i+1) vertex IDs.
+    """
+    dist_env = get_cpu_dist_env()
+    local_membership = torch.full((cvids.shape[0],), fill_value=-1, dtype=torch.int64)
 
-def part_kway(
-    dist_config: DistConfig,
-    rowptr: torch.Tensor,
-    colidx: torch.Tensor,
-    adjwgt: torch.Tensor,
-):
-    import os
-    if os.environ.get('PARTITION_METHOD', 'DISTPART').upper() == 'DISTPART':
-        return distpart_kway(dist_config, rowptr, colidx, adjwgt)
-    
-    else:
-        from mpi4py import MPI
-        from mgmetis import parmetis
-        comm: MPI.Intracomm = MPI.COMM_WORLD
-        ncuts, local_membership = parmetis.part_kway(
-            nparts=comm.size,
-            xadj=rowptr,
-            adjncy=colidx,
-            vtxdist=torch.tensor(
-                [0] + dist_config.local_nvs, dtype=torch.int64
-            ).cumsum(dim=0),
-            comm=comm,
-            adjwgt=adjwgt
-        )
-
-        return local_membership
+    for w in range(dist_env.world_size):
+        c_start_w, c_end_w = c_dist_config.get_start_end(w)
+        if w == dist_env.rank:
+            c_local_membership_w = dist_env.broadcast(
+                w, c_local_membership
+            )
+        else:
+            c_local_membership_w = dist_env.broadcast(
+                w, shape=(c_end_w - c_start_w,), dtype=torch.int64
+            )
+        
+        inv_mask = torch.logical_and(c_start_w <= cvids, cvids < c_end_w)
+        _assert_local_map_no_overlap(local_membership, inv_mask)
+        local_membership[inv_mask] = c_local_membership_w[cvids[inv_mask] - c_start_w]
+        
+    assert torch.all(local_membership != -1)
+    return local_membership
