@@ -135,7 +135,7 @@ def parallel_partition_graph(
     else:
         raise EasierJitException('Unknown Metis implementation')
 
-    return 0, local_membership
+    return local_membership
 
 
 @dataclass
@@ -375,7 +375,7 @@ def partition_tensor_groups_with_adjmat(
 
     subadjmat_height = int(vtxdist[rank + 1] - vtxdist[rank])
 
-    ncuts, local_membership = parallel_partition_graph(
+    local_membership = parallel_partition_graph(
         world_size, rank,
         subadjmat_height=subadjmat_height, adjmat_width=accum_n,
         vtxdist=vtxdist,
