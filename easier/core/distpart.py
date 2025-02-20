@@ -700,13 +700,13 @@ def distpart_kway(
         )
 
         # TODO scatter tensor list API
-        c_local_membership = dist_env.scatter_object(
+        c_local_membership = dist_env.scatter(
             0,
             membership.to(torch.int64).split(new_lv.dist_config.local_nvs)
         )
 
     else:
-        c_local_membership = dist_env.scatter_object(0)
+        c_local_membership = dist_env.scatter(0)
 
     # Uncoarsening
     # TODO now without refinment (i.e. move vertexes around partitions after

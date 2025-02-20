@@ -341,12 +341,13 @@ class DistEnv:
                 if not tensor.is_contiguous():
                     # Ensure contiguousness for the last time.
                     logger.debug(
-                        f'The {i}-th tensor to scatter is non-contiguous')
+                        f'The {i}-th tensor to scatter is non-contiguous'
+                    )
                     tensors[i] = tensor.contiguous()
         else:
-            objs = None  # unused
+            tensors = None  # unused
 
-        return (self, src, objs), {}
+        return (self, src, tensors), {}
 
     @typing.overload
     def scatter_object(self, src: int) -> Any: ...
