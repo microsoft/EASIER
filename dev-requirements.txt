@@ -49,6 +49,7 @@ torch-tb-profiler
 nvtx
 
 mgmetis==0.1.1
+pymetis==2023.1.1
 
 h5py==3.11.0
 
