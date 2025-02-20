@@ -314,6 +314,42 @@ class DistEnv:
         return (self, dst, obj), {}
 
     @typing.overload
+    def scatter(self, src: int) -> torch.Tensor: ...
+
+    @typing.overload
+    def scatter(
+        self, src: int, tensors: Sequence[torch.Tensor]
+    ) -> torch.Tensor: ...
+    
+    def scatter(
+        self, src: int, tensors: Optional[Sequence[torch.Tensor]] = None
+    ) -> torch.Tensor:
+        raise NotImplementedError()
+    
+    def _pre_scatter(self, src, tensors=None):
+        assert 0 <= src < self.world_size
+
+        if src == self.rank:
+            assert tensors is not None
+            assert len(tensors) == self.world_size
+
+            dtypes = set(t.dtype for t in tensors)
+            assert len(dtypes) == 1
+
+            tensors = list(tensors)  # copy the list
+            for i, tensor in enumerate(tensors):
+                if not tensor.is_contiguous():
+                    # Ensure contiguousness for the last time.
+                    logger.debug(
+                        f'The {i}-th tensor to scatter is non-contiguous')
+                    tensors[i] = tensor.contiguous()
+        else:
+            objs = None  # unused
+
+        return (self, src, objs), {}
+
+
+    @typing.overload
     def scatter_object(self, src: int) -> Any: ...
     @typing.overload
     def scatter_object(self, src: int, objs: List[_T]) -> _T: ...
@@ -423,6 +459,12 @@ class DummyDistEnv(DistEnv):
 
     def gather_object(self, dst: int, obj: _T) -> Optional[List[_T]]:
         return [copy.deepcopy(obj)]
+    
+    def scatter(
+        self, src: int, tensors: Optional[Sequence[torch.Tensor]]
+    ) -> torch.Tensor:
+        assert tensors is not None
+        return tensors[0].clone()
 
     def scatter_object(self, src: int, objs: Optional[List[_T]] = None) -> _T:
         assert objs is not None
@@ -673,6 +715,25 @@ class TorchDistEnv(DistEnv):
         dist.gather_object(obj, recvs, dst)
 
         return recvs  # type: ignore
+    
+    def scatter(
+        self, src: int, tensors: Optional[Sequence[torch.Tensor]]
+    ) -> torch.Tensor:
+        if self.rank == src:
+            assert tensors is not None
+            [dtype] = self.broadcast_object_list(
+                src, [tensors[0].dtype]
+            )  # type: ignore
+            shape = self.scatter_object(src, [t.shape for t in tensors])
+        else:
+            [dtype] = self.broadcast_object_list(src)  # type: ignore
+            shape = self.scatter_object(src)  # type: ignore
+
+        buffer = torch.empty(shape, dtype=dtype, device=self.comm_device)
+        dist.scatter(buffer, tensors, src)
+
+        return buffer
+
 
     def scatter_object(self, src: int, objs: Optional[List[_T]] = None) -> _T:
         recvs = [None]
@@ -860,6 +921,12 @@ class MPIDistEnv(DistEnv):
 
     def gather_object(self, dst: int, obj: _T) -> Optional[List[_T]]:
         return self.comm.gather(obj, dst)
+    
+    def scatter(
+        self, src: int, tensors: Optional[Sequence[torch.Tensor]]
+    ) -> torch.Tensor:
+        # TODO remove MPIDistEnv, temporarily use pickle-based
+        return self.comm.scatter(tensors, src)  # type: ignore
 
     def scatter_object(self, src: int, objs: Optional[List[_T]] = None) -> _T:
         return self.comm.scatter(objs, src)  # type: ignore

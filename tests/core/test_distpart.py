@@ -14,7 +14,7 @@ import scipy.sparse
 from easier.core.distpart import CoarseningLevel, DistConfig, \
     gather_csr_graph, assign_cvids_unmatched, assign_cvids_colocated, \
     align_coarser_vids, get_csr_mask_by_rows, CoarseningRowDataExchanger, \
-    exchange_cadj_adjw, merge_cadj_adjw, part_kway, uncoarsen_level
+    exchange_cadj_adjw, merge_cadj_adjw, distpart_kway, uncoarsen_level
 from easier.core.runtime.dist_env import get_cpu_dist_env
 import easier.cpp_extension as _C
 
@@ -549,7 +549,7 @@ def worker__test_preserve_symmetry(local_rank, world_size):
 
     # Because of the `while True` loop, we have at least coarsened once.
     with patch('mgmetis.metis.part_graph_kway', wraps=_hook_metis) as mock:
-        membership = part_kway(dist_config, rowptr, colidx, adjw)
+        membership = distpart_kway(dist_config, rowptr, colidx, adjw)
 
     if local_rank == 0:
         mock.assert_called()

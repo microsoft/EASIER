@@ -73,8 +73,13 @@ class CoarseningLevel:
 
 
 
-def _assert_local_map_no_overlap(cvids, new_range):
-    assert torch.all(cvids[new_range] == -1)
+def _assert_local_map_no_overlap(local_map, new_range):
+    """
+    Args:
+    -   local_map: maybe a `cvids`, or whatever tensors whose length is
+            the number of local vertexes and initially filled with -1.
+    """
+    assert torch.all(local_map[new_range] == -1)
 
 def assign_cvids_unmatched(
     matched: torch.Tensor, cvids: torch.Tensor, cnv_allocated: int
@@ -92,8 +97,11 @@ def assign_cvids_unmatched(
     return this_unmatched_n
 
 def assign_cvids_colocated(
-    start: int, end: int,
-    matched: torch.Tensor, cvids: torch.Tensor, cnv_allocated: int
+    start: int,
+    end: int,
+    matched: torch.Tensor,
+    cvids: torch.Tensor,
+    cnv_allocated: int
 ) -> int:
     """
     "Colocated pairs" are match pairs whose vertexes are both on
@@ -101,6 +109,8 @@ def assign_cvids_colocated(
 
     The assignment is decided on the preceding vertex,
     i.e. the matching invoker.
+    E.g. if `matched` vector incrementally gets M new cells filled, it means
+    we need to assign M/2 new coarser IDs.
 
     Such vertexes will have no remoting matching, so here we are
     the first time processing and assigning coarser IDs for them.
@@ -126,9 +136,11 @@ def assign_cvids_colocated(
     return this_colocated_n
 
 def align_coarser_vids(
-    remote_start: int, remote_end: int,
+    remote_start: int,
+    remote_end: int,
     remote_cvids: torch.Tensor,
-    matched: torch.Tensor, cvids: torch.Tensor
+    matched: torch.Tensor,
+    cvids: torch.Tensor
 ):
     """
     For all remote vertexes (in subnsequent workers) to which
@@ -138,8 +150,7 @@ def align_coarser_vids(
     ID, so that both vertexes will be identified to be merged later.
     """
     remote_matched_mask = torch.logical_and(
-        remote_start <= matched,
-        matched < remote_end
+        remote_start <= matched, matched < remote_end
     )
     _assert_local_map_no_overlap(cvids, remote_matched_mask)
     cvids.masked_scatter_(
@@ -192,7 +203,6 @@ class CoarseningRowDataExchanger:
         return torch.concat(row_data_on_this)
 
 
-
 def exchange_and_merge_vertex_weights(
     row_xchg: CoarseningRowDataExchanger,
     vertex_weights: torch.Tensor,
@@ -219,6 +229,14 @@ def exchange_cadj_adjw(
 ):
     """
     Use LOCAL cvids to determine destination and send data there.
+
+    Returns:
+    -   unmerged_row_sizes:
+            One size for a row, or, a range of elements in
+            cadj_unmerged/adjwgt_unmerged.
+
+    -   cadj_unmerged
+    -   adjwgt_unmerged
     """
     assert cadj.shape[0] == adjwgt.shape[0]
 
@@ -235,6 +253,10 @@ def exchange_cadj_adjw(
     adjwgt_unmerged_to_others = []
     for w in range(dist_env.world_size):
         row_mask = row_xchg.rows_to_other_masks[w]
+
+        # TODO this may be a `RowExchanger.exchange_csr` method,
+        # which can extract and exchange CSR-formatted data, sharing `col_mask`
+        # and handle in a batch.
         col_mask = get_csr_mask_by_rows(rowptr, row_mask, cadj.shape[0])
 
         cadj_unmerged_to_w = cadj[col_mask]
@@ -345,7 +367,11 @@ def get_csr_mask_by_rows(
     rowptr: torch.Tensor, row_mask: torch.Tensor, nnz: int
 ):
     """
+    TODO we may make this method a dedicated `exchange_csr` method of
+    RowDataExchanger.
+
     Args:
+    - rowptr: original rowptr for the CSR matrix
     - row_mask: 1 for rows to pick, 0 for rows to filter out.
     """
     rowptr_begins = rowptr[:-1]
@@ -432,10 +458,12 @@ def merge_vertexes(
     prev_lv_cadj = map_adj_by_cvids(
         prev_lv.dist_config, prev_lv.colidx, cvids
     )
-    c_rows, c_cols, c_wgts = exchange_cadj_adjw(
+    row_sizes, cadj_unmerged, adjw_unmerged = exchange_cadj_adjw(
         xchg, prev_lv.rowptr, prev_lv_cadj, prev_lv.adjwgt
     )
-    c_rowptr, c_colidx, c_adjw = merge_cadj_adjw(xchg, c_rows, c_cols, c_wgts)
+    c_rowptr, c_colidx, c_adjw = merge_cadj_adjw(
+        xchg, row_sizes, cadj_unmerged, adjw_unmerged
+    )
 
     c_lv = CoarseningLevel(
         c_dist_config,
@@ -447,40 +475,43 @@ def merge_vertexes(
     return c_lv
 
 
-def gather_csr_graph(dst_rank: int, clv: CoarseningLevel
+def gather_csr_graph(
+    dst_rank: int, clv: CoarseningLevel
 ) -> Optional[Tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]]:
     """
     Gather all pieces from all workers, reconstruct them into a valid
     individual CSR data.
+
+    Returns:
+    -   on dst_rank only:
+        concat-ed vertex weights;
+        aggregated rowptr;  # not simply concat-ed
+        concat-ed colidx;
+        concat-ed adj weights
     """
     dist_env = get_cpu_dist_env()
     vwgts = dist_env.gather(dst_rank, clv.vertex_weights)
-    rowptrs = dist_env.gather(dst_rank, clv.rowptr)
     colidxs = dist_env.gather(dst_rank, clv.colidx)
     adjws = dist_env.gather(dst_rank, clv.adjwgt)
+
+    row_sizes = dist_env.gather(dst_rank, (clv.rowptr[1:] - clv.rowptr[:-1]))
+
     if dist_env.rank == dst_rank:
         assert vwgts is not None
-        assert rowptrs is not None
         assert colidxs is not None
         assert vwgts is not None
         assert adjws is not None
-
-        colidx_sizes = [int(rp[-1]) for rp in rowptrs]
-        bases = torch.tensor([0] + colidx_sizes[:-1], dtype=torch.int64)
-        bases = torch.cumsum(bases, dim=0)
-
-        for i in range(dist_env.world_size):
-            rowptr_i = rowptrs[i] + bases[i]
-            if i + 1 < dist_env.world_size:
-                rowptr_i = rowptr_i[:-1]
-            rowptrs[i] = rowptr_i
+        assert row_sizes is not None
 
         res_vwgt = torch.concat(vwgts)
-        res_rowptr = torch.concat(rowptrs)
         res_colidx = torch.concat(colidxs)
         res_adjw = torch.concat(adjws)
+
+        res_rowptr = torch.concat(
+            [torch.tensor([0], dtype=torch.int64)] + row_sizes
+        ).cumsum(dim=0)
 
         return res_vwgt, res_rowptr, res_colidx, res_adjw
     else:
@@ -497,10 +528,8 @@ def coarsen_level(
     start, end = prev_lv.dist_config.get_start_end()
     assert prev_lv.rowptr.shape[0] -1 == end - start
 
-    ########
-    # Each worker independently calculates heavy-edge matching
-    ########
-    # local vids to global vids
+    # Each worker independently calculates heavy-edge matching.
+    # Local vids to global vids
     matched = torch.full((end - start,), fill_value=-1, dtype=torch.int64)
     # NOTE `matched` vector is updated within this C call.
     _C.locally_match_heavy_edge(
@@ -572,8 +601,6 @@ def coarsen_level(
     return new_lv, cvids
 
 
-
-
 def distpart_kway(
     dist_config: DistConfig,
     rowptr: torch.Tensor,
@@ -612,13 +639,14 @@ def distpart_kway(
         c_dist_configs.append(new_lv.dist_config)
         cvids_levels.append(cvids)
 
-        logger.debug(f"New level coarsened. nv={new_lv.dist_config.nv}")
+        if dist_env.rank == 0:
+            logger.debug(f"New level coarsened. nv={new_lv.dist_config.nv}")
 
         cur_nv = cur_lv.dist_config.nv
         new_nv = new_lv.dist_config.nv
-        if (cur_nv - new_nv) < int(cur_nv * 0.2):
+        if (cur_nv - new_nv) < int(cur_nv * 0.1):
             break
-        if new_nv < 10 ** 5:
+        if new_nv < 10 ** 5:  # TODO maybe sys mem capability based
             break
 
         cur_lv = new_lv
@@ -642,8 +670,12 @@ def distpart_kway(
             vwgt=vwgt0,
             adjwgt=adjw0
         )
+
+        maxvwgt = int(vwgt0.max())
+        maxdegree = int((rowptr0[1:] - rowptr0[:-1]).max())
         logger.debug(
-            f"METIS result on EASIER-coarsened graph: ncuts={ncuts}"
+            "METIS result on EASIER-coarsened graph: "
+            f"max_vwgt={maxvwgt}, max_degree={maxdegree}, ncuts={ncuts}"
         )
 
         # TODO scatter tensor list API
@@ -664,8 +696,9 @@ def distpart_kway(
         cvids = cvids_levels[i]
         c_dist_config = c_dist_configs[i]
 
-        local_membership = uncoarsen_level(c_dist_config, c_local_membership, cvids)
-
+        local_membership = uncoarsen_level(
+            c_dist_config, c_local_membership, cvids
+        )
         c_local_membership = local_membership
 
     assert local_membership.shape[0] == local_nv
@@ -678,13 +711,19 @@ def distpart_kway(
     # Returns local_membership for vertexes of the original input graph
     return local_membership
 
-def uncoarsen_level(c_dist_config: DistConfig, c_local_membership: torch.Tensor, cvids: torch.Tensor):
+def uncoarsen_level(
+    c_dist_config: DistConfig,
+    c_local_membership: torch.Tensor,
+    cvids: torch.Tensor
+):
     """
     To uncoarsen level-(i+1) back to level-i, the cvids length is about
     local vertexes in level-i, its values are level-(i+1) vertex IDs.
     """
     dist_env = get_cpu_dist_env()
-    local_membership = torch.full((cvids.shape[0],), fill_value=-1, dtype=torch.int64)
+    local_membership = torch.full(
+        (cvids.shape[0],), fill_value=-1, dtype=torch.int64
+    )
 
     for w in range(dist_env.world_size):
         c_start_w, c_end_w = c_dist_config.get_start_end(w)
@@ -699,7 +738,9 @@ def uncoarsen_level(c_dist_config: DistConfig, c_local_membership: torch.Tensor,
         
         inv_mask = torch.logical_and(c_start_w <= cvids, cvids < c_end_w)
         _assert_local_map_no_overlap(local_membership, inv_mask)
-        local_membership[inv_mask] = c_local_membership_w[cvids[inv_mask] - c_start_w]
+        local_membership[inv_mask] = c_local_membership_w[
+            cvids[inv_mask] - c_start_w
+        ]
         
     assert torch.all(local_membership != -1)
     return local_membership
