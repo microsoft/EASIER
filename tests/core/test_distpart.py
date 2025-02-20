@@ -546,7 +546,7 @@ def worker__test_preserve_symmetry(local_rank, world_size):
         # fake result
         r = torch.zeros((cnv,), dtype=torch.int64)
         r[:world_size] = torch.arange(world_size)
-        return 99, r.numpy()
+        return 99, r
 
     # Because of the `while True` loop, we have at least coarsened once.
     with patch(

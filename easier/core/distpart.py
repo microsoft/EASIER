@@ -316,6 +316,10 @@ def merge_cadj_adjw(
     ).repeat_interleave(
         unmerged_row_sizes
     )
+    print(unmerged_row_sizes)
+
+    print(adjwgt_unmerged.shape, (unmerged_rows.shape, cadj_unmerged.shape))  # sum up dups
+    # print(adjwgt_unmerged, (unmerged_rows, cadj_unmerged))  # sum up dups
 
     coarser_graph = scipy.sparse.csr_matrix(
         (adjwgt_unmerged, (unmerged_rows, cadj_unmerged)),  # sum up dups
@@ -601,8 +605,11 @@ def coarsen_level(
     return new_lv, cvids
 
 
-def metis_wrapper(nparts, rowptr, colidx, vwgt, adjwgt):
+def metis_wrapper(
+    nparts, rowptr, colidx, vwgt, adjwgt
+) -> Tuple[int, torch.Tensor]:
     import pymetis
+    # pymetis returns a List[int]
     ncuts, membership = pymetis.part_graph(
         nparts=nparts,
         xadj=rowptr,
@@ -610,6 +617,7 @@ def metis_wrapper(nparts, rowptr, colidx, vwgt, adjwgt):
         vweights=vwgt,
         eweights=adjwgt
     )
+    membership = torch.tensor(membership, dtype=torch.int64)
     return ncuts, membership
 
 def distpart_kway(
@@ -691,9 +699,7 @@ def distpart_kway(
         # TODO scatter tensor list API
         c_local_membership = dist_env.scatter_object(
             0,
-            torch.from_numpy(membership).to(torch.int64).split(
-                new_lv.dist_config.local_nvs
-            )
+            membership.to(torch.int64).split(new_lv.dist_config.local_nvs)
         )
     
     else:
