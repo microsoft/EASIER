@@ -23,7 +23,6 @@ from easier.core.utils import EasierJitException, logger
 import easier.cpp_extension as _C
 
 
-
 @dataclass
 class DistConfig:
     nv: int
@@ -72,7 +71,6 @@ class CoarseningLevel:
     adjwgt: torch.Tensor
 
 
-
 def _assert_local_map_no_overlap(local_map, new_range):
     """
     Args:
@@ -80,6 +78,7 @@ def _assert_local_map_no_overlap(local_map, new_range):
             the number of local vertexes and initially filled with -1.
     """
     assert torch.all(local_map[new_range] == -1)
+
 
 def assign_cvids_unmatched(
     matched: torch.Tensor, cvids: torch.Tensor, cnv_allocated: int
@@ -95,6 +94,7 @@ def assign_cvids_unmatched(
     )
 
     return this_unmatched_n
+
 
 def assign_cvids_colocated(
     start: int,
@@ -134,6 +134,7 @@ def assign_cvids_colocated(
     cvids[colocated_to - start] = colocated_cvids
 
     return this_colocated_n
+
 
 def align_coarser_vids(
     remote_start: int,
@@ -221,6 +222,7 @@ def exchange_and_merge_vertex_weights(
     assert torch.all(cvwgts > 0)
     return cvwgts
 
+
 def exchange_cadj_adjw(
     row_xchg: CoarseningRowDataExchanger,
     rowptr: torch.Tensor,
@@ -279,7 +281,7 @@ def merge_cadj_adjw(
     row_xchg: CoarseningRowDataExchanger,
     unmerged_row_sizes: torch.Tensor,
     cadj_unmerged: torch.Tensor,
-    adjwgt_unmerged: torch.Tensor, 
+    adjwgt_unmerged: torch.Tensor,
 ):
     """
     Both are still CSR-formatted, the rowptr should be calculated from
@@ -330,6 +332,7 @@ def merge_cadj_adjw(
         torch.from_numpy(coarser_graph.indices).to(torch.int64), \
         torch.from_numpy(coarser_graph.data).to(torch.int64)
 
+
 def map_adj_by_cvids(
     dist_config: DistConfig, colidx: torch.Tensor, cvids: torch.Tensor
 ):
@@ -352,7 +355,7 @@ def map_adj_by_cvids(
             start_w <= colidx, colidx < end_w
         )
         _assert_local_map_no_overlap(cadj_unmerged, w_mappable)
-        
+
         # "by_w" means its mappable part is mapped by cvids held by w, i.e.
         # whose domain is [start_w, end_w), but the codomain crosses workers.
         cadj_by_w = cvids_w[colidx[w_mappable] - start_w]
@@ -377,7 +380,7 @@ def get_csr_mask_by_rows(
     rowptr_begins = rowptr[:-1]
     rowptr_ends = rowptr[1:]
 
-    res_begins = rowptr_begins[row_mask]    
+    res_begins = rowptr_begins[row_mask]
     res_ends = rowptr_ends[row_mask]
 
     ones = torch.ones_like(res_begins, dtype=torch.int8)
@@ -529,7 +532,7 @@ def coarsen_level(
 
     # TODO make later workers have more rows to process
     start, end = prev_lv.dist_config.get_start_end()
-    assert prev_lv.rowptr.shape[0] -1 == end - start
+    assert prev_lv.rowptr.shape[0] - 1 == end - start
 
     # Each worker independently calculates heavy-edge matching.
     # Local vids to global vids
@@ -544,7 +547,7 @@ def coarsen_level(
         prev_lv.adjwgt,
     )
     # Possible value of matched[x]:
-    # -1 
+    # -1
     #   unmatched
     # end <= matched[x]
     #   matched with remote vertexes
@@ -552,7 +555,7 @@ def coarsen_level(
     #   matching invoker, matched with local vertexes (colocated)
     # start <= matched[x] < start + x
     #   matched-with vertexes, colocated
-    
+
     cnv_allocated = 0  # replicated
 
     # Old local IDs of owned vertexes to coarser IDs
@@ -619,6 +622,7 @@ def metis_wrapper(
     membership = torch.tensor(membership, dtype=torch.int64)
     return ncuts, membership
 
+
 def distpart_kway(
     dist_config: DistConfig,
     rowptr: torch.Tensor,
@@ -645,12 +649,12 @@ def distpart_kway(
     # For CoarseningLevel-i to CoarsenLevel-(i+1), the cvids is stored in
     # level (i+1).
     # The length of cvids is the local vertex number for previous level,
-    # the value of cvids is the global ID of coarser vertex in this level. 
+    # the value of cvids is the global ID of coarser vertex in this level.
     cvids_levels: List[torch.Tensor] = []
 
     coarsening_start = time.time()
     logger.debug(f"EASIER coarsening started. nv={dist_config.nv}")
-    
+
     while True:
         new_lv, cvids = coarsen_level(cur_lv)
         # TODO levels.append(new_lv)
@@ -700,7 +704,7 @@ def distpart_kway(
             0,
             membership.to(torch.int64).split(new_lv.dist_config.local_nvs)
         )
-    
+
     else:
         c_local_membership = dist_env.scatter_object(0)
 
@@ -726,6 +730,7 @@ def distpart_kway(
     # Returns local_membership for vertexes of the original input graph
     return local_membership
 
+
 def uncoarsen_level(
     c_dist_config: DistConfig,
     c_local_membership: torch.Tensor,
@@ -750,12 +755,12 @@ def uncoarsen_level(
             c_local_membership_w = dist_env.broadcast(
                 w, shape=(c_end_w - c_start_w,), dtype=torch.int64
             )
-        
+
         inv_mask = torch.logical_and(c_start_w <= cvids, cvids < c_end_w)
         _assert_local_map_no_overlap(local_membership, inv_mask)
         local_membership[inv_mask] = c_local_membership_w[
             cvids[inv_mask] - c_start_w
         ]
-        
+
     assert torch.all(local_membership != -1)
     return local_membership

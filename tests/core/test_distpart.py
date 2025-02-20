@@ -21,6 +21,7 @@ import easier.cpp_extension as _C
 
 from ..utils import mpirun_singlenode, assert_tensor_list_equal
 
+
 def _C_hem(
     start: int, end: int, matched: torch.Tensor,
     rowptr: torch.Tensor, colidx: torch.Tensor, adjwgt: torch.Tensor
@@ -30,16 +31,18 @@ def _C_hem(
         start, end, matched, rowptr, colidx, adjwgt
     )
 
+
 def vec(*vs):
     return torch.tensor(vs, dtype=torch.int64)
+
 
 class TestCppDistPart:
     def test_isolated_rows(self):
         colidxs = [
-            vec(), # v10: isolated row -- => 11
+            vec(),  # v10: isolated row -- => 11
             vec(5, 12, 22),  # v11   -- <= 10
             vec(7, 11, 21),  # v12
-            vec() # v13: isolated row -- no more, unmatched
+            vec()  # v13: isolated row -- no more, unmatched
         ]
 
         start, end = 10, 10 + len(colidxs)
@@ -86,21 +89,20 @@ class TestCppDistPart:
             -1, 13, 20, 11, 15, 14, -1
         ))
 
-
     def test_match_heavy_edge(self):
         colidxs = [
-            vec(    11, 12, 13, 14),
+            vec(11, 12, 13, 14),
             vec(10,     12, 13, 14),
             vec(10, 11,     13, 14),
             vec(10, 11, 12,     14),
-            vec(10, 11, 12, 13    )
+            vec(10, 11, 12, 13)
         ]
         adjwgts = [
-            vec(    1,  2,  3,  4),  # => 14
+            vec(1,  2,  3,  4),  # => 14
             vec(1,      5,  6,  7),  # => 13
             vec(2,  5,      8,  9),  # unmatched
             vec(3,  6,  8,     10),  # <= 11
-            vec(4,  7,  9, 10,   ),  # <= 10
+            vec(4,  7,  9, 10,),  # <= 10
         ]
 
         start, end = 10, 10 + len(colidxs)
@@ -175,6 +177,7 @@ def worker__test_gather_csr_rowptr(local_rank: int, world_size: int):
         assert torch.equal(colidx0, torch.concat([colidx] * world_size))
         assert torch.equal(adjw0, torch.concat([colidx + 10] * world_size))
 
+
 def test_gather_csr_rowptr():
     mpirun_singlenode(4, worker__test_gather_csr_rowptr)
 
@@ -187,7 +190,7 @@ class TestCoarserVertexID:
         assert unmatched_n == 10
         assert torch.all(matched == -1)
         assert torch.equal(cvids, torch.arange(33, 43))
-        
+
     def test_unmatched_some(self):
         matched = torch.arange(10)
         matched[1:10:3] = -1
@@ -200,7 +203,7 @@ class TestCoarserVertexID:
         expected_cvids[4] = 34
         expected_cvids[7] = 35
         assert torch.equal(cvids, expected_cvids)
-        
+
     def test_colocated(self):
         matched = torch.arange(40, 50)
 
@@ -248,7 +251,7 @@ def test_csr_mask():
     #   1
     #   2   5
     #   3   6   9
-    #   4   7  10  13   
+    #   4   7  10  13
     #   ...
 
     rowptr = torch.tensor(
@@ -256,7 +259,6 @@ def test_csr_mask():
     ).cumsum(dim=0)
     colidx = torch.concat(colidxs)
     nnz = colidx.shape[0]
-
 
     full_mask = get_csr_mask_by_rows(
         rowptr,
@@ -323,6 +325,7 @@ def test_csr_mask():
             torch.full((8,), 0),
         ]) > 0
     )
+
 
 def test_csr_mask_with_empty_rows():
     colidxs = [
@@ -467,6 +470,7 @@ def worker__test_row_exchanger(local_rank: int, world_size: int):
             torch.arange(13, 16)
         ]))
 
+
 def test_row_exchanger():
     mpirun_singlenode(3, worker__test_row_exchanger)
 
@@ -492,7 +496,7 @@ def worker__test_exchange_merge_adj(local_rank: int, world_size: int):
     cnv = 48
 
     cvids = [
-    # len   4  3  5   4
+        # len   4  3  5   4
         vec(7, 7, 22, 33),      # 1 1 2 3 -- c_rank
         vec(7, 15, 20, 33),     # 1 2 2 3
         vec(15, 17, 18, 20)     # 2 2 2 2
@@ -576,8 +580,10 @@ def worker__test_exchange_merge_adj(local_rank: int, world_size: int):
             33, 41, 42, 43  # em 22
         ))
 
+
 def test_exchange_merge_adj():
     mpirun_singlenode(3, worker__test_exchange_merge_adj)
+
 
 def worker__test_preserve_symmetry(local_rank, world_size):
     """
@@ -614,7 +620,7 @@ def worker__test_preserve_symmetry(local_rank, world_size):
             rs.append(torch.from_numpy(subg.indptr).to(torch.int64))
             cs.append(torch.from_numpy(subg.indices).to(torch.int64))
             ws.append(torch.from_numpy(subg.data).to(torch.int64))
-            
+
     else:
         rs, cs, ws = None, None, None
 
@@ -680,6 +686,7 @@ def worker__test_uncoarsen_level(local_rank: int, world_size: int):
         vec(2, 1, 1, 1, 0),
         vec(2, 1, 1, 0, 0)
     ][local_rank])
+
 
 def test_uncoarsen_level():
     mpirun_singlenode(3, worker__test_uncoarsen_level)

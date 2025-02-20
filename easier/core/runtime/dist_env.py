@@ -320,12 +320,12 @@ class DistEnv:
     def scatter(
         self, src: int, tensors: Sequence[torch.Tensor]
     ) -> torch.Tensor: ...
-    
+
     def scatter(
         self, src: int, tensors: Optional[Sequence[torch.Tensor]] = None
     ) -> torch.Tensor:
         raise NotImplementedError()
-    
+
     def _pre_scatter(self, src, tensors=None):
         assert 0 <= src < self.world_size
 
@@ -347,7 +347,6 @@ class DistEnv:
             objs = None  # unused
 
         return (self, src, objs), {}
-
 
     @typing.overload
     def scatter_object(self, src: int) -> Any: ...
@@ -459,7 +458,7 @@ class DummyDistEnv(DistEnv):
 
     def gather_object(self, dst: int, obj: _T) -> Optional[List[_T]]:
         return [copy.deepcopy(obj)]
-    
+
     def scatter(
         self, src: int, tensors: Optional[Sequence[torch.Tensor]]
     ) -> torch.Tensor:
@@ -715,7 +714,7 @@ class TorchDistEnv(DistEnv):
         dist.gather_object(obj, recvs, dst)
 
         return recvs  # type: ignore
-    
+
     def scatter(
         self, src: int, tensors: Optional[Sequence[torch.Tensor]]
     ) -> torch.Tensor:
@@ -733,7 +732,6 @@ class TorchDistEnv(DistEnv):
         dist.scatter(buffer, tensors, src)
 
         return buffer
-
 
     def scatter_object(self, src: int, objs: Optional[List[_T]] = None) -> _T:
         recvs = [None]
@@ -921,7 +919,7 @@ class MPIDistEnv(DistEnv):
 
     def gather_object(self, dst: int, obj: _T) -> Optional[List[_T]]:
         return self.comm.gather(obj, dst)
-    
+
     def scatter(
         self, src: int, tensors: Optional[Sequence[torch.Tensor]]
     ) -> torch.Tensor:
