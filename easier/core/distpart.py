@@ -316,10 +316,6 @@ def merge_cadj_adjw(
     ).repeat_interleave(
         unmerged_row_sizes
     )
-    print(unmerged_row_sizes)
-
-    print(adjwgt_unmerged.shape, (unmerged_rows.shape, cadj_unmerged.shape))  # sum up dups
-    # print(adjwgt_unmerged, (unmerged_rows, cadj_unmerged))  # sum up dups
 
     coarser_graph = scipy.sparse.csr_matrix(
         (adjwgt_unmerged, (unmerged_rows, cadj_unmerged)),  # sum up dups
@@ -384,15 +380,18 @@ def get_csr_mask_by_rows(
     res_begins = rowptr_begins[row_mask]    
     res_ends = rowptr_ends[row_mask]
 
+    ones = torch.ones_like(res_begins, dtype=torch.int8)
+
     # We'll skip the nnz-th item, as there is no more elements for the
     # rise signal to affect.
     col_rises = torch.zeros((nnz + 1,), dtype=torch.int8)
-    col_rises[res_begins] = 1
-    col_rises.scatter_add_(
-        dim=0,
-        index=res_ends,
-        src=torch.tensor([-1], dtype=torch.int8).expand_as(res_ends)
-    )
+
+    # Instead of `col_rises[begins] = 1`, use reduction scatter_add_ in case
+    # of empty rows, where a cell in `rises` should be written multi times
+    # and accumulated.
+    col_rises.scatter_add_(dim=0, index=res_begins, src=ones)
+    col_rises.scatter_add_(dim=0, index=res_ends, src=(-ones))
+
     col_levels = torch.cumsum(col_rises[:-1], dim=0, dtype=torch.int8)
     col_mask = col_levels == 1
 

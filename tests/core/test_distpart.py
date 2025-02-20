@@ -324,6 +324,99 @@ def test_csr_mask():
         ]) > 0
     )
 
+def test_csr_mask_with_empty_rows():
+    colidxs = [
+        vec(),
+        vec(),
+        vec(1, 2, 3),
+        vec(),
+        vec(1, 2, 3),
+        vec(1, 2, 3),
+        vec(),
+        vec(1, 2, 3),
+    ]
+    rowptr = torch.tensor(
+        [0] + [c.shape[0] for c in colidxs], dtype=torch.int64
+    ).cumsum(dim=0)
+    colidx = torch.concat(colidxs)
+    nnz = colidx.shape[0]
+
+    full_mask = get_csr_mask_by_rows(
+        rowptr,
+        torch.ones((8,), dtype=torch.bool),
+        nnz
+    )
+    assert full_mask.shape[0] == nnz
+    assert torch.all(full_mask == True)
+
+    none_mask = get_csr_mask_by_rows(
+        rowptr,
+        torch.zeros((8,), dtype=torch.bool),
+        nnz
+    )
+    assert none_mask.shape[0] == nnz
+    assert torch.all(none_mask == False)
+
+    even_mask = get_csr_mask_by_rows(
+        rowptr,
+        vec(1, 0, 1, 0, 1, 0, 1, 0) > 0,
+        nnz
+    )
+    assert even_mask.shape[0] == nnz
+    assert torch.equal(
+        even_mask,
+        vec(
+            # T
+            # F
+            1, 1, 1,  # T
+            # F
+            1, 1, 1,  # T
+            0, 0, 0,  # F
+            # T
+            0, 0, 0,  # F
+        ) > 0
+    )
+
+    odd_mask = get_csr_mask_by_rows(
+        rowptr,
+        vec(0, 1, 0, 1, 0, 1, 0, 1) > 0,
+        nnz
+    )
+    assert odd_mask.shape[0] == nnz
+    assert torch.equal(
+        odd_mask,
+        vec(
+            # F
+            # T
+            0, 0, 0,  # F
+            # T
+            0, 0, 0,  # F
+            1, 1, 1,  # T
+            # F
+            1, 1, 1,  # T
+        ) > 0
+    )
+
+    island_mask = get_csr_mask_by_rows(
+        rowptr,
+        vec(1, 1, 0, 0, 1, 1, 1, 0) > 0,
+        nnz
+    )
+    assert island_mask.shape[0] == nnz
+    assert torch.equal(
+        island_mask,
+        vec(
+            # T
+            # T
+            0, 0, 0,  # F
+            # F
+            1, 1, 1,  # T
+            1, 1, 1,  # T
+            # T
+            0, 0, 0,  # F
+        ) > 0
+    )
+
 
 def worker__test_row_exchanger(local_rank: int, world_size: int):
     assert world_size == 3
