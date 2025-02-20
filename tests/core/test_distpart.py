@@ -14,7 +14,8 @@ import scipy.sparse
 from easier.core.distpart import CoarseningLevel, DistConfig, \
     gather_csr_graph, assign_cvids_unmatched, assign_cvids_colocated, \
     align_coarser_vids, get_csr_mask_by_rows, CoarseningRowDataExchanger, \
-    exchange_cadj_adjw, merge_cadj_adjw, distpart_kway, uncoarsen_level
+    exchange_cadj_adjw, merge_cadj_adjw, distpart_kway, uncoarsen_level, \
+    metis_wrapper
 from easier.core.runtime.dist_env import get_cpu_dist_env
 import easier.cpp_extension as _C
 
@@ -528,8 +529,8 @@ def worker__test_preserve_symmetry(local_rank, world_size):
     colidx = dist_env.scatter_object(0, cs)  # type: ignore
     adjw = dist_env.scatter_object(0, ws)  # type: ignore
 
-    def _hook_metis(nparts, xadj, adjncy, vwgt, adjwgt):
-        cnv = int(xadj.shape[0]) - 1
+    def _hook_metis(nparts, rowptr, colidx, vwgt, adjwgt):
+        cnv = int(rowptr.shape[0]) - 1
 
         assert torch.all(vwgt >= 1)
         assert torch.any(vwgt >= 2)
@@ -538,7 +539,7 @@ def worker__test_preserve_symmetry(local_rank, world_size):
         assert torch.any(adjwgt >= 2)
 
         g = scipy.sparse.csr_matrix(
-            (adjwgt, adjncy, xadj), shape=(cnv, cnv)
+            (adjwgt, colidx, rowptr), shape=(cnv, cnv)
         ).todense()
         assert numpy.all(g - g.T == 0)
 
@@ -548,7 +549,10 @@ def worker__test_preserve_symmetry(local_rank, world_size):
         return 99, r.numpy()
 
     # Because of the `while True` loop, we have at least coarsened once.
-    with patch('mgmetis.metis.part_graph_kway', wraps=_hook_metis) as mock:
+    with patch(
+        f'{metis_wrapper.__module__}.{metis_wrapper.__name__}',
+        wraps=_hook_metis
+    ) as mock:
         membership = distpart_kway(dist_config, rowptr, colidx, adjw)
 
     if local_rank == 0:

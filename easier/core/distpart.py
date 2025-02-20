@@ -601,6 +601,17 @@ def coarsen_level(
     return new_lv, cvids
 
 
+def metis_wrapper(nparts, rowptr, colidx, vwgt, adjwgt):
+    import pymetis
+    ncuts, membership = pymetis.part_graph(
+        nparts=nparts,
+        xadj=rowptr,
+        adjncy=colidx,
+        vweights=vwgt,
+        eweights=adjwgt
+    )
+    return ncuts, membership
+
 def distpart_kway(
     dist_config: DistConfig,
     rowptr: torch.Tensor,
@@ -662,11 +673,10 @@ def distpart_kway(
         assert cgraph is not None
         vwgt0, rowptr0, colidx0, adjw0 = cgraph
 
-        from mgmetis import metis
-        ncuts, membership = metis.part_graph_kway(
+        ncuts, membership = metis_wrapper(
             nparts=dist_env.world_size,
-            xadj=rowptr0,
-            adjncy=colidx0,
+            rowptr=rowptr0,
+            colidx=colidx0,
             vwgt=vwgt0,
             adjwgt=adjw0
         )
