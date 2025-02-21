@@ -591,8 +591,8 @@ def log_rewrite_statistics(
 ):
     dist_env = get_cpu_dist_env()
 
-    ncuts_selector = 0
-    ncuts_reducer = 0
+    nrecv_selector = 0
+    nrecv_reducer = 0
 
     for submod, rooti_path_oset in get_selectors_reducers(modules, graphs).items():
         (rooti, path) = next(iter(rooti_path_oset))
@@ -618,23 +618,23 @@ def log_rewrite_statistics(
 
             for w, wls in enumerate(workers_recv_lengths):
                 workers_recv_lengths[w][w] = 0  # exclude local data
-            ncuts = sum(itertools.chain(*workers_recv_lengths))
+            nrecv = sum(itertools.chain(*workers_recv_lengths))
 
             if isinstance(submod, esr.Selector):
-                ncuts_selector += ncuts
+                nrecv_selector += nrecv
             else:
-                ncuts_reducer += ncuts
+                nrecv_reducer += nrecv
 
     if dist_env.rank == 0:
-        logger.debug(f"Selector ncuts = {ncuts_selector}")
-        logger.debug(f"Reducer ncuts  = {ncuts_reducer}")
+        logger.debug(f"Selector recvs = {nrecv_selector}")
+        logger.debug(f"Reducer recvs  = {nrecv_reducer}")
 
         reducer_weight = 10
         logger.debug(
-            f"ncuts (unweighted) = {ncuts_reducer + ncuts_selector}"
+            f"recvs (unweighted) = {nrecv_reducer + nrecv_selector}"
         )
         logger.debug(
-            f"ncuts (weighted)   = "
-            f"{ncuts_reducer * reducer_weight + ncuts_selector}"
+            f"recvs (weighted)   = "
+            f"{nrecv_reducer * reducer_weight + nrecv_selector}"
             f"\t(reducer weight = {reducer_weight})"
         )
