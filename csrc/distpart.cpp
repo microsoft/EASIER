@@ -37,15 +37,12 @@ void locally_match_heavy_edge(
     for (int64_t row = 0; row < local_nv; row++) {
         if (matched_data[row] == -1) {
             if (rowptr_data[row] == rowptr_data[row + 1]) {
-                // isolated vertex, matched with the next unmatched local row,
-                // ignoring max vertex weight constraint.
-                for (int64_t row2 = row + 1; row2 < local_nv; row2++) {
-                    if (matched_data[row2] == -1) {
-                        matched_data[row] = row2 + start;
-                        matched_data[row2] = row + start;
-                        break;
-                    }
-                }
+                // leave isolated vertexes unmatched
+                // (and do not match it with itself)
+                continue;
+                // TODO match isolated vertex with whatever next, the
+                // prerequisite is to sort vertexes by degrees.
+
             } else {
                 // match with adj (remote) vertexs using heavy-edge matching
                 int64_t maxadjvid = -1;

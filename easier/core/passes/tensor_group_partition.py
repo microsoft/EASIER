@@ -50,9 +50,6 @@ def parallel_partition_graph(
     # - `csr_matrix` sums up duplicated matrix cells during construction
     # - `csr_matrix` automatically choose int32/int64 for its `indptr` and
     #   `indices` ndarrays regarding upperbounds of the height and the weight.
-    # - `parmetis.part_kway` can call 32bit/64bit underlying native library
-    #   depending on its `xadj` argument i.e. `graph.indptr`.
-    #   Other arguments, including weights, will be casted to that int type.
     selector_graph = scipy.sparse.csr_matrix(
         (subadjmat_height, adjmat_width), dtype=np.int32)
     reducer_graph = scipy.sparse.csr_matrix(
@@ -91,8 +88,8 @@ def parallel_partition_graph(
     graph = (selector_graph.minimum(1) + reducer_graph).tolil()
     # scipy warns against `setdiag` on CSR. LIL format is recommended instead.
 
-    # ParMETIS require the diagonal (relatively to the global adjmat)
-    # are zeros and excluded from sparsity.
+    # Set the diagonal (relatively to the global adjmat)
+    # zeros and excluded from sparsity.
     off_diag: int = int(vtxdist[rank])
     graph.setdiag(0, off_diag)
     graph = graph.tocsr()
@@ -366,7 +363,7 @@ def partition_tensor_groups_with_adjmat(
     # endfor comm_pairs
 
     #
-    # Invoke ParMETIS
+    # Invoke partition
     #
 
     # e.g. [0, N, 2N, ..., min(accum_n, wN)]
@@ -431,7 +428,7 @@ def synchronize_partition_result(
     local_membership: torch.Tensor
 ) -> Dict[EasierTensorGroup, ElemPart]:
     """
-    Synchronize ParMETIS-partition results ("elempart") into each TensorGroup.
+    Synchronize partition results ("elempart") into each TensorGroup.
 
     Remark:
     Synchronization is needed because partition results of a single
@@ -440,7 +437,7 @@ def synchronize_partition_result(
     specific to current worker.
     """
     #
-    # Exchange ParMETIS result
+    # Exchange partition result
     # to construct partition info of every TensorGroup on every worker
     #
     dist_env = get_cpu_dist_env()

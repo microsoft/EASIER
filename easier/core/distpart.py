@@ -683,6 +683,7 @@ def distpart_kway(
     if dist_env.rank == 0:
         assert cgraph is not None
         vwgt0, rowptr0, colidx0, adjw0 = cgraph
+        log_metis_input_statistics(vwgt0, rowptr0, colidx0, adjw0)
 
         ncuts, membership = metis_wrapper(
             nparts=dist_env.world_size,
@@ -692,11 +693,9 @@ def distpart_kway(
             adjwgt=adjw0
         )
 
-        maxvwgt = int(vwgt0.max())
-        maxdegree = int((rowptr0[1:] - rowptr0[:-1]).max())
         logger.debug(
-            "METIS result on EASIER-coarsened graph: "
-            f"max_vwgt={maxvwgt}, max_degree={maxdegree}, ncuts={ncuts}"
+            f"METIS result on EASIER-coarsened graph: ncuts={ncuts}"
+            "\t(without uncoarsening refinement)"
         )
 
         # TODO scatter tensor list API
@@ -729,6 +728,31 @@ def distpart_kway(
 
     # Returns local_membership for vertexes of the original input graph
     return local_membership
+
+
+def log_metis_input_statistics(
+    vwgt: torch.Tensor,
+    rowptr: torch.Tensor,
+    colidx: torch.Tensor,
+    adjwgt: torch.Tensor,
+):
+    import logging
+    if logger.level > logging.DEBUG:
+        return
+
+    def _debug(category, ints: torch.Tensor):
+        amin, amax = torch.aminmax(ints)
+        std, mean = torch.std_mean(ints.to(torch.float32))
+        logger.debug(
+            f"METIS input of EASIER-coarsened {category}"
+            f": max={int(amax)}, min={int(amin)}"
+            f", median={int(ints.median())}"
+            f", mean={float(mean)}, std={float(std)}"
+        )
+
+    _debug("vwgt", vwgt)
+    _debug("degree", rowptr[1:] - rowptr[:-1])
+    _debug("adjw", adjwgt)
 
 
 def uncoarsen_level(

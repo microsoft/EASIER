@@ -27,7 +27,7 @@ from easier.core.passes.sparse_encoding.reorder_plan import \
 from easier.core.passes.utils import \
     EasierInterpreter, OrderedSet, \
     vector_index_of, zipsort_using_order, \
-    get_selector_reducer_idx_partition_pair
+    get_selector_reducer_idx_partition_pair, get_selectors_reducers
 
 
 def calculate_paired_in_out_idx(
@@ -479,7 +479,7 @@ def encode_sparsity(modules: List[esr.Module], graphs: List[Graph]):
     their read/write are sequential (as much as possible).
 
     For those TensorGroups not included in the cascade reordering, they will
-    remain in the immediate order as ParMETIS partition results.
+    remain in the immediate order as tensor group partition results.
     """
     # copy the `elemparts:Dict` in case the dict is used somewhere else
     elemparts = dict(modules[0].easier_elemparts)
@@ -578,7 +578,63 @@ def encode_sparsity(modules: List[esr.Module], graphs: List[Graph]):
 
     IdxMover(modules, graphs).run()
 
+    log_rewrite_statistics(modules, graphs)
+
     for root in modules:
         root.easier_elemparts = elemparts
 
     return modules, graphs
+
+
+def log_rewrite_statistics(
+    modules: Sequence[esr.Module], graphs: Sequence[Graph]
+):
+    dist_env = get_cpu_dist_env()
+
+    ncuts_selector = 0
+    ncuts_reducer = 0
+
+    for submod, rooti_path_oset in get_selectors_reducers(modules, graphs).items():
+        (rooti, path) = next(iter(rooti_path_oset))
+
+        workers_recv_lengths = dist_env.gather_object(
+            0, submod.runtime_halos_recv_lengths
+        )
+        if dist_env.rank == 0:
+            assert workers_recv_lengths is not None
+
+            strlenmax = max(
+                len(str(l)) for wls in workers_recv_lengths for l in wls
+            )
+            recvlenmat = "\n".join(
+                "\t[" + (", ".join(str(l).rjust(strlenmax) for l in wls)) + "]"
+                for wls in workers_recv_lengths
+            )
+
+            submod_hint = \
+                f"(modules[{rooti}]:{modules[rooti].__class__.__name__})" \
+                f".({path}:{submod.__class__.__name__})"
+            logger.debug(f"{submod_hint} recvs: [\n{recvlenmat}\n]")
+
+            for w, wls in enumerate(workers_recv_lengths):
+                workers_recv_lengths[w][w] = 0  # exclude local data
+            ncuts = sum(itertools.chain(*workers_recv_lengths))
+
+            if isinstance(submod, esr.Selector):
+                ncuts_selector += ncuts
+            else:
+                ncuts_reducer += ncuts
+
+    if dist_env.rank == 0:
+        logger.debug(f"Selector ncuts = {ncuts_selector}")
+        logger.debug(f"Reducer ncuts  = {ncuts_reducer}")
+
+        reducer_weight = 10
+        logger.debug(
+            f"ncuts (unweighted) = {ncuts_reducer + ncuts_selector}"
+        )
+        logger.debug(
+            f"ncuts (weighted)   = "
+            f"{ncuts_reducer * reducer_weight + ncuts_selector}"
+            f"\t(reducer weight = {reducer_weight})"
+        )

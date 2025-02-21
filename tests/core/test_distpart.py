@@ -39,10 +39,10 @@ def vec(*vs):
 class TestCppDistPart:
     def test_isolated_rows(self):
         colidxs = [
-            vec(),  # v10: isolated row -- => 11
-            vec(5, 12, 22),  # v11   -- <= 10
-            vec(7, 11, 21),  # v12
-            vec()  # v13: isolated row -- no more, unmatched
+            vec(),  # v10: isolated row
+            vec(5, 12, 22),  # v11  => 12
+            vec(7, 11, 21),  # v12  <= 11
+            vec()  # v13: isolated row
         ]
 
         start, end = 10, 10 + len(colidxs)
@@ -59,7 +59,7 @@ class TestCppDistPart:
             adjwgt=torch.ones_like(colidx, dtype=torch.int64),
         )
         assert torch.equal(matched, vec(
-            11, 10, 21, -1
+            -1, 12, 11, -1
         ))
 
     def test_subsequent_matching(self):
