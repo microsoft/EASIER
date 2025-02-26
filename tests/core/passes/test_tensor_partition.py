@@ -70,7 +70,7 @@ def test_partition_tensor_groups(mock_mpi_dist_env):
     with patch(PAR_PART_GRAPH_FUNCNAME) as mock_partgraph:
 
         mock_partgraph.return_value = [
-            "ncuts_not_used", "local_membership_not_used"
+            "local_membership_not_used"
         ]
 
         # - for each CommPair called four times:
@@ -171,7 +171,7 @@ def test_partition_tensor_groups(mock_mpi_dist_env):
     with patch(PAR_PART_GRAPH_FUNCNAME) as mock_partgraph:
 
         mock_partgraph.return_value = [
-            "ncuts_not_used", "local_membership_not_used"
+            "local_membership_not_used"
         ]
 
         recv_res = [
@@ -261,7 +261,7 @@ def test_partition_tensor_groups(mock_mpi_dist_env):
     with patch(PAR_PART_GRAPH_FUNCNAME) as mock_partgraph:
 
         mock_partgraph.return_value = [
-            "ncuts_not_used", "local_membership_not_used"
+            "local_membership_not_used"
         ]
 
         recv_res = [

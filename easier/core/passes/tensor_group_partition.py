@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing_extensions import Literal, OrderedDict, TypeAlias
 import functools
 import more_itertools
+import os
 
 import torch
 from torch.fx.graph import Graph
@@ -13,7 +14,6 @@ from torch.fx.node import Node
 
 import numpy as np
 import scipy.sparse
-from mgmetis import parmetis
 from torch.nn.modules import Module
 
 import easier.core.module as esr
@@ -25,9 +25,8 @@ from easier.core.passes.utils import \
     normalize_reducer_call_into_args, normalize_selector_call_into_args, \
     get_easier_tensors
 from easier.core.runtime.dist_env import \
-    get_cpu_dist_env, get_mpi_communicator
+    get_cpu_dist_env
 from easier.core.utils import EasierJitException, logger
-
 
 # METIS adj weights are ints
 METIS_ADJWGT_REDUCER: int = 10
@@ -51,9 +50,6 @@ def parallel_partition_graph(
     # - `csr_matrix` sums up duplicated matrix cells during construction
     # - `csr_matrix` automatically choose int32/int64 for its `indptr` and
     #   `indices` ndarrays regarding upperbounds of the height and the weight.
-    # - `parmetis.part_kway` can call 32bit/64bit underlying native library
-    #   depending on its `xadj` argument i.e. `graph.indptr`.
-    #   Other arguments, including weights, will be casted to that int type.
     selector_graph = scipy.sparse.csr_matrix(
         (subadjmat_height, adjmat_width), dtype=np.int32)
     reducer_graph = scipy.sparse.csr_matrix(
@@ -92,24 +88,51 @@ def parallel_partition_graph(
     graph = (selector_graph.minimum(1) + reducer_graph).tolil()
     # scipy warns against `setdiag` on CSR. LIL format is recommended instead.
 
-    # ParMETIS require the diagonal (relatively to the global adjmat)
-    # are zeros and excluded from sparsity.
+    # Set the diagonal (relatively to the global adjmat)
+    # zeros and excluded from sparsity.
     off_diag: int = int(vtxdist[rank])
     graph.setdiag(0, off_diag)
     graph = graph.tocsr()
 
-    comm = get_mpi_communicator()
-    # `ncuts` is already summed up and replicated;
-    # `local_membership` works like this:
-    #   the result of`AllGather(local_membership)` is the result of
-    #   non-distributed version of graph partitioning.
-    ncuts, local_membership = parmetis.part_kway(
-        world_size, graph.indptr, graph.indices, vtxdist, comm,
-        adjwgt=graph.data)
+    metis_impl = os.environ.get('EASIER_METIS_IMPL', 'EASIER').upper()
+    if metis_impl == 'EASIER':
+        from easier.core.distpart import distpart_kway, DistConfig
+        local_membership = distpart_kway(
+            DistConfig(
+                int(vtxdist[-1]),
+                (vtxdist[1:] - vtxdist[:-1]).tolist()
+            ),
+            torch.from_numpy(graph.indptr).to(torch.int64),
+            torch.from_numpy(graph.indices).to(torch.int64),
+            torch.from_numpy(graph.data).to(torch.int64)
+        )
 
-    local_membership = torch.tensor(local_membership)
+    elif metis_impl == 'PARMETIS':
+        from mgmetis import parmetis
+        from mpi4py import MPI
+        import time
+        comm: MPI.Intracomm = MPI.COMM_WORLD
+        parmetis_start = time.time()
+        # `ncuts` is already summed up and replicated;
+        # `local_membership` works like this:
+        #   the result of`AllGather(local_membership)` is the result of
+        #   non-distributed version of graph partitioning.
+        ncuts, local_membership = parmetis.part_kway(
+            comm.size, graph.indptr, graph.indices, vtxdist, comm,
+            adjwgt=graph.data)
 
-    return ncuts, local_membership
+        parmetis_latency = time.time() - parmetis_start
+        logger.debug(
+            f"ParMetis finished: ncuts={ncuts},"
+            f" total time: {parmetis_latency}sec"
+        )
+
+        local_membership = torch.tensor(local_membership)
+
+    else:
+        raise EasierJitException('Unknown Metis implementation')
+
+    return local_membership
 
 
 @dataclass
@@ -340,7 +363,7 @@ def partition_tensor_groups_with_adjmat(
     # endfor comm_pairs
 
     #
-    # Invoke ParMETIS
+    # Invoke partition
     #
 
     # e.g. [0, N, 2N, ..., min(accum_n, wN)]
@@ -349,7 +372,7 @@ def partition_tensor_groups_with_adjmat(
 
     subadjmat_height = int(vtxdist[rank + 1] - vtxdist[rank])
 
-    ncuts, local_membership = parallel_partition_graph(
+    local_membership = parallel_partition_graph(
         world_size, rank,
         subadjmat_height=subadjmat_height, adjmat_width=accum_n,
         vtxdist=vtxdist,
@@ -405,7 +428,7 @@ def synchronize_partition_result(
     local_membership: torch.Tensor
 ) -> Dict[EasierTensorGroup, ElemPart]:
     """
-    Synchronize ParMETIS-partition results ("elempart") into each TensorGroup.
+    Synchronize partition results ("elempart") into each TensorGroup.
 
     Remark:
     Synchronization is needed because partition results of a single
@@ -414,7 +437,7 @@ def synchronize_partition_result(
     specific to current worker.
     """
     #
-    # Exchange ParMETIS result
+    # Exchange partition result
     # to construct partition info of every TensorGroup on every worker
     #
     dist_env = get_cpu_dist_env()
