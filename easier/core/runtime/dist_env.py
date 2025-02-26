@@ -16,15 +16,9 @@ import copy
 import torch
 import torch.distributed as dist
 
-from mpi4py import MPI
-
 from easier.core.utils import logger, EasierJitException
 
 _T = TypeVar("_T")
-
-
-def is_launched_by_easier_launcher():
-    return os.environ.get("EASIER_USE_EASIER_LAUNCHER", None) is not None
 
 
 def _wrap_commapi_pre_filter(prefilter, api):
@@ -41,9 +35,11 @@ def _wrap_commapi_pre_filter(prefilter, api):
 
 
 class DistEnv:
-    def __init__(self,
-                 world_size: int, rank: int, local_rank: int, host_rank: int,
-                 device: Union[str, torch.device]) -> None:
+    def __init__(
+        self,
+        world_size: int, rank: int, local_rank: int,
+        device: Union[str, torch.device]
+    ) -> None:
         """
         Args:
         -   device: To serve as the channel for communication.
@@ -53,7 +49,6 @@ class DistEnv:
         self.world_size = world_size
         self.rank = rank
         self.local_rank = local_rank
-        self.host_rank = host_rank
 
         # existing `torch.device` instance remains unchanged.
         self.comm_device = torch.device(device)
@@ -76,10 +71,6 @@ class DistEnv:
                         cls, member_name,
                         _wrap_commapi_pre_filter(pre_filter, member)
                     )
-
-    @property
-    def is_host(self):
-        return self.rank == self.host_rank
 
     @typing.overload
     def broadcast(self, src: int, tensor: torch.Tensor) -> torch.Tensor: ...
@@ -366,8 +357,7 @@ class DummyDistEnv(DistEnv):
             comm_device = torch.device(device_type, 0)
             torch.cuda.set_device(comm_device)
 
-        super().__init__(world_size=1, rank=0, local_rank=0, host_rank=0,
-                         device=comm_device)
+        super().__init__(world_size=1, rank=0, local_rank=0, device=comm_device)
 
     def broadcast(self, src: int, tensor: Optional[torch.Tensor] = None,
                   *,
@@ -436,12 +426,21 @@ class DummyDistEnv(DistEnv):
 
 
 class TorchDistEnv(DistEnv):
-    def __init__(self, device_type: Literal['cpu', 'cuda'],
-                 torch_dist_init_kwargs={}) -> None:
-        world_size = int(os.environ["WORLD_SIZE"])
-        rank = int(os.environ["RANK"])
-        local_rank = int(os.environ["LOCAL_RANK"])
-        host_rank = 0
+    def __init__(
+        self,
+        device_type: Literal['cpu', 'cuda'],
+        backend: Literal['gloo', 'nccl', 'mpi'],
+        torch_dist_init_kwargs={}
+    ) -> None:
+        # NOTE `torch.distributed` does not have an API to get "local rank"
+        # (i.e. the card rank to the machine).
+        # We assume the `backend` arg reflects the env var settings
+        if backend in ['gloo', 'nccl']:
+            local_rank = int(os.environ['LOCAL_RANK'])
+        elif backend in ['mpi']:
+            local_rank = int(os.environ["OMPI_COMM_WORLD_LOCAL_RANK"])
+        else:
+            raise EasierJitException(f"Unknown backend {backend}")
 
         if device_type == 'cpu':
             comm_device = torch.device('cpu')
@@ -449,17 +448,22 @@ class TorchDistEnv(DistEnv):
             comm_device = torch.device(device_type, local_rank)
             torch.cuda.set_device(comm_device)
 
-        super().__init__(world_size, rank, local_rank, host_rank, comm_device)
-
-        # TODO as we have enabled MPI, consider remove GLOO backend
-        backend = 'nccl' if device_type == 'cuda' else 'gloo'
-        self.backend = backend
-        dist.destroy_process_group
-
         dist.init_process_group(backend, **torch_dist_init_kwargs)
+
+        super().__init__(
+            world_size=dist.get_world_size(),
+            rank=dist.get_rank(),
+            local_rank=local_rank,
+            device=comm_device
+        )
+
+        self.backend = backend
+
         logger.info(
-            f"Init torch.distributed "
-            f"backend={backend} rank={rank} local_rank={local_rank}")
+            "Init torch.distributed"
+            f" backend={self.backend} rank={self.rank}"
+            f" local_rank={self.local_rank}"
+        )
 
     def broadcast(self, src: int, tensor: Optional[torch.Tensor] = None,
                   *,
@@ -691,275 +695,50 @@ def torch_dtype_to_numpy_dtype(torch_dtype: torch.dtype):
     return torch.empty([0], dtype=torch_dtype).numpy().dtype
 
 
-class MPIDistEnv(DistEnv):
-    def __init__(self, local_rank: Optional[int] = None) -> None:
-        self.comm: MPI.Comm = get_mpi_communicator()
+_runtime_dist_env: Optional[DistEnv] = None
 
-        if local_rank is None:
-            # mpi4py.MPI.Comm does not have an API to get local rank,
-            # so when read the local rank from OMPI mpirun env vars.
-            # In cases that EASIER programs are not launched by mpirun,
-            # mpi4py.MPI.Comm.WORLD still work (i.e. singleton world),
-            # but the mpirun env vars does not exist, where we need to figure
-            # out local rank ourselves.
-            local_rank = int(os.environ["OMPI_COMM_WORLD_LOCAL_RANK"])
-
-        super().__init__(self.comm.size, self.comm.rank,
-                         local_rank=local_rank,
-                         host_rank=0,
-                         device='cpu')
-
-        self._mpi_dtypes: Dict[torch.dtype, Optional[MPI.Datatype]] = {}
-
-    def _check_unsupported_buffer_dtype(self, dtype: torch.dtype, method: str):
-        """
-        TODO MPI buffer-based APIs (capitalized APIs like Irecv) do not support
-        torch.float16 etc. directly.
-        We may need to bypass DLPack (if input is torch Tensor not numpy array)
-        and specify it as uint8.
-        """
-        from mpi4py.util import dtlib
-
-        if dtype not in self._mpi_dtypes:
-            try:
-                mpi_dtype = dtlib.from_numpy_dtype(
-                    torch_dtype_to_numpy_dtype(dtype)
-                )
-            except ValueError:  # conversion fails
-                mpi_dtype = None
-
-            self._mpi_dtypes[dtype] = mpi_dtype
-
-        unsupported = self._mpi_dtypes[dtype] is None
-        if unsupported:
-            raise NotImplementedError(
-                f'MPI method {method} does not support dtype {dtype}'
-            )
-
-    def broadcast(self, src: int, tensor: Optional[torch.Tensor] = None,
-                  *,
-                  shape: Optional[Sequence[int]] = None,
-                  dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        if src == self.rank:
-            assert tensor is not None
-
-            self._check_unsupported_buffer_dtype(tensor.dtype, 'Bcast')
-
-            # uppercase, buffer-based mpi4py op can be used on torch.Tensor,
-            # via __dlpack__ protocol.
-            self.comm.Bcast(tensor, src)
-            return tensor
-        else:
-            assert shape is not None and dtype is not None
-
-            self._check_unsupported_buffer_dtype(dtype, 'Bcast')
-
-            recv_buffer = torch.empty(shape, dtype=dtype,
-                                      device=self.comm_device)
-            self.comm.Bcast(recv_buffer, src)  # uppercase, buffer-based
-            return recv_buffer
-
-    def broadcast_object_list(self, src: int,
-                              object_list: Optional[list] = None,
-                              ) -> Optional[list]:
-        if src == self.rank:
-            return self.comm.bcast(object_list, src)  # pickle-based
-        else:
-            object_list = None  # unused
-            return self.comm.bcast(None, src)  # pickle-based
-
-    # TODO MPIDistEnv.def_isend/def_irecv/batch_isend_irecv have very different
-    # semantics than TorchDistEnv. As the abstraction of torch.distributed over
-    # NCCL requires the non-blocking communication is defined-then-invoked
-    # within a context of a "batch" (e.g. with NCCL these p2p ops become
-    # a single ring-topo call).
-    #
-    # We definitely need to re-evaluate the network performance, and adapt
-    # the DistEnv code for that. So for now let's simply invoke MPI p2p
-    # immediately.
-
-    def def_isend(self, tensor: torch.Tensor, dst: int, tag: int
-                  ) -> MPI.Request:
-
-        self._check_unsupported_buffer_dtype(tensor.dtype, 'Isend')
-
-        return self.comm.Isend(tensor, dst, tag)
-
-    def def_irecv(self, buffer: torch.Tensor, src: int, tag: int
-                  ) -> MPI.Request:
-
-        self._check_unsupported_buffer_dtype(buffer.dtype, 'Irecv')
-        # mpi4py has very different usage on pickle-based recv method, where
-        # the input must still be a memory buffer, but should be **big enough**
-        # to store the pickle bytesstream.
-        # TODO We may need to:
-        # - cast float16 to float32 and send/recv;
-        # - for torch Tensor, it's handled by DLPack protocol, where dtype is
-        #   respected, we may "reinterpret cast" it to uint8 Tensor and Irecv.
-
-        return self.comm.Irecv(buffer, src, tag)
-
-    def batch_isend_irecv(self, p2p_ops: List[MPI.Request]
-                          ) -> List[MPI.Request]:
-        # TODO MPIDistEnv.batch_isend_irecv is a NO-OP.
-        return p2p_ops
-
-    def all_to_all_single(self, local_input: torch.Tensor) -> torch.Tensor:
-        # We use mpi4py lowercase `alltoall` since `local_input` is a
-        # small vector and cheap to pickle.
-        return torch.tensor(self.comm.alltoall(local_input.tolist()))
-
-    def all_to_all(self, tensors: Sequence[torch.Tensor]
-                   ) -> List[torch.Tensor]:
-        # TODO we use mpi4py lowercase, pickle-based `alltoall` to avoid
-        # manage the concat-ed buffer for upper-case, buffer-based `Alltoallv`,
-        # it's ok since this is only called JIT-time.
-        return self.comm.alltoall(tensors)
-
-    def all_gather_into_tensor(self, send_tensor: torch.Tensor,
-                               form: Literal['concat', 'stack'] = 'concat'):
-
-        self._check_unsupported_buffer_dtype(send_tensor.dtype, 'Allgather')
-
-        shape = list(send_tensor.shape)
-        if form == 'concat':
-            shape[0] = shape[0] * self.world_size
-        else:
-            shape.insert(0, self.world_size)
-
-        recv_buffer = torch.empty(
-            shape, dtype=send_tensor.dtype, device=self.comm_device)
-
-        # `all_gather_into_tensor` requires all send_tensors have the same
-        # shape, as long as they are C-layout we don't need to specify the
-        # mpi4py buffer spec.
-        self.comm.Allgather(send_tensor, recv_buffer)
-
-        return recv_buffer
-
-    def all_gather(
-        self, send_tensor: torch.Tensor,
-        # NOTE base method has `shape: Seq[Seq[int]]` but here we have made it
-        # `shape: List[Tuple[int]]` by the _pre_all_gather filter.
-        shapes: List[Tuple[int, ...]]
-    ) -> List[torch.Tensor]:
-        # TODO `send_tensor` may have different batch sizes, we simply use
-        # lowercase, pickle-baed `allgather` to do it. It's ok since
-        # `dist_env.all_gather` is used only in `easier.Tensor.collect()`.
-        recv_tensors = self.comm.allgather(send_tensor)
-        return recv_tensors
-
-    def gather(self, dst: int, send_tensor: torch.Tensor
-               ) -> Optional[List[torch.Tensor]]:
-        # TODO use pickle-based `comm.gather`.
-        # Actually `dist_env.gather` is only used in `esr.Tensor.save()` where
-        # it does not require to split the resultant buffer into tensors.
-        # TODO send_tensor may have different batch sizes, use buffer-based
-        # `comm.Gatherv`.
-        return self.comm.gather(send_tensor, dst)
-
-    def gather_object(self, dst: int, obj: _T) -> Optional[List[_T]]:
-        return self.comm.gather(obj, dst)
-
-    def scatter_object(self, src: int, objs: Optional[List[_T]] = None) -> _T:
-        return self.comm.scatter(objs, src)  # type: ignore
-
-    def abort(self):
-        self.comm.Abort(-1)
-
-    def barrier(self):
-        self.comm.Barrier()
-
-
-_dist_envs: Dict[str, DistEnv] = {}
-_runtime_backend: Literal['cpu', 'cuda', None] = None
-
-
-def set_runtime_dist_env_backend(
-    backend: Literal['cpu', 'cuda']
+def init_runtime_dist_env(
+    comm_device_type: Literal['cpu', 'cuda'],
+    comm_backend: Literal['gloo', 'nccl', 'mpi', None]
 ):
-    logger.info(f"Set runtime dist env backend type to {backend}")
-
-    global _runtime_backend
-    _runtime_backend = backend
-
-
-def _get_or_init_dist_env(backend: Literal['cpu', 'cuda']) -> DistEnv:
     """
-    If EASIER JIT backend is CUDA:
-    -   We rely on `torch.distributed` with CUDA backend that encapsulates NCCL
-        for runtime halo exchange.
-        This requires environment variables like WORLD_SIZE RANK MASTER_ADDR
-        MASTER_PORT etc. to be set correctly.
+    If `comm_backend` is not specified, infer from the environment:
 
-    If EASIER JIT backend is CPU:
-    -   We rely on a MPI-based DistEnv for runtime halo exchange.
+    -   'gloo' for 'cpu', 'nccl' for 'cuda';
 
-    P.S. About MPIRUN:
-    For diagnostic purposes, we may launch EASIER programs with `mpirun`
-    where no environment variables like RANK or MASTER_ADDR exist.
-    In such cases, we can omit the wiring-up process for MPI communicator and
-    directly use MPI_COMM_WORLD, and EASIER CPU backend is immediately ready.
+    If users would like to use MPIRUN plus `torch.distributed` built from
+    source with (CUDA-aware) MPI support,
+    they should specify 'mpi' explicitly.
+
+
+    The real backend to use for each `device_type` and `comm_backend`
+    combination is:
+    (dist-xx means the backend wrapped by `torch.distributed`)
+
+    |       |    gloo     |    nccl     |     mpi     |
+    | ----- | ----------- | ----------- | ----------- |
+    |  cpu  |  dist-gloo  |  dist-nccl  |  dist-mpi   |
+    | ----- | ----------- | ----------- | ----------- |
+    |  cuda |  dist-gloo  |  dist-nccl  |  dist-mpi   |
+
+    TODO will data-to-send still be too big for CUDA memory, even though
+    we move AOT-compilation data back to CPU each time after comm?
+
+    P.S. it's possible to use MPIRUN but use `nccl` instead,
+    if users set WORLD_SIZE RANK LOCAL_RANK MASTER_ADDR MASTER_PORT etc.
+    to reconstruct the environment that `torch.distributed + nccl` needs.
+
     """
-    dist_env = _dist_envs.get(backend, None)
-    if dist_env is None:
-        if os.getenv('EASIER_USE_MPIRUN') is not None:
-            # Allow directly launching with `mpirun`, for debug purposes.
-            comm: MPI.Intracomm = MPI.COMM_WORLD
-            os.environ["WORLD_SIZE"] = str(comm.size)
-            os.environ["RANK"] = str(comm.rank)
-
-            # NOTE MPI standard doesn't define the concept "local rank" and
-            # mpi4py doesn't offer such an API either.
-            # Read OpenMPI-specific environment variable instead.
-            os.environ["LOCAL_RANK"] = os.environ["OMPI_COMM_WORLD_LOCAL_RANK"]
-
-            if not ("MASTER_ADDR" in os.environ and
-                    "MASTER_PORT" in os.environ):
-                # The MASTER_ADDR:MASTER_PORT pair is only needed by
-                # NCCL communication backend via `torch.distributed`.
-                logger.warning(
-                    "Environment variables MASTER_ADDR and MASTER_PORT are"
-                    " not set under `mpirun`"
-                    " (e.g."
-                    " `mpirun -x MASTER_ADDR=ip -x MASTER_PORT=port ...`)"
-                    "\n"
-                    "'localhost:23456' will be set for single-node"
-                    " multiprocessing."
-                    " For multi-node, please set them correcly."
-                )
-                os.environ["MASTER_ADDR"] = "localhost"
-                os.environ["MASTER_PORT"] = "23456"
-
-            if backend == 'cpu':
-                dist_env = MPIDistEnv()
-            elif backend == 'cuda':
-                dist_env = TorchDistEnv('cuda')
-            else:
-                raise EasierJitException(f"Unsupported JIT backend {backend}")
-
-        elif is_launched_by_easier_launcher():
-            # easier launcher would inject env vars like torchrun does,
-            # e.g. RANK, LOCAL_RANK, LOCAL_WORLD_SIZE
-            # see `/easier/launcher/setup_template.sh`
-            if backend == 'cpu':
-                dist_env = MPIDistEnv()
-            elif backend == 'cuda':
-                dist_env = TorchDistEnv('cuda')
-            else:
-                raise EasierJitException(f"Unsupported JIT backend {backend}")
-
+    if comm_backend is None:
+        if comm_device_type == 'cuda':
+            comm_backend = 'nccl'
         else:
-            if backend == 'cpu':
-                dist_env = MPIDistEnv(local_rank=0)
-            elif backend == 'cuda':
-                dist_env = DummyDistEnv(backend)
-            else:
-                raise EasierJitException(f"Unsupported JIT backend {backend}")
-
-        _dist_envs[backend] = dist_env
-
-    return dist_env
+            comm_backend = 'gloo'
+    
+    # DummyDistEnv is not a standard DistEnv for public use.
+    global _runtime_dist_env
+    assert _runtime_dist_env is None
+    _runtime_dist_env = TorchDistEnv(comm_device_type, comm_backend)
 
 
 def get_runtime_dist_env() -> DistEnv:
@@ -967,18 +746,7 @@ def get_runtime_dist_env() -> DistEnv:
     Get the DistEnv instance for communication during JIT runtime.
     This instance can be retrieved only during or after JIT process.
     """
-    if _runtime_backend is None:
+    if _runtime_dist_env is None:
         raise EasierJitException("The backend for runtime isn't set")
-    return _get_or_init_dist_env(_runtime_backend)
+    return _runtime_dist_env
 
-
-def get_cpu_dist_env() -> DistEnv:
-    """
-    Get the DistEnv instance for communication between CPUs.
-    This instance is ready from the very beginning.
-    """
-    return _get_or_init_dist_env('cpu')
-
-
-def get_mpi_communicator():
-    return MPI.COMM_WORLD

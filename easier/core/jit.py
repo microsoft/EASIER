@@ -25,7 +25,7 @@ from easier.core.passes.utils import \
     get_sub_easier_modules, fx_graph_to_serializable_ir
 from easier.core.utils import EasierJitException
 from easier.core.runtime.dist_env import \
-    get_cpu_dist_env, set_runtime_dist_env_backend
+    get_cpu_dist_env, init_runtime_dist_env
 
 
 class EasierProxy(Proxy):
@@ -206,7 +206,8 @@ def compile(
     backend: Literal['torch', 'cpu', 'gpu', 'none', None] = None,
     *,
     load_dir: Optional[str] = None,
-    partition_mode: Literal['metis', 'evenly'] = 'metis'
+    partition_mode: Literal['metis', 'evenly'] = 'metis',
+    comm_backend: Literal['gloo', 'nccl', 'mpi', None] = None
 ) -> List[esr.Module]:
     """
     Just in time compilation for a list of fx compatible easier.Modules
@@ -271,6 +272,15 @@ def compile(
             )
     assert backend is not None
 
+    if comm_backend is None:
+        env_comm_backend = os.environ.get("EASIER_COMM_BACKEND", None)
+        if env_comm_backend not in ['gloo', 'nccl', 'mpi', None]:
+            raise EasierJitException(
+                "Detected invalid value of EASIER_COMM_BACKEND: "
+                + env_comm_backend  # type: ignore
+            )
+        comm_backend = env_comm_backend  # type: ignore
+
     # Retrieve and validate esr.Modules as inputs, even backend==none.
     top_modules = modules
 
@@ -297,11 +307,11 @@ def compile(
         return top_modules
 
     elif backend == 'torch':
-        comm_backend = _enforce_device_type_cpu_cuda(orig_device_type)
+        comm_device_type = _enforce_device_type_cpu_cuda(orig_device_type)
     elif backend == 'gpu':
-        comm_backend = 'cuda'  # TODO enforce GPU == CUDA for now
+        comm_device_type = 'cuda'  # TODO enforce GPU == CUDA for now
     elif backend == 'cpu':
-        comm_backend = backend
+        comm_device_type = backend
     else:
         raise EasierJitException(f"Argument `jit_backend` cannot be {backend}")
 
@@ -309,11 +319,16 @@ def compile(
         raise EasierJitException(
             f"Argument `partition_mode` cannot be {partition_mode}"
         )
+    
+    if comm_backend not in ['gloo', 'nccl', 'mpi', None]:
+        raise EasierJitException(
+            f"Argument `comm_backend` cannot be {backend}"
+        )
 
     esr.logger.info(
         f"EASIER just-in-time compilation has started, backend={backend}")
 
-    set_runtime_dist_env_backend(comm_backend)
+    init_runtime_dist_env(comm_device_type, comm_backend)
     for m in modules:
         m.easier_jit_backend = backend
         m.partition_mode = partition_mode
