@@ -108,13 +108,13 @@ class DistEnv:
         return (self, src, tensor), {'shape': shape, 'dtype': dtype}
 
     @typing.overload
-    def broadcast_object_list(self, src: int, object_list: List[Any]): ...
+    def broadcast_object_list(self, src: int, object_list: list) -> list: ...
     @typing.overload
-    def broadcast_object_list(self, src: int) -> List[Any]: ...
+    def broadcast_object_list(self, src: int) -> list: ...
 
     def broadcast_object_list(self, src: int,
                               object_list: Optional[list] = None
-                              ) -> Optional[list]:
+                              ) -> list:
         """
         Remark:
         When a CUDA tensor is a part of the broadcasted object, torch.dist
@@ -407,9 +407,10 @@ class DummyDistEnv(DistEnv):
 
     def broadcast_object_list(self, src: int,
                               object_list: Optional[list] = None
-                              ) -> Optional[list]:
+                              ) -> list:
         assert src == 0, \
             "Broadcast in dummy environment is from rank 0 to rank 0"
+        assert isinstance(object_list, list)
         return copy.deepcopy(object_list)
 
     def def_isend(self, tensor: torch.Tensor, dst: int, tag: int) -> Any:
@@ -531,7 +532,7 @@ class TorchDistEnv(DistEnv):
 
     def broadcast_object_list(self, src: int,
                               object_list: Optional[list] = None,
-                              ) -> Optional[list]:
+                              ) -> list:
         """
         Remark:
         When a CUDA tensor is a part of the broadcasted object, torch.dist
@@ -544,11 +545,11 @@ class TorchDistEnv(DistEnv):
         """
         if src == self.rank:
             dist.broadcast_object_list([object_list], src)
-            return object_list
+            return object_list  # type: ignore
         else:
-            recv_list = [None]  # type: ignore
+            recv_list = [None]
             dist.broadcast_object_list(recv_list, src)
-            return recv_list[0]
+            return recv_list[0]  # type: ignore
 
     def def_isend(self, tensor: torch.Tensor, dst: int, tag: int) -> dist.P2POp:
         return dist.P2POp(dist.isend, tensor, peer=dst, tag=tag)
@@ -569,37 +570,6 @@ class TorchDistEnv(DistEnv):
         dist.all_to_all_single(local_output, local_input)
         return local_output
 
-    def _gloo_all_to_all(self, tensors: Sequence[torch.Tensor],
-                         send_lengths: torch.Tensor,
-                         recv_lengths: torch.Tensor,
-                         dtype) -> List[torch.Tensor]:
-        p2ps = []
-
-        for u in range(self.world_size):
-            if u != self.rank:
-                if send_lengths[u] > 0:
-                    isend_op = self.def_isend(tensors[u], u, tag=u)
-                    p2ps.append(isend_op)
-
-        buffers: List[torch.Tensor] = []
-        for w in range(self.world_size):
-            if w != self.rank:
-                recv_length = int(recv_lengths[w])
-                buffer = torch.empty(
-                    (recv_length,), dtype=dtype, device=self.comm_device)
-                buffers.append(buffer)
-
-                if recv_length > 0:
-                    irecv_op = self.def_irecv(buffer, w, tag=self.rank)
-                    p2ps.append(irecv_op)
-            else:
-                buffers.append(tensors[self.rank])
-
-        for p2p in self.batch_isend_irecv(p2ps):
-            p2p.wait()
-
-        return buffers
-
     def all_to_all(self, tensors: Sequence[torch.Tensor]
                    ) -> List[torch.Tensor]:
         """
@@ -612,10 +582,6 @@ class TorchDistEnv(DistEnv):
                                     dtype=torch.int64, device=self.comm_device)
         recv_lengths = self.all_to_all_single(send_lengths)
 
-        if self.backend == 'gloo':
-            return self._gloo_all_to_all(tensors, send_lengths, recv_lengths,
-                                         dtype)
-
         buffers = [
             torch.empty((recv_length,), dtype=dtype, device=self.comm_device)
             for recv_length in recv_lengths.tolist()
@@ -624,27 +590,9 @@ class TorchDistEnv(DistEnv):
 
         return buffers
 
-    def _gloo_all_gather_into_tensor(
-        self, send_tensor: torch.Tensor,
-        form: Literal['concat', 'stack'] = 'concat'
-    ) -> torch.Tensor:
-        # PyTorch GLOO communication backend doesn't support this primitive.
-        tensors = [
-            torch.empty_like(send_tensor, device=self.comm_device)
-            for _ in range(self.world_size)
-        ]
-        dist.all_gather(tensors, send_tensor)
-
-        if form == 'concat':
-            return torch.concat(tensors)
-        else:
-            return torch.stack(tensors)
 
     def all_gather_into_tensor(self, send_tensor: torch.Tensor,
                                form: Literal['concat', 'stack'] = 'concat'):
-        if self.backend == 'gloo':
-            return self._gloo_all_gather_into_tensor(send_tensor, form)
-
         shape = list(send_tensor.shape)
         if form == 'concat':
             shape[0] = shape[0] * self.world_size
@@ -657,35 +605,12 @@ class TorchDistEnv(DistEnv):
         dist.all_gather_into_tensor(recv_buffer, send_tensor)
         return recv_buffer
 
-    def _gloo_all_gather_different_shapes(
-        self,
-        send_tensor: torch.Tensor,
-        shapes: List[Tuple[int, ...]]
-    ):
-        # PyTorch GLOO communication backend doesn't support all_gather with
-        # different shapes.
-        recv_buffers = []
-        for i in range(self.world_size):
-            if i == self.rank:
-                self.broadcast(src=i, tensor=send_tensor)
-                recv_buffers.append(send_tensor.clone())
-            else:
-                recv = self.broadcast(src=i, shape=shapes[i],
-                                      dtype=send_tensor.dtype)
-                recv_buffers.append(recv)
-        return recv_buffers
-
     def all_gather(
         self, send_tensor: torch.Tensor,
         # NOTE base method has `shape: Seq[Seq[int]]` but here we have made it
         # `shape: List[Tuple[int]]` by the _pre_all_gather filter.
-        shapes: List[Tuple[int, ...]]
+        shapes: Sequence[Sequence[int]]
     ) -> List[torch.Tensor]:
-        if self.backend == 'gloo' and len(set(shapes)) > 1:
-            return self._gloo_all_gather_different_shapes(
-                send_tensor, shapes
-            )
-
         recv_buffers = [
             torch.empty(shape, dtype=send_tensor.dtype,
                         device=self.comm_device)
@@ -736,9 +661,11 @@ class TorchDistEnv(DistEnv):
                 src, [tensors[0].dtype]
             )  # type: ignore
             shape = self.scatter_object(src, [t.shape for t in tensors])
+            tensors = list(tensors)
         else:
             [dtype] = self.broadcast_object_list(src)  # type: ignore
             shape = self.scatter_object(src)  # type: ignore
+            tensors = None
 
         buffer = torch.empty(shape, dtype=dtype, device=self.comm_device)
         dist.scatter(buffer, tensors, src)
@@ -755,6 +682,68 @@ class TorchDistEnv(DistEnv):
 
     def barrier(self):
         dist.barrier()
+
+
+class TorchDistGlooDistEnv(TorchDistEnv):
+    def all_to_all(self, tensors: Sequence[torch.Tensor]) -> List[torch.Tensor]:
+        dtype = tensors[0].dtype
+        send_lengths = torch.tensor([t.shape[0] for t in tensors],
+                                    dtype=torch.int64, device=self.comm_device)
+        recv_lengths = self.all_to_all_single(send_lengths)
+
+        p2ps = []
+
+        for u in range(self.world_size):
+            if u != self.rank:
+                if send_lengths[u] > 0:
+                    isend_op = self.def_isend(tensors[u], u, tag=u)
+                    p2ps.append(isend_op)
+
+        buffers: List[torch.Tensor] = []
+        for w in range(self.world_size):
+            if w != self.rank:
+                recv_length = int(recv_lengths[w])
+                buffer = torch.empty(
+                    (recv_length,), dtype=dtype, device=self.comm_device)
+                buffers.append(buffer)
+
+                if recv_length > 0:
+                    irecv_op = self.def_irecv(buffer, w, tag=self.rank)
+                    p2ps.append(irecv_op)
+            else:
+                buffers.append(tensors[self.rank])
+
+        for p2p in self.batch_isend_irecv(p2ps):
+            p2p.wait()
+
+        return buffers
+
+    
+    def all_gather_into_tensor(self, send_tensor: torch.Tensor, form: Literal['concat'] | Literal['stack'] = 'concat'):
+        tensors = [
+            torch.empty_like(send_tensor, device=self.comm_device)
+            for _ in range(self.world_size)
+        ]
+        dist.all_gather(tensors, send_tensor)
+
+        if form == 'concat':
+            return torch.concat(tensors)
+        else:
+            return torch.stack(tensors)
+    
+    def all_gather(self, send_tensor: torch.Tensor, shapes: Sequence[Sequence[int]]) -> List[torch.Tensor]:
+        # PyTorch GLOO communication backend doesn't support all_gather with
+        # different shapes.
+        recv_buffers = []
+        for i in range(self.world_size):
+            if i == self.rank:
+                self.broadcast(src=i, tensor=send_tensor)
+                recv_buffers.append(send_tensor.clone())
+            else:
+                recv = self.broadcast(src=i, shape=shapes[i],
+                                      dtype=send_tensor.dtype)
+                recv_buffers.append(recv)
+        return recv_buffers
 
 
 _runtime_dist_env_devicetype_backend: Optional[Tuple[
@@ -817,6 +806,11 @@ def get_runtime_dist_env() -> DistEnv:
 
     if _runtime_dist_env_devicetype_backend not in _dist_envs:
         device_type, comm_backend = _runtime_dist_env_devicetype_backend
-        _dist_envs[_runtime_dist_env_devicetype_backend] = \
-            TorchDistEnv(device_type, comm_backend)
+            
+        if comm_backend == 'gloo':
+            dist_env = TorchDistGlooDistEnv(device_type, comm_backend)
+        else:
+            dist_env = TorchDistEnv(device_type, comm_backend)
+
+        _dist_envs[_runtime_dist_env_devicetype_backend] = dist_env
 
