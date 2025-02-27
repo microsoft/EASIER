@@ -1,56 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# This file lists the dependencies required for development.
-#
-# This file contains extra dependencies for unit testing and functional test
-# than the minimum requirements for runtime.
-#
-# To ensure the consistency of development activities, it's recommended to
-# specify the exact version of a dependency,
-# rather than specifying a range of versions, especially for those dependencies
-# whose interfaces are in rapid evolution.
-#
-# However, the version of Python itself isn't specified here but it should be
-# fixed to Python 3.8.
-#
-#
-# To setup the environment:
-#
-#   sudo apt-get install libopenmpi-dev
-#
-#   pip install Cython==3.0.11 mpi4py==3.1.5    # see remarks
-#   pip install -r dev-requirements.txt
-#
-#
-# Remarks:
-# mgmetis wrongly specifies Cython a "install time" requirement and mpi4py
-# as optional but they should both be "setup time" requirements.
-# Therefore we need to install them separatedly before
-# `pip install mgmetis` or `pip install -r dev-requirements.txt`
-# so that ParMETIS support can be added.
-
-pytest==8.3.2
-more-itertools==10.4.0
-numpy==1.24.4
-scipy==1.10.1
-matplotlib==3.7.5
-
---find-links https://download.pytorch.org/whl/torch_stable.html
-torch==2.2.1+cu121
-
-# To profile using PyTorch integration of tensorboard
-# Both packages need to be installed on the machine where TensorBoard will be
-# launched.
-tensorboard
-torch-tb-profiler
-
-# To profile using Nsight Systems
-nvtx
-
-mgmetis==0.1.1
+pytest==8.3.4
+more-itertools==10.6.0
+numpy==2.2.3
+scipy==1.15.2
+matplotlib==3.10.0
+torch==2.6.0
 pymetis==2023.1.1
-
-h5py==3.11.0
-
-debugpy
+h5py==3.13.0

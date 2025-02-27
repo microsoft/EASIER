@@ -206,7 +206,8 @@ def compile(
     backend: Literal['torch', 'cpu', 'gpu', 'none', None] = None,
     *,
     load_dir: Optional[str] = None,
-    partition_mode: Literal['metis', 'evenly'] = 'metis'
+    partition_mode: Literal['metis', 'evenly'] = 'metis',
+    comm_backend_param_: Literal['gloo', 'nccl', 'mpi', None] = None
 ) -> List[esr.Module]:
     """
     Just in time compilation for a list of fx compatible easier.Modules
@@ -241,6 +242,13 @@ def compile(
             - "metis": use METIS to partition, will result in less amount of
                 communication, but will make `compile()` run longer
             - "evenly": partition evenly and take less time than mode "metis"
+    -   comm_backend (str):
+            if provided, EASIER compiler will use the specified communication
+            backend for runtime communication, supporting:
+            - "gloo": GLOO backend provided by `torch.distributed`, CPU-only
+            - "nccl": NCCL backend provided by `torch.distributed`, GPU-only
+            - "mpi": MPI backend provided by `torch.distributed`
+                support CPU or GPU TODO CPU-only?
 
     Returns:
         GraphModule: the jitted input easier.Modules that can run on the
@@ -297,11 +305,11 @@ def compile(
         return top_modules
 
     elif backend == 'torch':
-        comm_backend = _enforce_device_type_cpu_cuda(orig_device_type)
+        comm_device_type = _enforce_device_type_cpu_cuda(orig_device_type)
     elif backend == 'gpu':
-        comm_backend = 'cuda'  # TODO enforce GPU == CUDA for now
+        comm_device_type = 'cuda'  # TODO enforce GPU == CUDA for now
     elif backend == 'cpu':
-        comm_backend = backend
+        comm_device_type = 'cpu'
     else:
         raise EasierJitException(f"Argument `jit_backend` cannot be {backend}")
 
@@ -310,10 +318,12 @@ def compile(
             f"Argument `partition_mode` cannot be {partition_mode}"
         )
 
+    if comm_backend_param_ is None:
+
     esr.logger.info(
         f"EASIER just-in-time compilation has started, backend={backend}")
 
-    set_runtime_dist_env_backend(comm_backend)
+    set_runtime_dist_env_backend(comm_device_type)
     for m in modules:
         m.easier_jit_backend = backend
         m.partition_mode = partition_mode
