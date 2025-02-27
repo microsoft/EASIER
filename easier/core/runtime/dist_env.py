@@ -474,9 +474,6 @@ class TorchDistEnv(DistEnv):
         backend: Literal['gloo', 'nccl', 'mpi'],
         torch_dist_init_kwargs={}
     ) -> None:
-        # NOTE `torch.distributed` does not have an API to get "local rank"
-        # (i.e. the card rank to the machine).
-        # We assume the `backend` arg reflects the env var settings
         if backend in ['gloo', 'nccl']:
             local_rank = int(os.environ['LOCAL_RANK'])
         elif backend in ['mpi']:
@@ -490,7 +487,22 @@ class TorchDistEnv(DistEnv):
             comm_device = torch.device(device_type, local_rank)
             torch.cuda.set_device(comm_device)
 
-        dist.init_process_group(backend, **torch_dist_init_kwargs)
+        if dist.is_initialized():
+            logger.info(
+                "The user has initialized torch.distributed. Please ensure"
+                " torch.distributed communication backend is compatible with"
+                " EASIER compilation backend"
+            )
+        else:
+            logger.info("Initializing torch.distributed")
+            dist.init_process_group(backend, **torch_dist_init_kwargs)
+
+        # the `get_backend_config()` may return like "cpu:gloo,cuda:nccl"
+        logger.info(
+            f"torch.distributed"
+            f" backend={dist.get_backend_config()} rank={dist.get_rank()}"
+            f" local_rank={self.local_rank}"
+        )
 
         super().__init__(
             world_size=dist.get_world_size(),
@@ -501,11 +513,6 @@ class TorchDistEnv(DistEnv):
 
         self.backend = backend
 
-        logger.info(
-            "Init torch.distributed"
-            f" backend={self.backend} rank={self.rank}"
-            f" local_rank={self.local_rank}"
-        )
 
     def broadcast(self, src: int, tensor: Optional[torch.Tensor] = None,
                   *,
@@ -750,14 +757,13 @@ class TorchDistEnv(DistEnv):
         dist.barrier()
 
 
-# TODO seems used in many place, move to utils.
-def torch_dtype_to_numpy_dtype(torch_dtype: torch.dtype):
-    return torch.empty([0], dtype=torch_dtype).numpy().dtype
+_runtime_dist_env_devicetype_backend: Optional[Tuple[
+    Literal['cpu', 'cuda'], str
+]] = None
 
+_dist_envs: Dict[Tuple[str, str], DistEnv] = {}
 
-_runtime_dist_env: Optional[DistEnv] = None
-
-def init_runtime_dist_env(
+def config_runtime_dist_env(
     comm_device_type: Literal['cpu', 'cuda'],
     comm_backend: Literal['gloo', 'nccl', 'mpi', None]
 ):
@@ -796,9 +802,9 @@ def init_runtime_dist_env(
             comm_backend = 'gloo'
     
     # DummyDistEnv is not a standard DistEnv for public use.
-    global _runtime_dist_env
-    assert _runtime_dist_env is None
-    _runtime_dist_env = TorchDistEnv(comm_device_type, comm_backend)
+    global _runtime_dist_env_devicetype_backend
+    assert _runtime_dist_env_devicetype_backend is None
+    _runtime_dist_env_devicetype_backend = (comm_device_type, comm_backend)
 
 
 def get_runtime_dist_env() -> DistEnv:
@@ -806,7 +812,11 @@ def get_runtime_dist_env() -> DistEnv:
     Get the DistEnv instance for communication during JIT runtime.
     This instance can be retrieved only during or after JIT process.
     """
-    if _runtime_dist_env is None:
+    if _runtime_dist_env_devicetype_backend is None:
         raise EasierJitException("The backend for runtime isn't set")
-    return _runtime_dist_env
+
+    if _runtime_dist_env_devicetype_backend not in _dist_envs:
+        device_type, comm_backend = _runtime_dist_env_devicetype_backend
+        _dist_envs[_runtime_dist_env_devicetype_backend] = \
+            TorchDistEnv(device_type, comm_backend)
 

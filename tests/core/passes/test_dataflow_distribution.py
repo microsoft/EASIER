@@ -99,7 +99,7 @@ def worker__test_halo_exchanger_insertion_for_selector(
     graph = EasierTracer().trace(m)
     [jm], [graph] = passes.group_tensors([m], [graph])
 
-    _JitRuntimeDistEnv.init_runtime_dist_env('cpu')
+    _JitRuntimeDistEnv.config_runtime_dist_env('cpu')
     elemparts = {m.v.easier_tensor_group: output_elempart}
     HaloExchangerInserter(
         [jm], [graph], elemparts,  # type: ignore
@@ -202,7 +202,7 @@ def worker__test_halo_exchanger_insertion_for_reducer(
             torch.arange(6)
         ])
 
-    _JitRuntimeDistEnv.init_runtime_dist_env('cpu')
+    _JitRuntimeDistEnv.config_runtime_dist_env('cpu')
     elemparts = {m.v.easier_tensor_group: output_elempart}
     HaloExchangerInserter(
         [jm], [graph], elemparts,  # type: ignore

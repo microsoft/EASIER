@@ -25,7 +25,7 @@ from easier.core.passes.utils import \
     get_sub_easier_modules, fx_graph_to_serializable_ir
 from easier.core.utils import EasierJitException
 from easier.core.runtime.dist_env import \
-    get_cpu_dist_env, init_runtime_dist_env
+    get_cpu_dist_env, config_runtime_dist_env
 
 
 class EasierProxy(Proxy):
@@ -335,7 +335,7 @@ def compile(
     esr.logger.info(
         f"EASIER just-in-time compilation has started, backend={backend}")
 
-    init_runtime_dist_env(comm_device_type, comm_backend)
+    config_runtime_dist_env(comm_device_type, comm_backend)
     for m in modules:
         m.easier_jit_backend = backend
         m.partition_mode = partition_mode
