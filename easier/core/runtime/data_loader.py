@@ -38,11 +38,11 @@ def _get_offset_exactly_nparts(orig_len: int, nparts: int, part: int
 
 
 def _check_data_loader_metas(dt: 'DataLoaderBase', *more_metas):
-    cpu_dist_env = get_cpu_dist_env()
-    rank = cpu_dist_env.rank
+    dist_env = get_cpu_dist_env()
+    rank = dist_env.rank
 
     dt_metas = [dt.dtype, dt.device.type, dt.shape] + list(more_metas)
-    dt_metas0 = cpu_dist_env.broadcast_object_list(0, dt_metas)
+    dt_metas0 = dist_env.broadcast_object_list(0, dt_metas)
 
     if dt_metas != dt_metas0:
         raise TypeError(
@@ -56,12 +56,12 @@ class DataLoaderBase:
     The data loader for one specified data source, e.g. a HDF5 dataset.
 
     Calls to every method should be collective.
-
-    # TODO ensure whether the result tensor is always a new clone to avoid
-    accidently modify the views, if any.
     """
 
     def __init__(self) -> None:
+        """
+        No collective calls should be done during construction.
+        """
         pass
 
     def partially_load_by_chunk(self, chunk_size: int
@@ -196,16 +196,16 @@ class InMemoryTensorLoader(DataLoaderBase):
 
         _check_data_loader_metas(self)
 
-        cpu_dist_env = get_cpu_dist_env()
-        if cpu_dist_env.rank == 0:
-            cpu_dist_env.broadcast(0, self.tensor)
+        dist_env = get_cpu_dist_env()
+        if dist_env.rank == 0:
+            dist_env.broadcast(0, self.tensor.to(dist_env.comm_device))
         else:
-            tensor0 = cpu_dist_env.broadcast(
+            tensor0 = dist_env.broadcast(
                 0, shape=self.shape, dtype=self.dtype
             )
-            if not torch.allclose(tensor0, self.tensor):
+            if not torch.allclose(tensor0.cpu(), self.tensor):
                 raise TypeError(
-                    f'Tensor on rank-{cpu_dist_env.rank} {self.tensor}'
+                    f'Tensor on rank-{dist_env.rank} {self.tensor}'
                     f' does not equal rank-0 {tensor0}'
                 )
 
@@ -374,8 +374,8 @@ class H5DataLoader(DataLoaderBase):
                 yield chunk
 
     def partially_load_by_rank(self) -> Tuple[torch.Tensor, int, int]:
-        cpu_dist_env = get_cpu_dist_env()
-        rank = cpu_dist_env.rank
+        dist_env = get_cpu_dist_env()
+        rank = dist_env.rank
 
         orig_len = self.shape[0]
         sub_shape = self.shape[1:]
@@ -385,34 +385,34 @@ class H5DataLoader(DataLoaderBase):
         # Instead, we load the part for each rank once, and do P2P.
         if rank == 0:
             with self._dataset() as d:
-                for w in range(1, cpu_dist_env.world_size):
+                for w in range(1, dist_env.world_size):
                     start, end = _get_offset_exactly_nparts(
-                        orig_len, nparts=cpu_dist_env.world_size, part=w)
+                        orig_len, nparts=dist_env.world_size, part=w)
 
                     part_np: np.ndarray = d[start:end]
-                    part: torch.Tensor = torch.from_numpy(part_np)
-                    isend = cpu_dist_env.def_isend(part, dst=w, tag=w)
-                    for req in cpu_dist_env.batch_isend_irecv([isend]):
+                    part: torch.Tensor = torch.from_numpy(part_np).to(dist_env.comm_device)
+                    isend = dist_env.def_isend(part, dst=w, tag=w)
+                    for req in dist_env.batch_isend_irecv([isend]):
                         req.wait()
 
                     # TODO each rank-0-rank-w comm may take a while,
                     # subsequennt recvs should not timeout.
 
                 s0, e0 = _get_offset_exactly_nparts(
-                    orig_len, nparts=cpu_dist_env.world_size, part=0)
+                    orig_len, nparts=dist_env.world_size, part=0)
                 part0_np: np.ndarray = d[s0:e0]
                 part0 = torch.from_numpy(part0_np)
                 return part0, s0, e0
 
         else:
             start, end = _get_offset_exactly_nparts(
-                orig_len, cpu_dist_env.world_size, rank)
-            buffer = torch.empty((end - start,) + sub_shape, dtype=self.dtype)
-            irecv = cpu_dist_env.def_irecv(buffer, src=0, tag=rank)
-            for req in cpu_dist_env.batch_isend_irecv([irecv]):
+                orig_len, dist_env.world_size, rank)
+            buffer = torch.empty((end - start,) + sub_shape, dtype=self.dtype, device=dist_env.comm_device)
+            irecv = dist_env.def_irecv(buffer, src=0, tag=rank)
+            for req in dist_env.batch_isend_irecv([irecv]):
                 req.wait()
 
-            return buffer, start, end
+            return buffer.cpu(), start, end
 
     def partially_load_by_index(
         self, index: torch.Tensor, *,
@@ -430,7 +430,7 @@ class H5DataLoader(DataLoaderBase):
 
         sorted_index, sort_pos = torch.sort(index, stable=True)
 
-        cpu_dist_env = get_cpu_dist_env()
+        dist_env = get_cpu_dist_env()
 
         orig_len = self.shape[0]
         sub_shape = self.shape[1:]
@@ -448,19 +448,21 @@ class H5DataLoader(DataLoaderBase):
                 start = chunk_size * i
                 end = min(orig_len, chunk_size * (i + 1))
 
-                if cpu_dist_env.rank == 0:
+                if dist_env.rank == 0:
                     chunk_np: np.ndarray = d[start:end]
-                    chunk: torch.Tensor = torch.from_numpy(chunk_np)
-                    chunk = cpu_dist_env.broadcast(src=0, tensor=chunk)
+                    chunk: torch.Tensor = torch.from_numpy(chunk_np).to(dist_env.comm_device)
+                    chunk = dist_env.broadcast(src=0, tensor=chunk)
 
                 else:
                     # similar to halo calculation in dist_pass,
                     # but the chunk is defined by a pair (start, end)
                     # TODO therefore for sparse cases
                     # we can use P2P instead of broadcasting.
-                    chunk = cpu_dist_env.broadcast(
+                    chunk = dist_env.broadcast(
                         src=0, shape=(end - start,) + sub_shape,
                         dtype=self.dtype)
+
+                chunk = chunk.cpu()
 
                 region = torch.logical_and(
                     sorted_index >= start, sorted_index < end)
@@ -482,7 +484,7 @@ class H5DataLoader(DataLoaderBase):
                 res[pos, ...] = data
                 return res
 
-        if cpu_dist_env.rank == 0:
+        if dist_env.rank == 0:
             with self._dataset() as d:
                 return _run(d)
         else:
@@ -490,14 +492,14 @@ class H5DataLoader(DataLoaderBase):
 
     def fully_load(self, device: Union[torch.device, str, None]
                    ) -> torch.Tensor:
-        cpu_dist_env = get_cpu_dist_env()
+        dist_env = get_cpu_dist_env()
 
-        if cpu_dist_env.rank == 0:
+        if dist_env.rank == 0:
             with self._dataset() as d:
-                t = torch.from_numpy(d[...])
-                cpu_dist_env.broadcast(0, t)
+                t = torch.from_numpy(d[...]).to(dist_env.comm_device)
+                dist_env.broadcast(0, t)
         else:
-            t = cpu_dist_env.broadcast(0, shape=self.shape, dtype=self.dtype)
+            t = dist_env.broadcast(0, shape=self.shape, dtype=self.dtype)
 
         return t.to(device=device or self.device)
 

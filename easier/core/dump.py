@@ -226,10 +226,10 @@ def _coll_check(
     -   arguments to `.load()` is wrong; cache format is interrupted
     -   session environment changes, gently stop reusing cache
     """
-    cpu_dist_env = get_cpu_dist_env()
-    all_checks = cpu_dist_env.all_gather_into_tensor(
-        torch.tensor([1 if expect else 0], dtype=torch.int64)
-    ).sum().item() == cpu_dist_env.world_size
+    dist_env = get_cpu_dist_env()
+    all_checks = dist_env.all_gather_into_tensor(torch.tensor(
+        [1 if expect else 0],dtype=torch.int64, device=dist_env.comm_device
+    )).sum().item() == dist_env.world_size
     if not all_checks:
         raise ex_ctor(ex_msg)
 
@@ -264,17 +264,17 @@ def _gather_dump_files(local_dumpfile: str, rank0_jitdir: str) -> None:
     TODO we can detect NFS or shared storage, to leverage currently ununsed
         `dump_dir` parameters on ranks>0, and directly read/write on that dir.
     """
-    cpu_dist_env = get_cpu_dist_env()
-    rank = cpu_dist_env.rank
+    dist_env = get_cpu_dist_env()
+    rank = dist_env.rank
 
     if rank == 0:
-        for w in range(1, cpu_dist_env.world_size):
+        for w in range(1, dist_env.world_size):
             rank_dumpfile = os.path.join(rank0_jitdir, f'jit_{w}.hdf5')
 
-            length = cpu_dist_env.recv_int64(src=w, tag=w)  # tag source
-            u8 = torch.empty((length,), dtype=torch.uint8)
-            cpu_dist_env.recv(u8, src=w, tag=w)
-            u8.numpy().tofile(rank_dumpfile)
+            length = dist_env.recv_int64(src=w, tag=w)  # tag source
+            u8 = torch.empty((length,), dtype=torch.uint8, device=dist_env.comm_device)
+            dist_env.recv(u8, src=w, tag=w)
+            u8.numpy(force=True).tofile(rank_dumpfile)
 
             logger.debug(
                 f'Gather dump file and save to {rank_dumpfile}'
@@ -282,8 +282,11 @@ def _gather_dump_files(local_dumpfile: str, rank0_jitdir: str) -> None:
     else:
         u8 = numpy.fromfile(local_dumpfile, dtype=numpy.uint8)
         length = u8.shape[0]
-        cpu_dist_env.send_int64(length, dst=0, tag=rank)  # tag source
-        cpu_dist_env.send(torch.from_numpy(u8), dst=0, tag=rank)
+        dist_env.send_int64(length, dst=0, tag=rank)  # tag source
+        dist_env.send(
+            torch.from_numpy(u8).to(dist_env.comm_device),
+            dst=0, tag=rank
+        )
 
 
 def _scatter_dump_files(rank0_jitdir: str) -> str:
@@ -291,11 +294,11 @@ def _scatter_dump_files(rank0_jitdir: str) -> str:
     Returns:
         The path to the dump file for that rank.
     """
-    cpu_dist_env = get_cpu_dist_env()
-    rank = cpu_dist_env.rank
+    dist_env = get_cpu_dist_env()
+    rank = dist_env.rank
 
     if rank == 0:
-        for w in range(1, cpu_dist_env.world_size):
+        for w in range(1, dist_env.world_size):
             # The dump file is for runtime data needed by one rank, so it's ok
             # to load it fully into the memory.
             u8 = numpy.fromfile(
@@ -303,8 +306,11 @@ def _scatter_dump_files(rank0_jitdir: str) -> str:
             )
             length = u8.shape[0]
 
-            cpu_dist_env.send_int64(length, dst=w, tag=w)  # tag destination
-            cpu_dist_env.send(torch.from_numpy(u8), dst=w, tag=w)
+            dist_env.send_int64(length, dst=w, tag=w)  # tag destination
+            dist_env.send(
+                torch.from_numpy(u8).to(dist_env.comm_device),
+                dst=w, tag=w
+            )
 
         return os.path.join(rank0_jitdir, f'jit_0.hdf5')
 
@@ -313,10 +319,10 @@ def _scatter_dump_files(rank0_jitdir: str) -> str:
         os.makedirs(temp_jitdir, exist_ok=True)
         temp_dumpfile = os.path.join(temp_jitdir, f'jit_{rank}.hdf5')
 
-        length = cpu_dist_env.recv_int64(src=0, tag=rank)  # tag destination
-        u8 = torch.empty((length,), dtype=torch.uint8)
-        cpu_dist_env.recv(u8, src=0, tag=rank)
-        u8.numpy().tofile(temp_dumpfile)
+        length = dist_env.recv_int64(src=0, tag=rank)  # tag destination
+        u8 = torch.empty((length,), dtype=torch.uint8, device=dist_env.comm_device)
+        dist_env.recv(u8, src=0, tag=rank)
+        u8.numpy(force=True).tofile(temp_dumpfile)
 
         logger.debug(
             f'Recv scattered dump file and save to {temp_dumpfile}'

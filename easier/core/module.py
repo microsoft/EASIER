@@ -166,8 +166,8 @@ def _validate_idx_dataloader(module: Union['Selector', 'Reducer']):
     dl = module.easier_data_loader
     cls_name = module.__class__.__name__
 
-    cpu_dist_env = get_cpu_dist_env()
-    if cpu_dist_env.rank == 0:
+    dist_env = get_cpu_dist_env()
+    if dist_env.rank == 0:
         try:
             try:
                 iinfo = torch.iinfo(dl.dtype)
@@ -204,13 +204,13 @@ def _validate_idx_dataloader(module: Union['Selector', 'Reducer']):
             logger.exception(e)
 
             # Aborting one rank-0 will kill all processes and surpass barriers.
-            cpu_dist_env.abort()
+            dist_env.abort()
 
     else:  # rank != 0
         idxmax = -1  # does not matter
 
     # NOTE this bcast() also serves as a collective barrier.
-    [idxmax] = cpu_dist_env.broadcast_object_list(0, [idxmax])
+    [idxmax] = dist_env.broadcast_object_list(0, [idxmax])
 
     if isinstance(module, Selector):
         module.idx_max = idxmax

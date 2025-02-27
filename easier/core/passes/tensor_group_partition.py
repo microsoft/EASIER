@@ -345,8 +345,8 @@ def partition_tensor_groups_with_adjmat(
             # partitioned among columns.
             adjmat_colids = colgrp_idx_slice + colgrp_offset
 
-            subadjmat_rowids_to_send[w] = subadjmat_rowids
-            adjmat_colids_to_send[w] = adjmat_colids
+            subadjmat_rowids_to_send[w] = subadjmat_rowids.to(dist_env.comm_device)
+            adjmat_colids_to_send[w] = adjmat_colids.to(dist_env.comm_device)
 
         subadjmat_rowids_tensors = \
             dist_env.all_to_all(subadjmat_rowids_to_send)
@@ -356,8 +356,8 @@ def partition_tensor_groups_with_adjmat(
         # concat all recieved row/col ids
         # and the result is not ordered or uniqued.
         rowcolids_for_commpairs.append((
-            torch.concat(subadjmat_rowids_tensors),
-            torch.concat(adjmat_colids_tensors),
+            torch.concat(subadjmat_rowids_tensors).cpu(),
+            torch.concat(adjmat_colids_tensors).cpu(),
             comm_pair.caused_by_reducer
         ))
     # endfor comm_pairs
@@ -491,11 +491,11 @@ def synchronize_partition_result(
             for w in range(world_size):
                 elempart = tensor_group_begin \
                     + torch.argwhere(grp_membership == w).ravel()
-                elempart_to_send[w] = elempart
+                elempart_to_send[w] = elempart.to(dist_env.comm_device)
 
         elempart_recv = dist_env.all_to_all(elempart_to_send)
 
-        elempart = torch.concat(elempart_recv)
+        elempart = torch.concat(elempart_recv).cpu()
         elempart_lengths = dist_env.all_gather_into_tensor(
             torch.tensor([elempart.shape[0]], device=dist_env.comm_device)
         ).tolist()

@@ -177,7 +177,9 @@ class CoarseningRowDataExchanger:
             )
 
             cvids_unmerged_to_w = cvids[row_to_w_mask]
-            cvids_unmerged_to_others.append(cvids_unmerged_to_w)
+            cvids_unmerged_to_others.append(
+                cvids_unmerged_to_w.to(dist_env.comm_device)
+            )
 
             rows_to_other_masks.append(row_to_w_mask)
 
@@ -186,7 +188,7 @@ class CoarseningRowDataExchanger:
         # all in range [c_start, c_end), unordered and contains duplicates.
         self.cvids_unmerged_on_this = torch.concat(
             dist_env.all_to_all(cvids_unmerged_to_others)
-        )
+        ).to('cpu')
 
         self.c_dist_config = c_dist_config
         self.c_start = c_start
@@ -198,10 +200,12 @@ class CoarseningRowDataExchanger:
         for w in range(dist_env.world_size):
             row_to_w_mask = self.rows_to_other_masks[w]
             row_data_to_w = row_data[row_to_w_mask]
-            row_data_to_others.append(row_data_to_w)
+            row_data_to_others.append(
+                row_data_to_w.to(dist_env.comm_device)
+            )
 
         row_data_on_this = dist_env.all_to_all(row_data_to_others)
-        return torch.concat(row_data_on_this)
+        return torch.concat(row_data_on_this).to('cpu')
 
 
 def exchange_and_merge_vertex_weights(
@@ -264,15 +268,19 @@ def exchange_cadj_adjw(
         cadj_unmerged_to_w = cadj[col_mask]
         adjwgt_unmergedto_w = adjwgt[col_mask]
 
-        cadj_unmerged_to_others.append(cadj_unmerged_to_w)
-        adjwgt_unmerged_to_others.append(adjwgt_unmergedto_w)
+        cadj_unmerged_to_others.append(
+            cadj_unmerged_to_w.to(dist_env.comm_device)
+        )
+        adjwgt_unmerged_to_others.append(
+            adjwgt_unmergedto_w.to(dist_env.comm_device)
+        )
 
     cadj_unmerged = torch.concat(
         dist_env.all_to_all(cadj_unmerged_to_others)
-    )
+    ).to('cpu')
     adjwgt_unmerged = torch.concat(
         dist_env.all_to_all(adjwgt_unmerged_to_others)
-    )
+    ).to('cpu')
 
     return unmerged_row_sizes, cadj_unmerged, adjwgt_unmerged
 
@@ -345,11 +353,12 @@ def map_adj_by_cvids(
     for w in range(dist_env.world_size):
         start_w, end_w = dist_config.get_start_end(w)
         if w == dist_env.rank:
-            cvids_w = dist_env.broadcast(w, cvids)
+            cvids_w = dist_env.broadcast(w, cvids.to(dist_env.comm_device))
         else:
             cvids_w = dist_env.broadcast(
                 w, shape=(end_w - start_w,), dtype=torch.int64
             )
+        cvids_w = cvids_w.to('cpu')
 
         w_mappable = torch.logical_and(
             start_w <= colidx, colidx < end_w
@@ -498,11 +507,19 @@ def gather_csr_graph(
         concat-ed adj weights
     """
     dist_env = get_cpu_dist_env()
-    vwgts = dist_env.gather(dst_rank, clv.vertex_weights)
-    colidxs = dist_env.gather(dst_rank, clv.colidx)
-    adjws = dist_env.gather(dst_rank, clv.adjwgt)
+    vwgts = dist_env.gather(
+        dst_rank, clv.vertex_weights.to(dist_env.comm_device)
+    )
+    colidxs = dist_env.gather(
+        dst_rank, clv.colidx.to(dist_env.comm_device)
+    )
+    adjws = dist_env.gather(
+        dst_rank, clv.adjwgt.to(dist_env.comm_device)
+    )
 
-    row_sizes = dist_env.gather(dst_rank, (clv.rowptr[1:] - clv.rowptr[:-1]))
+    row_sizes = dist_env.gather(
+        dst_rank, (clv.rowptr[1:] - clv.rowptr[:-1]).to(dist_env.comm_device)
+    )
 
     if dist_env.rank == dst_rank:
         assert vwgts is not None
@@ -583,7 +600,9 @@ def coarsen_level(
                 "All local vertexes should be assigned with coarser IDs"
 
             # TODO make a masked broadcast for only (rank < w) workers.
-            w_cvids = dist_env.broadcast(w, cvids)
+            w_cvids = dist_env.broadcast(
+                w, cvids.to(dist_env.comm_device)
+            )
 
             [cnv_allocated] = dist_env.broadcast_object_list(
                 w, [cnv_allocated]
@@ -595,6 +614,8 @@ def coarsen_level(
             )
             [cnv_allocated] = dist_env.broadcast_object_list(w)
         # end if rank == w
+
+        w_cvids = w_cvids.to('cpu')
 
         if dist_env.rank < w:
             align_coarser_vids(w_start, w_end, w_cvids, matched, cvids)
@@ -701,11 +722,15 @@ def distpart_kway(
         # TODO scatter tensor list API
         c_local_membership = dist_env.scatter(
             0,
-            membership.to(torch.int64).split(new_lv.dist_config.local_nvs)
+            membership.to(
+                dtype=torch.int64, device=dist_env.comm_device
+            ).split(new_lv.dist_config.local_nvs)
         )
 
     else:
         c_local_membership = dist_env.scatter(0)
+
+    c_local_membership = c_local_membership.to('cpu')
 
     # Uncoarsening
     # TODO now without refinment (i.e. move vertexes around partitions after
@@ -773,12 +798,14 @@ def uncoarsen_level(
         c_start_w, c_end_w = c_dist_config.get_start_end(w)
         if w == dist_env.rank:
             c_local_membership_w = dist_env.broadcast(
-                w, c_local_membership
+                w, c_local_membership.to(dist_env.comm_device)
             )
         else:
             c_local_membership_w = dist_env.broadcast(
                 w, shape=(c_end_w - c_start_w,), dtype=torch.int64
             )
+
+        c_local_membership_w = c_local_membership_w.to('cpu')
 
         inv_mask = torch.logical_and(c_start_w <= cvids, cvids < c_end_w)
         _assert_local_map_no_overlap(local_membership, inv_mask)

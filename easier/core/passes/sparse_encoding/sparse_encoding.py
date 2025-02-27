@@ -86,13 +86,18 @@ def calculate_paired_in_out_idx(
     # and collects output_elempart from all other workers.
     for t in range(dist_env.world_size):
         if dist_env.rank == t:
-            output_elempart_t = dist_env.broadcast(t, output_elempart.idx)
+            output_elempart_t = dist_env.broadcast(
+                t,
+                output_elempart.idx.to(dist_env.comm_device)
+            )
         else:
             output_elempart_t = dist_env.broadcast(
                 t,
                 shape=(output_elempart.lengths[t],),
                 dtype=output_elempart.idx.dtype
             )
+
+        output_elempart_t = output_elempart_t.cpu()
 
         pos = torch.isin(
             output_gidx_part, output_elempart_t
@@ -109,16 +114,20 @@ def calculate_paired_in_out_idx(
         input_gidx_to_t = input_gidx_part[pos]
         output_gidx_on_t = output_gidx_part[pos]
 
-        input_gidxes_to_others.append(input_gidx_to_t)
-        output_gidxes_on_others.append(output_gidx_on_t)
+        input_gidxes_to_others.append(
+            input_gidx_to_t.to(dist_env.comm_device)
+        )
+        output_gidxes_on_others.append(
+            output_gidx_on_t.to(dist_env.comm_device)
+        )
 
     input_gidxes_to_this: List[torch.Tensor] = \
         dist_env.all_to_all(input_gidxes_to_others)
     output_gidxes_on_this: List[torch.Tensor] = \
         dist_env.all_to_all(output_gidxes_on_others)
 
-    input_gidx_to_this = torch.concat(input_gidxes_to_this)
-    output_gidx_on_this = torch.concat(output_gidxes_on_this)
+    input_gidx_to_this = torch.concat(input_gidxes_to_this).cpu()
+    output_gidx_on_this = torch.concat(output_gidxes_on_this).cpu()
 
     # Having equal lengths is essential for I/O idx being paired,
     # and their pairs are not necessarily in any certain order.
@@ -166,7 +175,10 @@ def calculate_halo_info(
 
     for u in range(dist_env.world_size):
         if dist_env.rank == u:
-            input_elempart_u = dist_env.broadcast(u, input_elempart.idx)
+            input_elempart_u = dist_env.broadcast(
+                u,
+                input_elempart.idx.to(dist_env.comm_device)
+            )
 
         else:
             input_elempart_u = dist_env.broadcast(
@@ -174,6 +186,8 @@ def calculate_halo_info(
                 shape=(input_elempart.lengths[u],),
                 dtype=input_elempart.idx.dtype
             )
+        
+        input_elempart_u = input_elempart_u.cpu()
 
         halo_lidx_u_to_this = torch.isin(
             input_elempart_u, input_gidx_to_this
@@ -181,10 +195,14 @@ def calculate_halo_info(
         halo_lidxes_to_this.append(halo_lidx_u_to_this)
 
         halo_gidx_u_to_this = input_elempart_u[halo_lidx_u_to_this]
-        halo_gidxes_to_this.append(halo_gidx_u_to_this)
+        halo_gidxes_to_this.append(
+            halo_gidx_u_to_this.to(dist_env.comm_device)
+        )
 
-    halo_lidxes_to_others: List[torch.Tensor] = \
+    halo_lidxes_to_others: List[torch.Tensor] = [
+        t.cpu() for t in
         dist_env.all_to_all(halo_lidxes_to_this)
+    ]
 
     return halo_gidxes_to_this, halo_lidxes_to_others
 
@@ -308,7 +326,9 @@ def reorder_input_by_reducer(
         reordered_gidx_from_u = reordered_input_gidx_to_this[
             torch.isin(reordered_input_gidx_to_this, unordered_gidx_from_u)
         ]
-        reordered_halo_gidxes_to_this.append(reordered_gidx_from_u)
+        reordered_halo_gidxes_to_this.append(
+            reordered_gidx_from_u.to(dist_env.comm_device)
+        )
 
     reordered_halo_gidxes_to_others = \
         dist_env.all_to_all(reordered_halo_gidxes_to_this)
@@ -320,7 +340,9 @@ def reorder_input_by_reducer(
     # So `reordered_halo_gidxes_to_others`, which comes from pieces of
     # `reordered_input_gidx_to_this`, can directly be used
     # as the reordered `ElemPart.idx`.
-    reordered_input_elempart = torch.concat(reordered_halo_gidxes_to_others)
+    reordered_input_elempart = torch.concat(
+        reordered_halo_gidxes_to_others
+    ).cpu()
 
     # input_elempart may be loaded from a previous session
     assert torch.equal(

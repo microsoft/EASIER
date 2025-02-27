@@ -200,6 +200,20 @@ def _validate_nonjit_state(top_modules: List[esr.Module]):
                 if p.easier_data_ready:
                     _raise()
 
+def _validate_compile_backend(backend) -> Literal['torch', 'cpu', 'gpu', 'none']:
+    pass
+def _validate_comm_backend(comm_backend) -> Literal['gloo', 'nccl', 'mpi']:
+    """
+    TODO although we'll just pass `comm_backend` to
+    `torch.distributed.init_process_group()`, we must limit the values like
+    these three, because we need concrete and single backend name to
+    dispatch DistEnv for certain implementation, like GlooDistEnv,
+    because different comm backend has different API set.
+    """
+    pass
+def _validate_comm_backend(partition_mode) -> Literal['metis', 'evenly']:
+    pass
+
 
 def compile(
     modules: List[esr.Module],
@@ -249,6 +263,10 @@ def compile(
             - "nccl": NCCL backend provided by `torch.distributed`, GPU-only
             - "mpi": MPI backend provided by `torch.distributed`
                 support CPU or GPU TODO CPU-only?
+            - None: use the value specified by environment variable
+                EASIER_COMPILE_BACKEND.
+                If EASIER_COMM_BACKEND is not defined, will use "gloo" for CPU
+                and "nccl" for GPU.
 
     Returns:
         GraphModule: the jitted input easier.Modules that can run on the
@@ -329,7 +347,7 @@ def compile(
     
     if comm_backend not in ['gloo', 'nccl', 'mpi', None]:
         raise EasierJitException(
-            f"Argument `comm_backend` cannot be {backend}"
+            f"Argument `comm_backend` cannot be {comm_backend}"
         )
 
     esr.logger.info(
