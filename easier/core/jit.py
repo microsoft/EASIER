@@ -242,6 +242,13 @@ def compile(
             - "metis": use METIS to partition, will result in less amount of
                 communication, but will make `compile()` run longer
             - "evenly": partition evenly and take less time than mode "metis"
+    -   comm_backend (str):
+            if provided, EASIER compiler will use the specified communication
+            backend for runtime communication, supporting:
+            - "gloo": GLOO backend provided by `torch.distributed`, CPU-only
+            - "nccl": NCCL backend provided by `torch.distributed`, GPU-only
+            - "mpi": MPI backend provided by `torch.distributed`
+                support CPU or GPU TODO CPU-only?
 
     Returns:
         GraphModule: the jitted input easier.Modules that can run on the
@@ -311,7 +318,7 @@ def compile(
     elif backend == 'gpu':
         comm_device_type = 'cuda'  # TODO enforce GPU == CUDA for now
     elif backend == 'cpu':
-        comm_device_type = backend
+        comm_device_type = 'cpu'
     else:
         raise EasierJitException(f"Argument `jit_backend` cannot be {backend}")
 

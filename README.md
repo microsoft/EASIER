@@ -1,51 +1,63 @@
-<h1> EASIER: Efficient Auto-scalable Scientific Infrastructure
-for Engineers and Researchers</h1>
+<div align="center">
+  <img width="400px" src="tutorial/logo.png"/>
+</div>
 
-Manufacturing engineers and natural science researchers have long suffered from ad-hoc implementations of scientific computing tasks and their hand-craft deployment on clusters.
-EASIER is a domain specific language, compiler and runtime for efficiently and automatically scaling scientific computing tasks up and out, providing scientific computing developers similar experience to that of developing and deploying large-scale deep learning models.
+# What is EASIER?
 
-## Setup the development environment
+**EASIER** is a domain specific language embedded in PyTorch to automatically scale physical simulations up and out.
+It just-in-time (JIT) distributes tensor dataflows that describe physical simulations to any number of workers and compiles them for extendable hardware backends without requiring users to make any code changes.
+This makes the development of large-scale high-performance physical simulations on explosively growing AI supercomputers is as easy as that of large language models.
 
-The dependencies should be fixed to exactly the acceptable minimun versions to
-ensure the widest compatibility and development consistency.
+# Get Started
 
-The Python itself should be fixed to 3.8:
+### Installation
+
+Clone the repo:
+
+```shell
+git clone https://github.com/microsoft/EASIER.git
+cd EASIER
+```
+
+Prepare the virtual environment, install dependencies and install EASIER:
 
 ```shell
 # for conda
-conda create -n ENV_NAME python=3.8
+conda create -n ENV_NAME python=3.13
 conda activate ENV_NAME
 
-# for conda, only run this if you see compile/link errors with `pip` commands
+# for conda, run this only when you see compile/link errors with following `pip` commands
 conda install gxx_linux-64
 
-# for other venvs
-# TODO
-```
-
-To install the dependencies for development:
-
-```shell
-# for Ubuntu
-sudo apt-get install libopenmpi-dev
-
-pip install Cython==3.0.11 mpi4py==3.1.5    # must be installed separately
 pip install -r dev-requirements.txt
 pip install -e .                            # equals `python setup.py develop`
 ```
 
-## Project folder structure
-```bash
-├── docker/       # Dockerfiles
-├── easier/       # python package
-│   ├── core/     # jit compiler implementation
-│   └── **/**     # numerical algorithms based on eaiser jit compiler
-├── tests/        # unit tests
-├── dev-requirements.txt
-├── README.md
-├── setup.py
-└── .gitignore
+### Run examples
+
+Simulating water waves in a square tub by solving shallow water equations with EASIER:
+```shell
+# create folder to store simulation results
+mkdir res
+
+# launch the simulation in a `torchrun` style
+easierrun --nnodes=1 --nproc_per_node=4 tutorial/shallow_water_equation.py --backend=cpu --output=res
+
+# Visualize simulation results
+python tutorial/swe_plot.py --data_dir res --filename swe.gif
 ```
+
+<div align="center">
+  <img width="300px" src="tutorial/swe.png">
+  &nbsp &nbsp &nbsp &nbsp &nbsp &nbsp
+  <img width="330px" src="tutorial/swe.gif"/>
+</div>
+
+EASIER launcher `easierrun` provides similar user experience to that of `torchrun`.
+Just add `--master_addr` argument to the launcher if there are multiple nodes.
+
+# Tutorial
+Detailed tutorial and more examples are coming soon.
 
 ## Trademarks
 
