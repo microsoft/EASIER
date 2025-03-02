@@ -807,6 +807,7 @@ def get_runtime_dist_env() -> DistEnv:
     if _runtime_dist_env_devicetype_backend not in _dist_envs:
         device_type, comm_backend = _runtime_dist_env_devicetype_backend
             
+        dist.get_backend_config
         if comm_backend == 'gloo':
             dist_env = TorchDistGlooDistEnv(device_type, comm_backend)
         else:

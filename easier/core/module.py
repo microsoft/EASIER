@@ -272,18 +272,10 @@ class Selector(nn.Module):
 
             return
 
-        idx_dl = _resolve_data_loader(idx)
-        self.easier_data_loader = idx_dl
-        _validate_idx_dataloader(self)
-        idx_ph: torch.Tensor = idx_dl.get_placeholder()
-
-        self.idx: torch.Tensor = idx_ph
-
-        # The maximum index of the original idx data loader,
-        # collectively figured out in _validate_idx_dataloader
-        self.idx_max: int
-
+        self.easier_data_loader = _resolve_data_loader(idx)
         self.easier_index_status: IdxStatus = 'placeholder'
+
+        self.idx: torch.Tensor
 
         # ======
         # Fields filled during JIT compilation
@@ -299,6 +291,9 @@ class Selector(nn.Module):
         # backend device during JIT.
         self.runtime_halos_local_idxes: List[torch.Tensor]
         self.runtime_halos_recv_lengths: List[int]
+    
+    def spmd_init(self) -> None:
+        pass
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         if self.easier_index_status != 'rewritten':
@@ -329,16 +324,10 @@ class Reducer(nn.Module):
         self.n = n
         self.reduce = reduce
 
-        idx_dl = _resolve_data_loader(idx)
-        self.easier_data_loader = idx_dl
-        _validate_idx_dataloader(self)
-        idx_ph: torch.Tensor = idx_dl.get_placeholder()
-
-        self.idx: torch.Tensor = idx_ph
-
+        self.easier_data_loader = _resolve_data_loader(idx)
         self.easier_index_status: IdxStatus = 'placeholder'
 
-        self.set_fullness()
+        self.idx: torch.Tensor
 
         # ======
         # Fields filled during JIT compilation
@@ -356,6 +345,9 @@ class Reducer(nn.Module):
         # backend device during JIT.
         self.runtime_halos_local_idxes: List[torch.Tensor]
         self.runtime_halos_recv_lengths: List[int]
+
+    def spmd_init(self) -> None:
+        self.set_fullness()
 
     def set_fullness(self):
         """

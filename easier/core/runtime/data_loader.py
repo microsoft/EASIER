@@ -9,7 +9,8 @@ import h5py
 import numpy as np
 import torch
 
-from easier.core.runtime.dist_env import get_cpu_dist_env
+from easier.core.runtime.dist_env import get_runtime_dist_env
+from easier.core.runtime.utils import check_collective_equality
 
 
 ATTRIBUTE_PLACEHOLDER = "easier_placeholder"
@@ -60,9 +61,36 @@ class DataLoaderBase:
 
     def __init__(self) -> None:
         """
+        The constructor should do simple member data storage and local tasks.
         No collective calls should be done during construction.
         """
-        pass
+        self.shape: Tuple[int, ...]
+        self.dtype: torch.dtype
+
+        # TODO only used by fully_load, but there we can unify the original device,
+        # data loader shouldn't be care of device.
+        # The device to where the data will be initially loaded.
+        # This device configuration only take effect with "torch" JIT backend.
+        # self.device: torch.device
+
+    def spmd_init(self, hint_name) -> None:
+        """
+        Validate if the the data of this data loader is collectively correct.
+
+        Require callers to first ensure the data loders among workers are
+        actually referring to the same data set.
+
+        Args:
+        - hint_name:
+            e.g. "the data loader of (Module.a.b.c):Selector"
+            because spmd_init is not run when the data loader is constructed,
+            we offer a clear hint name for users to locate the issue reported.
+        """
+        raise NotImplementedError()
+    
+    def minmax(self) -> Tuple[object, object]:
+        raise NotImplementedError()
+
 
     def partially_load_by_chunk(self, chunk_size: int
                                 ) -> Iterator[torch.Tensor]:
@@ -119,48 +147,33 @@ class DataLoaderBase:
         """
         raise NotImplementedError()
 
-    @property
-    def dtype(self) -> torch.dtype:
-        raise NotImplementedError()
 
-    @property
-    def shape(self) -> Tuple[int, ...]:
-        raise NotImplementedError()
+    # def get_placeholder(self) -> torch.Tensor:
+    #     """
+    #     Allocate a new placeholder torch.Tensor of the same dtype/shape/device
+    #     but generally consuming no memory to be compatible with cases where
+    #     torch.Tensor object and information is needed.
 
-    @property
-    def device(self) -> torch.device:
-        """
-        The device to where the data will be initially loaded.
-        This device configuration only take effect with "torch" JIT backend.
-        """
-        raise NotImplementedError()
+    #     Any subclass implementation should add the attribute
+    #     "easier_placeholder" to indicate the result is a placeholder, too.
 
-    def get_placeholder(self) -> torch.Tensor:
-        """
-        Allocate a new placeholder torch.Tensor of the same dtype/shape/device
-        but generally consuming no memory to be compatible with cases where
-        torch.Tensor object and information is needed.
+    #     The placeholder is needed mainly to:
+    #     1.  ease the inspection of tensor properties like dtype/shape/device,
+    #         especially for the metadata pass.
+    #     2.  fulfil `esr.Tensor.__new__(cls, data)` where the underlying data
+    #         tensor should be set.
+    #     """
+    #     # torch.Tensor.expand can expand shape-(1,) to e.g. shape-(0,0,0),
+    #     # but not to ndim=0 shape ().
+    #     if len(self.shape) == 0:
+    #         ph = torch.zeros((), dtype=self.dtype, device=self.device)
+    #     else:
+    #         ph = torch.zeros(
+    #             (1,), dtype=self.dtype, device=self.device
+    #         ).expand(self.shape)  # can even expand to (0,0,0)
 
-        Any subclass implementation should add the attribute
-        "easier_placeholder" to indicate the result is a placeholder, too.
-
-        The placeholder is needed mainly to:
-        1.  ease the inspection of tensor properties like dtype/shape/device,
-            especially for the metadata pass.
-        2.  fulfil `esr.Tensor.__new__(cls, data)` where the underlying data
-            tensor should be set.
-        """
-        # torch.Tensor.expand can expand shape-(1,) to e.g. shape-(0,0,0),
-        # but not to ndim=0 shape ().
-        if len(self.shape) == 0:
-            ph = torch.zeros((), dtype=self.dtype, device=self.device)
-        else:
-            ph = torch.zeros(
-                (1,), dtype=self.dtype, device=self.device
-            ).expand(self.shape)  # can even expand to (0,0,0)
-
-        setattr(ph, ATTRIBUTE_PLACEHOLDER, True)
-        return ph
+    #     setattr(ph, ATTRIBUTE_PLACEHOLDER, True)
+    #     return ph
 
     def __repr__(self) -> str:
         """
@@ -188,26 +201,20 @@ class InMemoryTensorLoader(DataLoaderBase):
     def __init__(self, tensor: torch.Tensor) -> None:
         super().__init__()
 
-        self._device = tensor.device
-
         # The data is always stored as CPU tensor, while,
         # the DataLoader would behave as being on the proper `self._device`.
         self.tensor = tensor.to('cpu')
+    
+    def spmd_init(self, hint_name) -> None:
+        def _eq_tensor(v, v0):
+            # torch.allclose support broadcasting, so we need to check shapes.
+            return v.shape == v0.shape and torch.allclose(v, v0)
+        check_collective_equality(
+            f"The input tensor of {hint_name}", self.tensor, eq=_eq_tensor
+        )
 
         _check_data_loader_metas(self)
 
-        dist_env = get_cpu_dist_env()
-        if dist_env.rank == 0:
-            dist_env.broadcast(0, self.tensor.to(dist_env.comm_device))
-        else:
-            tensor0 = dist_env.broadcast(
-                0, shape=self.shape, dtype=self.dtype
-            )
-            if not torch.allclose(tensor0.cpu(), self.tensor):
-                raise TypeError(
-                    f'Tensor on rank-{dist_env.rank} {self.tensor}'
-                    f' does not equal rank-0 {tensor0}'
-                )
 
     def partially_load_by_chunk(self, chunk_size: int
                                 ) -> Iterator[torch.Tensor]:
@@ -251,18 +258,6 @@ class InMemoryTensorLoader(DataLoaderBase):
     def fully_load(self, device: Union[torch.device, str, None]
                    ) -> torch.Tensor:
         return self.tensor.to(device or self.device, copy=True)
-
-    @property
-    def dtype(self) -> torch.dtype:
-        return self.tensor.dtype
-
-    @property
-    def shape(self) -> Tuple[int, ...]:
-        return self.tensor.shape
-
-    @property
-    def device(self) -> torch.device:
-        return self._device
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}(tensor={self.tensor})'
@@ -503,18 +498,6 @@ class H5DataLoader(DataLoaderBase):
 
         return t.to(device=device or self.device)
 
-    @property
-    def dtype(self) -> torch.dtype:
-        return self._dtype
-
-    @property
-    def shape(self) -> Tuple[int, ...]:
-        return self._shape
-
-    @property
-    def device(self) -> torch.device:
-        return self._device
-
     def __repr__(self) -> str:
         return ''.join([
             f'{self.__class__.__name__}(',
@@ -582,17 +565,6 @@ class FulledTensorLoader(DataLoaderBase):
                    ) -> torch.Tensor:
         return self._full(None, device=device or self.device)
 
-    @property
-    def dtype(self) -> torch.dtype:
-        return self._dtype
-
-    @property
-    def shape(self) -> Tuple[int, ...]:
-        return self._shape
-
-    @property
-    def device(self) -> torch.device:
-        return self._device
 
     def __repr__(self) -> str:
         return ''.join([
@@ -671,17 +643,6 @@ class ArangeTensorLoader(DataLoaderBase):
         return torch.arange(self._start, self._end, self._step,
                             dtype=self._dtype, device=device or self.device)
 
-    @property
-    def dtype(self) -> torch.dtype:
-        return self._dtype
-
-    @property
-    def shape(self) -> Tuple[int, ...]:
-        return self._shape
-
-    @property
-    def device(self) -> torch.device:
-        return self._device
 
     def __repr__(self) -> str:
         return ''.join([

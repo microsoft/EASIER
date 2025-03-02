@@ -24,7 +24,6 @@ from torch.fx.node import Node, Argument
 from torch.fx.operator_schemas import normalize_function, ArgsKwargsPair
 
 import easier.core.module as esr
-from easier.core.runtime.dist_env import DistEnv, get_cpu_dist_env
 from easier.core.utils import EasierJitException
 
 
@@ -464,6 +463,19 @@ def get_sub_easier_modules(
 
     return modules
 
+
+
+
+def get_submod_hint(
+    modules: Sequence[esr.Module],
+    root_index: int,
+    attrpath: str,
+    submod: Union[esr.Selector, esr.Reducer]
+):
+    submod_hint = \
+        f"(modules[{root_index}]:{modules[root_index].__class__.__name__})" \
+        f".({attrpath}:{submod.__class__.__name__})"
+    return submod_hint
 
 # torch.fx constants
 

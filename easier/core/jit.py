@@ -22,10 +22,13 @@ from easier.core import passes
 from easier.core import module as _EsrMod
 from easier.core.dump import load_dumps, ConstantsCollector
 from easier.core.passes.utils import \
-    get_sub_easier_modules, fx_graph_to_serializable_ir
+    fx_graph_to_serializable_ir, \
+    get_selectors_reducers, get_easier_tensors, get_sub_easier_modules, \
+    get_submod_hint
 from easier.core.utils import EasierJitException
 from easier.core.runtime.dist_env import \
-    get_cpu_dist_env, config_runtime_dist_env
+    config_runtime_dist_env, get_runtime_dist_env
+from easier.core.runtime.utils import check_collective_equality
 
 
 class EasierProxy(Proxy):
@@ -411,6 +414,71 @@ def compile(
     return top_modules
 
 
+def _run_spmd_init_and_validate(modules: Sequence[esr.Module], graphs: Sequence[Graph]):
+    dist_env = get_runtime_dist_env()
+
+    check_collective_equality("The number of easier.Modules", len(modules))
+
+    irs = list(map(fx_graph_to_serializable_ir, graphs))
+    # TODO too complex, don't print the whole IR, and such difference shouldn't
+    # be hard to fix.
+    check_collective_equality("The computational graph", irs, repr_str="")
+
+    inited_dts = set()
+
+    # Dict[R|S, OSet[(modidx:int,attrpath:str)]
+    submods = get_selectors_reducers(modules, graphs)
+    check_collective_equality(
+        "The number of easier.Selectors/Reducers", len(submods)
+    )
+    for submod, oset_modi_attrpath in submods.items():
+        (modi, attrpath) = next(iter(oset_modi_attrpath))
+        submod_hint = get_submod_hint(modules, modi, attrpath, submod)
+        check_collective_equality(
+            f"The type of {submod_hint}", submod.__class__.__name__
+        )
+
+        dt = submod.easier_data_loader
+        dt_hint = f"the data loader of `idx` of {submod_hint}"
+        check_collective_equality(
+            f"The type of {dt_hint}", dt.__class__.__name__
+        )
+        if dt not in inited_dts:
+            dt.spmd_init(dt_hint)
+            inited_dts.add(dt)
+
+        submod.spmd_init()
+
+    tensors = get_easier_tensors(modules)
+    check_collective_equality("The number of easier.Tensors", len(tensors))
+    for tensor, oset_modi_attrpath in tensors.items():
+        (modi, attrpath) = next(iter(oset_modi_attrpath))
+        tensor_hint = "TODO tensor hint"
+        check_collective_equality(
+            f"The partition mode of {tensor_hint}", tensor.is_partition
+        )
+
+        dt = tensor.easier_data_loader
+        dt_hint = f"the data loader of data of {submod_hint}"
+        check_collective_equality(
+            f"The type of {dt_hint}", dt.__class__.__name__
+        )
+        if dt not in inited_dts:
+            dt.spmd_init(dt_hint)
+            inited_dts.add(dt)
+
+    # const attrnames equality has been checked in IR
+    def _eq_tensor(v, v0):
+        # torch.allclose support broadcasting, so we need to check shapes.
+        return v.shape == v0.shape and torch.allclose(v, v0)
+    for root, graph in zip(modules, graphs):
+        cc = ConstantsCollector([root], [graph]).run()
+        # collected tensors are all on CPU
+        check_collective_equality(
+            "Constant tensors", cc.constant_values, eq=_eq_tensor
+        )
+
+
 def _validate_spmd(modules: List[esr.Module], graphs: List[Graph]):
     """
     Validate user programs, including constant values, are really
@@ -435,6 +503,8 @@ def _validate_spmd(modules: List[esr.Module], graphs: List[Graph]):
         raise EasierJitException(
             f"Computational graph on rank-{rank} differs from rank-0"
         )
+    
+    # assert they are same components and spmd_int
 
     for root, graph in zip(modules, graphs):
         cc = ConstantsCollector([root], [graph]).run()
