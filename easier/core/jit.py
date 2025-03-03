@@ -24,7 +24,7 @@ from easier.core.dump import load_dumps, ConstantsCollector
 from easier.core.passes.utils import \
     fx_graph_to_serializable_ir, \
     get_selectors_reducers, get_easier_tensors, get_sub_easier_modules, \
-    get_submod_hint
+    get_easier_inst_hint
 from easier.core.utils import EasierJitException
 from easier.core.runtime.dist_env import \
     config_runtime_dist_env, get_runtime_dist_env
@@ -415,6 +415,18 @@ def compile(
 
 
 def _run_spmd_init_and_validate(modules: Sequence[esr.Module], graphs: Sequence[Graph]):
+    """
+    Run collective initialization process of all EASIER submods and tensors:
+    -   data loaders for Selector/Reducer.idx 
+    -   Selector/Reducer.idx itself, the idxmax and fullness etc.
+
+    Validate user programs, including constant values, are really
+    replicated across workers:
+    -   data loaders and idx are well-defined
+    -   user programs, submod definitions and constant tensors are replicated
+
+    TODO refine the completeness of validation here.
+    """
     dist_env = get_runtime_dist_env()
 
     check_collective_equality("The number of easier.Modules", len(modules))
@@ -424,7 +436,7 @@ def _run_spmd_init_and_validate(modules: Sequence[esr.Module], graphs: Sequence[
     # be hard to fix.
     check_collective_equality("The computational graph", irs, repr_str="")
 
-    inited_dts = set()
+    inited_data_loaders = set()
 
     # Dict[R|S, OSet[(modidx:int,attrpath:str)]
     submods = get_selectors_reducers(modules, graphs)
@@ -433,7 +445,7 @@ def _run_spmd_init_and_validate(modules: Sequence[esr.Module], graphs: Sequence[
     )
     for submod, oset_modi_attrpath in submods.items():
         (modi, attrpath) = next(iter(oset_modi_attrpath))
-        submod_hint = get_submod_hint(modules, modi, attrpath, submod)
+        submod_hint = get_easier_inst_hint(modules[modi], attrpath, submod)
         check_collective_equality(
             f"The type of {submod_hint}", submod.__class__.__name__
         )
@@ -443,17 +455,17 @@ def _run_spmd_init_and_validate(modules: Sequence[esr.Module], graphs: Sequence[
         check_collective_equality(
             f"The type of {dt_hint}", dt.__class__.__name__
         )
-        if dt not in inited_dts:
-            dt.spmd_init(dt_hint)
-            inited_dts.add(dt)
+        if dt not in inited_data_loaders:
+            dt.collective_init(dt_hint)
+            inited_data_loaders.add(dt)
 
-        submod.spmd_init()
+        submod.collective_init()
 
     tensors = get_easier_tensors(modules)
     check_collective_equality("The number of easier.Tensors", len(tensors))
     for tensor, oset_modi_attrpath in tensors.items():
         (modi, attrpath) = next(iter(oset_modi_attrpath))
-        tensor_hint = "TODO tensor hint"
+        tensor_hint = get_easier_inst_hint(modules[modi], attrpath, tensor)
         check_collective_equality(
             f"The partition mode of {tensor_hint}", tensor.is_partition
         )
@@ -463,9 +475,9 @@ def _run_spmd_init_and_validate(modules: Sequence[esr.Module], graphs: Sequence[
         check_collective_equality(
             f"The type of {dt_hint}", dt.__class__.__name__
         )
-        if dt not in inited_dts:
-            dt.spmd_init(dt_hint)
-            inited_dts.add(dt)
+        if dt not in inited_data_loaders:
+            dt.collective_init(dt_hint)
+            inited_data_loaders.add(dt)
 
     # const attrnames equality has been checked in IR
     def _eq_tensor(v, v0):
@@ -477,50 +489,3 @@ def _run_spmd_init_and_validate(modules: Sequence[esr.Module], graphs: Sequence[
         check_collective_equality(
             "Constant tensors", cc.constant_values, eq=_eq_tensor
         )
-
-
-def _validate_spmd(modules: List[esr.Module], graphs: List[Graph]):
-    """
-    Validate user programs, including constant values, are really
-    replicated across workers.
-
-    For other SPMD data related to the computational structure:
-    -   Selector/Reducer.idx, if H5
-        Only H5 file path on rank-0 takes effect
-    -   Selector/Reducer.idx, otherwise (like InMem, Arange)
-        Checked in the constructors in those data loaders.
-    """
-    dist_env = get_cpu_dist_env()
-    rank = dist_env.rank
-    irs = list(map(fx_graph_to_serializable_ir, graphs))
-
-    if dist_env.rank == 0:
-        irs0 = dist_env.broadcast_object_list(0, irs)
-    else:
-        irs0 = dist_env.broadcast_object_list(0)
-
-    if irs != irs0:
-        raise EasierJitException(
-            f"Computational graph on rank-{rank} differs from rank-0"
-        )
-    
-    # assert they are same components and spmd_int
-
-    for root, graph in zip(modules, graphs):
-        cc = ConstantsCollector([root], [graph]).run()
-        if dist_env.rank == 0:
-            [cvs0] = dist_env.broadcast_object_list(0, [cc.constant_values])
-        else:
-            [cvs0] = dist_env.broadcast_object_list(0)
-        cvs0: Dict[str, torch.Tensor]
-
-        # cvs0 and cvs keys (const attrnames) equality has been checked in IR
-        for n in cvs0.keys():
-            v0 = cvs0[n]
-            v = cc.constant_values[n]
-
-            # torch.allclose support broadcasting, so we need to check shapes.
-            if not (v.shape != v0.shape and torch.allclose(v, v0)):
-                raise EasierJitException(
-                    f"Constant tensor {n} on rank-{rank} differs from rank-0"
-                )

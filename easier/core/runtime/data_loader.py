@@ -38,18 +38,9 @@ def _get_offset_exactly_nparts(orig_len: int, nparts: int, part: int
     return start, end
 
 
-def _check_data_loader_metas(dt: 'DataLoaderBase', *more_metas):
-    dist_env = get_cpu_dist_env()
-    rank = dist_env.rank
-
-    dt_metas = [dt.dtype, dt.device.type, dt.shape] + list(more_metas)
-    dt_metas0 = dist_env.broadcast_object_list(0, dt_metas)
-
-    if dt_metas != dt_metas0:
-        raise TypeError(
-            f'Tensor properties {dt_metas} on rank-{rank}'
-            f' do not equal properties {dt_metas0} on rank-0'
-        )
+def _check_dtype_shape_and_more(dt: 'DataLoaderBase', hint_name, *more_metas):
+    dt_metas = [dt.dtype, dt.shape] + list(more_metas)
+    check_collective_equality(f"Tensor properties of {hint_name}", dt_metas)
 
 
 class DataLoaderBase:
@@ -67,13 +58,11 @@ class DataLoaderBase:
         self.shape: Tuple[int, ...]
         self.dtype: torch.dtype
 
-        # TODO only used by fully_load, but there we can unify the original device,
-        # data loader shouldn't be care of device.
-        # The device to where the data will be initially loaded.
+        # The device on which the data loader is intially defined.
         # This device configuration only take effect with "torch" JIT backend.
-        # self.device: torch.device
+        self.device: torch.device
 
-    def spmd_init(self, hint_name) -> None:
+    def collective_init(self, hint_name) -> None:
         """
         Validate if the the data of this data loader is collectively correct.
 
@@ -82,7 +71,7 @@ class DataLoaderBase:
 
         Args:
         - hint_name:
-            e.g. "the data loader of (Module.a.b.c):Selector"
+            e.g. "the data loader of (Module.a.b.c:Selector)"
             because spmd_init is not run when the data loader is constructed,
             we offer a clear hint name for users to locate the issue reported.
         """
@@ -90,7 +79,22 @@ class DataLoaderBase:
     
     def minmax(self) -> Tuple[object, object]:
         raise NotImplementedError()
-
+    
+    def count_unique(self) -> int:
+        """
+        Used by Reducer.set_fullness()
+        """
+        raise NotImplementedError()
+    
+    # TODO now we accept keyword parameters only, we may make it do
+    # overloading resolution like Selector(idx=)
+    def to(
+        self,
+        *,
+        dtype: Optional[torch.dtype] = None,
+        device: Optional[Union[torch.device, str]] = None
+    ) -> 'DataLoaderBase':
+        raise NotImplementedError()
 
     def partially_load_by_chunk(self, chunk_size: int
                                 ) -> Iterator[torch.Tensor]:
@@ -201,11 +205,15 @@ class InMemoryTensorLoader(DataLoaderBase):
     def __init__(self, tensor: torch.Tensor) -> None:
         super().__init__()
 
-        # The data is always stored as CPU tensor, while,
-        # the DataLoader would behave as being on the proper `self._device`.
+        self.dtype = tensor.dtype
+        self.shape = tensor.shape
+
+        # The data is always stored as CPU tensor
         self.tensor = tensor.to('cpu')
     
-    def spmd_init(self, hint_name) -> None:
+    def collective_init(self, hint_name) -> None:
+        _check_dtype_shape_and_more(self, hint_name)
+
         def _eq_tensor(v, v0):
             # torch.allclose support broadcasting, so we need to check shapes.
             return v.shape == v0.shape and torch.allclose(v, v0)
@@ -213,8 +221,9 @@ class InMemoryTensorLoader(DataLoaderBase):
             f"The input tensor of {hint_name}", self.tensor, eq=_eq_tensor
         )
 
-        _check_data_loader_metas(self)
-
+    def minmax(self) -> Tuple[object, object]:
+        amin, amax = self.tensor.aminmax()
+        return amin.item(), amax.item()
 
     def partially_load_by_chunk(self, chunk_size: int
                                 ) -> Iterator[torch.Tensor]:
@@ -255,9 +264,8 @@ class InMemoryTensorLoader(DataLoaderBase):
         assert index.device == torch.device('cpu')
         return self.tensor[index]
 
-    def fully_load(self, device: Union[torch.device, str, None]
-                   ) -> torch.Tensor:
-        return self.tensor.to(device or self.device, copy=True)
+    def fully_load(self, device: Union[torch.device, str]) -> torch.Tensor:
+        return self.tensor.to(device, copy=True)
 
     def __repr__(self) -> str:
         return f'{self.__class__.__name__}(tensor={self.tensor})'
@@ -286,45 +294,44 @@ class H5DataLoader(DataLoaderBase):
                  *,
                  # Optional reading configs for users to load the dataset.
                  dtype: Optional[torch.dtype] = None,
-                 device: Union[torch.device, str] = 'cpu',
                  **h5_file_kwargs) -> None:
         super().__init__()
 
-        self._file_kwargs = h5_file_kwargs
+        self._unexpanded_file_path = h5_file_path
         self._dataset_path = h5_dataset_path
+        self._file_kwargs = h5_file_kwargs
+        self._target_dtype = dtype
 
-        self._device = torch.device(device)
+    def collective_init(self, hint_name) -> None:
+        check_collective_equality(
+            f"The target dtype of {hint_name}", self._target_dtype
+        )
+        # Since H5 paths are only required on rank-0, let's not check them
+        # collectively.
 
-        self._target_np_dtype = None
-
-        cpu_dist_env = get_cpu_dist_env()
-        if cpu_dist_env.rank == 0:
-
-            self._file_path = os.path.expanduser(h5_file_path)
+        dist_env = get_runtime_dist_env()
+        if dist_env.rank == 0:
+            self._file_path = os.path.expanduser(self._unexpanded_file_path)
 
             with self._dataset() as d:
                 assert isinstance(d, h5py.Dataset)
                 raw_np_dtype = cast(np.dtype, d.dtype)
-                raw_dtype = numpy_dtype_to_torch_dtype(raw_np_dtype)
 
-                self._shape = tuple(d.shape)
+                self.shape = tuple(d.shape)
 
-            if dtype is not None:
-                if not isinstance(dtype, torch.dtype):
-                    raise TypeError()
-                self._dtype = dtype
+            if self._target_dtype is not None:
+                self._target_np_dtype = \
+                    torch_dtype_to_numpy_dtype(self._target_dtype)
+                self.dtype = self._target_dtype
             else:
-                self._dtype = raw_dtype
+                self._target_np_dtype = raw_np_dtype
+                raw_dtype = numpy_dtype_to_torch_dtype(raw_np_dtype)
+                self.dtype = raw_dtype
 
-            cpu_dist_env.broadcast_object_list(0, [self._dtype, self._shape])
+            dist_env.broadcast_object_list(0, [self.dtype, self.shape])
 
         else:
-            self._file_path = h5_file_path  # not used on other ranks
-
-            self._dtype, self._shape = \
-                cpu_dist_env.broadcast_object_list(0)
-
-        self._target_np_dtype = torch_dtype_to_numpy_dtype(self.dtype)
+            [self.dtype, self.shape] = dist_env.broadcast_object_list(0)
 
     @contextmanager
     def _dataset(self):
@@ -332,8 +339,8 @@ class H5DataLoader(DataLoaderBase):
         Temporarily open the H5 File and Dataset.
         After reading, the dataset should be closed in time to free memeory.
         """
-        cpu_dist_env = get_cpu_dist_env()
-        assert cpu_dist_env.rank == 0
+        dist_env = get_runtime_dist_env()
+        assert dist_env.rank == 0
 
         with h5py.File(self._file_path, 'r', **self._file_kwargs) as f:
             d = f[self._dataset_path]
@@ -485,8 +492,7 @@ class H5DataLoader(DataLoaderBase):
         else:
             return _run(None)
 
-    def fully_load(self, device: Union[torch.device, str, None]
-                   ) -> torch.Tensor:
+    def fully_load(self, device: Union[torch.device, str]) -> torch.Tensor:
         dist_env = get_cpu_dist_env()
 
         if dist_env.rank == 0:
@@ -496,7 +502,7 @@ class H5DataLoader(DataLoaderBase):
         else:
             t = dist_env.broadcast(0, shape=self.shape, dtype=self.dtype)
 
-        return t.to(device=device or self.device)
+        return t.to(device=device)
 
     def __repr__(self) -> str:
         return ''.join([
@@ -518,7 +524,7 @@ class FulledTensorLoader(DataLoaderBase):
         self._dtype = dtype
         self._device = torch.device(device)
 
-        _check_data_loader_metas(self, self.value)
+        _check_dtype_shape_and_more(self, self.value)
 
     def _full(self, batch_dim_len: Optional[int] = None,
               device: Union[torch.device, str, None] = None):
@@ -589,7 +595,7 @@ class ArangeTensorLoader(DataLoaderBase):
         self._dtype = dtype
         self._device = torch.device(device)
 
-        _check_data_loader_metas(self, start, end, step)
+        _check_dtype_shape_and_more(self, start, end, step)
 
     def partially_load_by_chunk(self, chunk_size: int
                                 ) -> Iterator[torch.Tensor]:

@@ -447,9 +447,20 @@ def get_easier_tensors(
 
 def get_sub_easier_modules(
     top_modules: Sequence[esr.Module]
-) -> 'OrderedSet[esr.Module]':
+) -> 'OrderedSet[Tuple[esr.Module, str]]':
     """
-    Recursively get all sub easier.Modules into an OrderedSet.
+    Recursively get all sub easier.Modules into an OrderedSet,
+    and assign hint names for them.
+
+    All hint names are made according to the top modules, with explicit indexes
+    in the top modules list and any module list, e.g.
+    ```
+    (modules[I]:GMRES).(update_x[J]:UpdateX)
+    (modules[I]:GMRES).(A:)
+    ```
+
+    If a sub esr.Module is referenced multiple times, the hint name is made
+    from the first appearance.
     """
     modules = OrderedSet()
     for module in top_modules:
@@ -466,16 +477,25 @@ def get_sub_easier_modules(
 
 
 
-def get_submod_hint(
-    modules: Sequence[esr.Module],
-    root_index: int,
+def get_easier_inst_hint(
+    root: esr.Module,
     attrpath: str,
-    submod: Union[esr.Selector, esr.Reducer]
+    inst: Union[esr.Selector, esr.Reducer, esr.Tensor]
 ):
-    submod_hint = \
-        f"(modules[{root_index}]:{modules[root_index].__class__.__name__})" \
-        f".({attrpath}:{submod.__class__.__name__})"
-    return submod_hint
+    """
+    Returns a hint name of the instance of an EASIER API class,
+    to help locate the instance, e.g. `(MyEasierMod.x.y.z:Selector)`
+
+    TODO
+    MyEasierMod may not be a top-level module (e.g. GMRES has many instances
+    of the same mod class, in a ModuleList). we may need a hint like:
+    `(modules[I]:TopLevelMod).(a.b[J]:MyEasierMod).(x.y.z:Selector)`
+    this requires the help of `get_sub_easier_modules` to return the
+    attribute hierarchy too.
+    """
+    hint_name = \
+        f"({root.__class__.__name__}.{attrpath}:{inst.__class__.__name__})"
+    return hint_name
 
 # torch.fx constants
 

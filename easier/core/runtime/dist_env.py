@@ -795,7 +795,6 @@ def config_runtime_dist_env(
     assert _runtime_dist_env_devicetype_backend is None
     _runtime_dist_env_devicetype_backend = (comm_device_type, comm_backend)
 
-
 def get_runtime_dist_env() -> DistEnv:
     """
     Get the DistEnv instance for communication during JIT runtime.

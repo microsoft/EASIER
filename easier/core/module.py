@@ -346,7 +346,7 @@ class Reducer(nn.Module):
         self.runtime_halos_local_idxes: List[torch.Tensor]
         self.runtime_halos_recv_lengths: List[int]
 
-    def spmd_init(self) -> None:
+    def collective_init(self) -> None:
         self.set_fullness()
 
     def set_fullness(self):
