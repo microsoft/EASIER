@@ -746,18 +746,16 @@ class TorchDistGlooDistEnv(TorchDistEnv):
         return recv_buffers
 
 
-_runtime_dist_env_devicetype_backend: Optional[Tuple[
-    Literal['cpu', 'cuda'], str
-]] = None
+_runtime_devicetype_backend: Optional[Tuple[str, str]] = None
 
 _dist_envs: Dict[Tuple[str, str], DistEnv] = {}
 
 def config_runtime_dist_env(
-    comm_device_type: Literal['cpu', 'cuda'],
+    comm_device_type: str,
     comm_backend: Literal['gloo', 'nccl', 'mpi', None]
 ):
     """
-    If `comm_backend` is not specified, infer from the environment:
+    If `comm_backend_type` is not specified, infer from the environment:
 
     -   'gloo' for 'cpu', 'nccl' for 'cuda';
 
@@ -765,46 +763,41 @@ def config_runtime_dist_env(
     source with (CUDA-aware) MPI support,
     they should specify 'mpi' explicitly.
 
-
-    The real backend to use for each `device_type` and `comm_backend`
-    combination is:
-    (dist-xx means the backend wrapped by `torch.distributed`)
-
-    |       |    gloo     |    nccl     |     mpi     |
-    | ----- | ----------- | ----------- | ----------- |
-    |  cpu  |  dist-gloo  |  dist-nccl  |  dist-mpi   |
-    | ----- | ----------- | ----------- | ----------- |
-    |  cuda |  dist-gloo  |  dist-nccl  |  dist-mpi   |
-
-    TODO will data-to-send still be too big for CUDA memory, even though
-    we move AOT-compilation data back to CPU each time after comm?
-
     P.S. it's possible to use MPIRUN but use `nccl` instead,
     if users set WORLD_SIZE RANK LOCAL_RANK MASTER_ADDR MASTER_PORT etc.
     to reconstruct the environment that `torch.distributed + nccl` needs.
 
+    TODO will data-to-send still be too big for CUDA memory, even though
+    we move AOT-compilation data back to CPU each time after comm?
     """
     if comm_backend is None:
-        if comm_device_type == 'cuda':
+        if comm_device_type == 'cpu':
+            comm_backend = 'gloo'
+        elif comm_device_type == 'cuda':
             comm_backend = 'nccl'
         else:
-            comm_backend = 'gloo'
+            raise EasierJitException(
+                "Cannot device communication backend for device_type"
+                f" {comm_device_type}, please specify `comm_backend` parameter"
+                " or EASIER_COMM_BACKEND environment variable explicitly"
+            )
+    assert comm_backend is not None
     
     # DummyDistEnv is not a standard DistEnv for public use.
-    global _runtime_dist_env_devicetype_backend
-    assert _runtime_dist_env_devicetype_backend is None
-    _runtime_dist_env_devicetype_backend = (comm_device_type, comm_backend)
+    global _runtime_devicetype_backend
+    assert _runtime_devicetype_backend is None
+    _runtime_devicetype_backend = (comm_device_type, comm_backend)
 
 def get_runtime_dist_env() -> DistEnv:
     """
     Get the DistEnv instance for communication during JIT runtime.
     This instance can be retrieved only during or after JIT process.
     """
-    if _runtime_dist_env_devicetype_backend is None:
+    if _runtime_devicetype_backend is None:
         raise EasierJitException("The backend for runtime isn't set")
 
-    if _runtime_dist_env_devicetype_backend not in _dist_envs:
-        device_type, comm_backend = _runtime_dist_env_devicetype_backend
+    if _runtime_devicetype_backend not in _dist_envs:
+        device_type, comm_backend = _runtime_devicetype_backend
             
         dist.get_backend_config
         if comm_backend == 'gloo':
@@ -812,5 +805,5 @@ def get_runtime_dist_env() -> DistEnv:
         else:
             dist_env = TorchDistEnv(device_type, comm_backend)
 
-        _dist_envs[_runtime_dist_env_devicetype_backend] = dist_env
+        _dist_envs[_runtime_devicetype_backend] = dist_env
 

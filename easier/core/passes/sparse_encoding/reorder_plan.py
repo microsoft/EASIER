@@ -310,7 +310,13 @@ def build_cascade_reorder_plan_on_rank0(graph_builder: ReorderGraphBuilder):
             elif isinstance(pattern, esr.Reducer):
                 nnodes = graph_builder.reducer_nnodes[pattern]
                 cyc0_weighted_reducers.append((
-                    (pattern.easier_fullness, idxlen * nnodes,),
+                    (
+                        # fullness = len(unique(R.idx)) / R.n
+                        float(
+                            pattern.easier_data_loader.count_unique()
+                        ) / pattern.n,
+                        idxlen * nnodes,
+                    ),
                     depsrc, depdst
                 ))
             else:

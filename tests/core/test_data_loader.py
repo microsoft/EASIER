@@ -46,7 +46,7 @@ def worker__test_load_by_rank(local_rank: int, world_size: int,
                               device_type: str):
     dl: DataLoaderBase = data_loader_ctor(dtype, device_type)
     assert dl.dtype == dtype
-    assert dl.device.type == device_type
+    assert dl.user_device.type == device_type
     assert dl.shape == (17,)
 
     tensor, start, end = dl.partially_load_by_rank()
@@ -66,7 +66,7 @@ def worker__test_load_by_index(local_rank: int, world_size: int,
                                device_type: str):
     dl: DataLoaderBase = data_loader_ctor(dtype, device_type)
     assert dl.dtype == dtype
-    assert dl.device.type == device_type
+    assert dl.user_device.type == device_type
     assert dl.shape == (17,)
 
     idx = torch.arange(5) * 2 + local_rank
@@ -97,7 +97,7 @@ class TestDataLoader:
         # rank-0 only
         dl: DataLoaderBase = data_loader_ctor(dtype, device_type)
         assert dl.dtype == dtype
-        assert dl.device.type == device_type
+        assert dl.user_device.type == device_type
         assert dl.shape == (17,)
 
         it = dl.partially_load_by_chunk(7)
@@ -132,7 +132,7 @@ class TestDataLoader:
                         device_type: str, target_device_type: str):
         dl: DataLoaderBase = data_loader_ctor(dtype, device_type)
         assert dl.dtype == dtype
-        assert dl.device.type == device_type
+        assert dl.user_device.type == device_type
         assert dl.shape == (17,)
 
         tensor = dl.fully_load(target_device_type)
@@ -148,7 +148,7 @@ def worker__test_load_full_by_rank(local_rank: int, world_size: int,
     dl = FulledTensorLoader(
         42, shape=[17, 2], dtype=dtype, device=torch.device(device_type))
     assert dl.dtype == dtype
-    assert dl.device.type == device_type
+    assert dl.user_device.type == device_type
     assert dl.shape == (17, 2)
 
     tensor, start, end = dl.partially_load_by_rank()
@@ -168,7 +168,7 @@ def worker__test_load_full_by_index(local_rank: int, world_size: int,
     dl = FulledTensorLoader(
         42, shape=[17, 2], dtype=dtype, device=torch.device(device_type))
     assert dl.dtype == dtype
-    assert dl.device.type == device_type
+    assert dl.user_device.type == device_type
     assert dl.shape == (17, 2)
 
     idx = torch.arange(5) * 2 + local_rank
@@ -192,7 +192,7 @@ class TestFulledLoader:
         dl = FulledTensorLoader(
             42, shape=[17, 2], dtype=dtype, device=torch.device(device_type))
         assert dl.dtype == dtype
-        assert dl.device.type == device_type
+        assert dl.user_device.type == device_type
         assert dl.shape == (17, 2)
 
         it = dl.partially_load_by_chunk(7)
@@ -220,7 +220,7 @@ def worker__test_load_arange_by_rank(local_rank: int, world_size: int,
     dl = ArangeTensorLoader(0, 34, 2,
                             dtype=dtype, device=torch.device(device_type))
     assert dl.dtype == dtype
-    assert dl.device.type == device_type
+    assert dl.user_device.type == device_type
     assert dl.shape == (17,)
 
     tensor, start, end = dl.partially_load_by_rank()
@@ -240,7 +240,7 @@ def worker__test_load_arange_by_index(local_rank: int, world_size: int,
     dl = ArangeTensorLoader(0, 34, 2,
                             dtype=dtype, device=torch.device(device_type))
     assert dl.dtype == dtype
-    assert dl.device.type == device_type
+    assert dl.user_device.type == device_type
     assert dl.shape == (17,)
 
     idx = torch.arange(5) * 2 + local_rank
@@ -264,7 +264,7 @@ class TestArangeLoader:
         dl = ArangeTensorLoader(0, 34, 2,
                                 dtype=dtype, device=torch.device(device_type))
         assert dl.dtype == dtype
-        assert dl.device.type == device_type
+        assert dl.user_device.type == device_type
         assert dl.shape == (17,)
 
         it = dl.partially_load_by_chunk(7)

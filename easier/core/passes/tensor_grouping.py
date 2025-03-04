@@ -215,7 +215,8 @@ class TensorGrouper(EasierInterpreter[Optional[EasierTensorDef]]):
         in_size = _get_tensordef_batch_size(input_def)
 
         if isinstance(module, esr.Selector):
-            if not (module.idx_max < in_size):
+            idx_max = int(module.easier_data_loader.minmax()[1])  # type: ignore
+            if not (idx_max < in_size):
                 raise EasierJitException(
                     "Selector.idx is out of bounds for the"
                     " input distributed tensor"

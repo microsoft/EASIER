@@ -119,9 +119,16 @@ def bind_reducer(modules: List[esr.Module], graphs: List[Graph]):
     target_reducers: Dict[EasierTensorGroup, esr.Reducer] = {}
     for grp, reducer2nnodes in reducer_binder.tengrp2reducer.items():
 
+        # If multiple Reducers are reducing the same input tensor group,
+        # we first sort them by "fullness" i.e. how many percentage of
+        # the OUTPUT tensor group gets written.
+        # (however, we ignore the sizes of those OUTPUT tensor groups for now,
+        # which are the `Reducer.n`s)
+        # Which could be simply calculated as `len(unique(R.idx)) / R.n`
+        #
         # tuple (fullness, nnodes) are ordered lexicographically
         weighted_reducers = [
-            ((r.easier_fullness, nnodes), r)
+            ((float(r.easier_data_loader.count_unique()) / r.n, nnodes), r)
             for r, nnodes in reducer2nnodes.items()
         ]
         _maxweight, target = max(weighted_reducers, key=lambda tp: tp[0])

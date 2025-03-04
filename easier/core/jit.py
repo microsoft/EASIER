@@ -24,7 +24,7 @@ from easier.core.dump import load_dumps, ConstantsCollector
 from easier.core.passes.utils import \
     fx_graph_to_serializable_ir, \
     get_selectors_reducers, get_easier_tensors, get_sub_easier_modules, \
-    get_easier_inst_hint
+    get_easier_inst_hint, get_easier_objects
 from easier.core.utils import EasierJitException
 from easier.core.runtime.dist_env import \
     config_runtime_dist_env, get_runtime_dist_env
@@ -125,70 +125,58 @@ class EasierTracer(Tracer):
         return EasierProxy(node, tracer=self)
 
 
-def infer_and_enforce_unique_device_type(modules: List[esr.Module]) -> str:
-    rec_sub_items: Dict[torch.Tensor, str] = {}
+def infer_and_enforce_unique_device_type(top_modules: List[esr.Module]) -> str:
+    objs = get_easier_objects(top_modules)
 
-    def _update(named_items: Iterator[Tuple[str, torch.Tensor]]):
-        for name, item in named_items:
-            rec_sub_items[item] = name  # name may overwrite, but ok for debug.
-
-    for mi, m in enumerate(modules):
-        prefix = \
-            f"<{m.__class__.__module__}.{m.__class__.__name__}" \
-            f" at modules[{mi}]>"
-        _update(m.named_parameters(prefix=prefix, recurse=True))
-        _update(m.named_buffers(prefix=prefix, recurse=True))
-
-    device_type_grouped: Dict[str, str] \
-        = more_itertools.map_reduce(
-            rec_sub_items.items(),
-            keyfunc=lambda kv: kv[0].device.type,
-            valuefunc=lambda kv: kv[1],
-            reducefunc=lambda name_list: name_list[0])
+    def _get_device_type(obj) -> str:
+        if isinstance(obj, (esr.Selector, esr.Reducer, esr.Tensor)):
+            return obj.easier_data_loader.user_device.type
+        if isinstance(obj, torch.Tensor):
+            return obj.device.type
+        return None  # type: ignore  # esr.Module
+    
+    device_type_grouped: Dict[str, List[str]] = more_itertools.map_reduce(
+        filter(
+            lambda kv: kv[0] is str,
+            ((_get_device_type(obj), names[0]) for obj, names in objs.items())
+        ),
+        keyfunc=lambda kv: kv[0],
+        valuefunc=lambda kv: kv[1],
+        reducefunc=lambda name_list: name_list
+    )
 
     if len(device_type_grouped) != 1:
-        bad_items = ', '.join(
-            f'{prefixed_name} on {dev}'
-            for dev, prefixed_name in device_type_grouped.items())
+        bad_items = ';\n'.join(
+            f'On {device_type}: ' + (', '.join(names))
+            for device_type, names in device_type_grouped.items()
+        )
         raise EasierJitException(
             "Must involve only one torch device type (cpu/cuda)."
-            f" At least {bad_items} have incompatible devices.")
+            " Incompatible device placement includes:\n"
+            + bad_items
+        )
 
-    return more_itertools.first(device_type_grouped.keys())
-
-
-def _enforce_device_type_cpu_cuda(device_type: str) -> Literal['cuda', 'cpu']:
-    # TODO new codegen backends that have no match communication backend
-    # require further design here.
-    if device_type not in ['cpu', 'cuda']:
-        raise EasierJitException(f'device type {device_type} not cpu or cuda')
+    device_type = more_itertools.first(device_type_grouped.keys())
     return device_type  # type: ignore
 
 
-def _fully_load_data_backend_none(top_modules: List[esr.Module]):
-    """
-    Fully load index and data onto the initial device of the data loader.
-    For backend=='none' only.
-    """
-    for root in top_modules:
-        for m in root.modules():  # recursively
-            if isinstance(m, (esr.Selector, esr.Reducer)):
-                assert m.easier_index_status in ['placeholder', 'rewritten']
-                if m.easier_index_status == 'placeholder':
-                    m.idx = m.easier_data_loader.fully_load(device=None)
-                    m.easier_index_status = 'rewritten'
 
-        for p in root.parameters(recurse=True):
-            if isinstance(p, esr.Tensor):
-                if not p.easier_data_ready:
-                    p.data = p.easier_data_loader.fully_load(device=None)
-                    p.easier_data_ready = True
-
-
-def _validate_nonjit_state(top_modules: List[esr.Module]):
+def _validate_compile_args(
+    top_modules,
+    backend,
+    partition_mode,
+    comm_backend
+) -> Tuple[
+    List[esr.Module],  # top_modules
+    Literal['torch', 'cpu', 'gpu', 'none'],  # backend
+    Literal['metis', 'evenly'],  # partition_mode,
+    Literal['gloo', 'nccl', 'mpi', None],  # comm_backend
+]:
+    # validate top_modules must never be compiled
     def _raise():
         raise EasierJitException("Input easier.Modules have been compiled.")
 
+    top_modules = list(top_modules)
     for root in top_modules:
         if root.easier_jit_backend is not None:
             _raise()
@@ -202,10 +190,39 @@ def _validate_nonjit_state(top_modules: List[esr.Module]):
             if isinstance(p, esr.Tensor):
                 if p.easier_data_ready:
                     _raise()
+    
+    # validate compile backend
+    if backend is None:
+        # Python keyword `None` is different from string "none":
+        # - `None` means the compile backend is not specified at all at the
+        #   invocation of `compile()`, the backend to use will be decided by
+        #   a chain of rules;
+        # - "none" means the JIT compilation is turned off.
+        #   "none" may be a result decided by the rules when `backend is None`.
 
-def _validate_compile_backend(backend) -> Literal['torch', 'cpu', 'gpu', 'none']:
-    pass
-def _validate_comm_backend(comm_backend) -> Literal['gloo', 'nccl', 'mpi']:
+        # The env var "EASIER_COMPILE_BACKEND" may be set by EASIER Launcher
+        # command line argument `--backend`.
+        env_backend = os.environ.get("EASIER_COMPILE_BACKEND", None)
+
+        if env_backend is None:
+            backend = 'torch'
+        elif env_backend in ['torch', 'cpu', 'gpu', 'none']:
+            backend = env_backend  # type: ignore
+        else:
+            raise EasierJitException(
+                "Detected invalid value of EASIER_COMPILE_BACKEND: "
+                + env_backend
+            )
+    if backend not in ['torch', 'cpu', 'gpu', 'none']:
+        raise EasierJitException(f"Argument `jit_backend` cannot be {backend}")
+
+    # validate partition_mode
+    if partition_mode not in ['metis', 'evenly']:
+        raise EasierJitException(
+            f"Argument `partition_mode` cannot be {partition_mode}"
+        )
+
+    # validate comm_backend
     """
     TODO although we'll just pass `comm_backend` to
     `torch.distributed.init_process_group()`, we must limit the values like
@@ -213,9 +230,53 @@ def _validate_comm_backend(comm_backend) -> Literal['gloo', 'nccl', 'mpi']:
     dispatch DistEnv for certain implementation, like GlooDistEnv,
     because different comm backend has different API set.
     """
-    pass
-def _validate_comm_backend(partition_mode) -> Literal['metis', 'evenly']:
-    pass
+    if comm_backend is None:
+        env_comm_backend = os.environ.get("EASIER_COMM_BACKEND", None)
+        if env_comm_backend not in ['gloo', 'nccl', 'mpi', None]:
+            raise EasierJitException(
+                "Detected invalid value of EASIER_COMM_BACKEND: "
+                + env_comm_backend  # type: ignore
+            )
+        comm_backend = env_comm_backend  # type: ignore
+    if comm_backend not in ['gloo', 'nccl', 'mpi', None]:
+        raise EasierJitException(
+            f"Argument `comm_backend` cannot be {comm_backend}"
+        )
+
+    return top_modules, backend, partition_mode, comm_backend  # type: ignore
+    
+
+def _fully_load_data_backend_none(
+    top_modules: List[esr.Module],
+    device_type: str
+):
+    """
+    Fully load index and data onto the specified device.
+    For backend=='none' only, and data loader `fully_load` method does not
+    require the dist env to be set up.
+    
+    On the other hand, processes that are not rank-0 will be corrupted.
+    Users shouldn't have distributed environment for backend=='none' case.
+    """
+
+    device = torch.device(type=device_type, index=0)
+
+    for root in top_modules:
+        for m in root.modules():  # recursively
+            if isinstance(m, (esr.Selector, esr.Reducer)):
+                assert m.easier_index_status in ['placeholder', 'rewritten']
+                if m.easier_index_status == 'placeholder':
+                    m.idx = m.easier_data_loader.fully_load(device)
+                    m.easier_index_status = 'rewritten'
+
+        for p in root.parameters(recurse=True):
+            if isinstance(p, esr.Tensor):
+                if not p.easier_data_ready:
+                    p.data = p.easier_data_loader.fully_load(device)
+                    p.easier_data_ready = True
+
+
+
 
 
 def compile(
@@ -272,50 +333,15 @@ def compile(
                 and "nccl" for GPU.
 
     Returns:
-        GraphModule: the jitted input easier.Modules that can run on the
+    -   List[easier.Module]
+            the jitted input easier.Modules that can run on the
             specified backend platform distributively
     """
-    _validate_nonjit_state(modules)
-
-    if backend is None:
-        # Python keyword `None` is different from string "none":
-        # - `None` means the compile backend is not specified at all at the
-        #   invocation of `compile()`, the backend to use will be decided by
-        #   a chain of rules;
-        # - "none" means the JIT compilation is turned off.
-        #   "none" may be a result decided by the rules when `backend is None`.
-
-        # The env var "EASIER_COMPILE_BACKEND" may be set by EASIER Launcher
-        # command line argument `--backend`.
-        env_backend = os.environ.get("EASIER_COMPILE_BACKEND", None)
-
-        if env_backend is None:
-            backend = 'torch'
-        elif env_backend in ['torch', 'cpu', 'gpu', 'none']:
-            backend = env_backend  # type: ignore
-        else:
-            raise EasierJitException(
-                "Detected invalid value of EASIER_COMPILE_BACKEND: "
-                + env_backend
-            )
-    assert backend is not None
-
-    if comm_backend is None:
-        env_comm_backend = os.environ.get("EASIER_COMM_BACKEND", None)
-        if env_comm_backend not in ['gloo', 'nccl', 'mpi', None]:
-            raise EasierJitException(
-                "Detected invalid value of EASIER_COMM_BACKEND: "
-                + env_comm_backend  # type: ignore
-            )
-        comm_backend = env_comm_backend  # type: ignore
-
-    # Retrieve and validate esr.Modules as inputs, even backend==none.
-    top_modules = modules
-
-    modules = list(get_sub_easier_modules(top_modules))
+    top_modules, backend, partition_mode, comm_backend = \
+        _validate_compile_args(modules, backend, partition_mode, comm_backend)
 
     # No matter what backend is specified, we enforce the input modules are
-    # on the same device, like 'cuda:3'.
+    # on the same device, like 'cuda:3' or whatever kind of device.
     # And specifically for CUDA, the device ID will be ignored, only the
     # _device type_ 'cuda' will be kept, and the distribution pass will scatter
     # tensors to other devices like `cuda:0, cuda:1, cuda:2` etc.
@@ -327,7 +353,7 @@ def compile(
             "Any HDF5 dataset to initialize easier.Tensor/Selector/Reducer"
             " will be fully loaded")
 
-        _fully_load_data_backend_none(top_modules)
+        _fully_load_data_backend_none(top_modules, orig_device_type)
 
         for m in modules:
             m.easier_jit_backend = backend
@@ -335,55 +361,46 @@ def compile(
         return top_modules
 
     elif backend == 'torch':
-        comm_device_type = _enforce_device_type_cpu_cuda(orig_device_type)
+        device_type = orig_device_type
     elif backend == 'gpu':
-        comm_device_type = 'cuda'  # TODO enforce GPU == CUDA for now
+        device_type = 'cuda'  # TODO enforce GPU == CUDA for now
     elif backend == 'cpu':
-        comm_device_type = 'cpu'
+        device_type = 'cpu'
     else:
         raise EasierJitException(f"Argument `jit_backend` cannot be {backend}")
 
-    if partition_mode not in ['metis', 'evenly']:
-        raise EasierJitException(
-            f"Argument `partition_mode` cannot be {partition_mode}"
-        )
-    
-    if comm_backend not in ['gloo', 'nccl', 'mpi', None]:
-        raise EasierJitException(
-            f"Argument `comm_backend` cannot be {comm_backend}"
-        )
-
     esr.logger.info(
-        f"EASIER just-in-time compilation has started, backend={backend}")
+        f"EASIER just-in-time compilation has started, backend={backend}"
+        f", device_type={device_type}"
+    )
 
-    config_runtime_dist_env(comm_device_type, comm_backend)
-    for m in modules:
+    config_runtime_dist_env(device_type, comm_backend)
+
+    modules, graphs = _initialize_and_validate_pass(top_modules)
+
+    for m, g in zip(modules, graphs):
         m.easier_jit_backend = backend
         m.partition_mode = partition_mode
 
-    tracer = EasierTracer()
-    graphs: List[Graph] = [tracer.trace(m) for m in modules]
-
-    _validate_spmd(modules, graphs)
-
-    raw_graphs: List[Graph] = []
-    for g in graphs:
         raw_g = Graph()
         # NOTE: graph_copy doesn't insert the output Node but returns it,
         # since we don't do the insertion raw_g will not have the `return None`
         # output Node, but it's ok for esr.Modules.
         raw_g.graph_copy(g, {})
-        raw_graphs.append(raw_g)
+        m.easier_raw_graph = raw_g
 
     loaded_graphs = None
     if load_dir is not None:
         # load_dumps may return None if global config i.e. world size changes,
+        # or the dump files were corrupted,
         # in such cases we should continue to compile from the scratch.
-        loaded_graphs = load_dumps(modules, load_dir, raw_graphs)
+        loaded_graphs = load_dumps(modules, load_dir, graphs)
 
     if loaded_graphs is not None:
+        # successfully load, skip AOT passes
         graphs = loaded_graphs
-    else:  # ahead-of-time passes
+
+    else:  # the default case: run ahead-of-time passes
         modules, graphs = passes.check_syntax(modules, graphs)
 
         modules, graphs = passes.group_tensors(modules, graphs)
@@ -404,88 +421,11 @@ def compile(
 
         # modules, graphs = passes.generate_code(modules, backend, graphs)
 
-    for m, g, raw_g in zip(modules, graphs, raw_graphs):
+    for m, g in zip(modules, graphs):
         gm = GraphModule(m, g)
         m.forward = gm.forward
-        m.easier_raw_graph = raw_g
 
     esr.logger.info("EASIER just-in-time compilation has completed")
 
     return top_modules
 
-
-def _run_spmd_init_and_validate(modules: Sequence[esr.Module], graphs: Sequence[Graph]):
-    """
-    Run collective initialization process of all EASIER submods and tensors:
-    -   data loaders for Selector/Reducer.idx 
-    -   Selector/Reducer.idx itself, the idxmax and fullness etc.
-
-    Validate user programs, including constant values, are really
-    replicated across workers:
-    -   data loaders and idx are well-defined
-    -   user programs, submod definitions and constant tensors are replicated
-
-    TODO refine the completeness of validation here.
-    """
-    dist_env = get_runtime_dist_env()
-
-    check_collective_equality("The number of easier.Modules", len(modules))
-
-    irs = list(map(fx_graph_to_serializable_ir, graphs))
-    # TODO too complex, don't print the whole IR, and such difference shouldn't
-    # be hard to fix.
-    check_collective_equality("The computational graph", irs, repr_str="")
-
-    inited_data_loaders = set()
-
-    # Dict[R|S, OSet[(modidx:int,attrpath:str)]
-    submods = get_selectors_reducers(modules, graphs)
-    check_collective_equality(
-        "The number of easier.Selectors/Reducers", len(submods)
-    )
-    for submod, oset_modi_attrpath in submods.items():
-        (modi, attrpath) = next(iter(oset_modi_attrpath))
-        submod_hint = get_easier_inst_hint(modules[modi], attrpath, submod)
-        check_collective_equality(
-            f"The type of {submod_hint}", submod.__class__.__name__
-        )
-
-        dt = submod.easier_data_loader
-        dt_hint = f"the data loader of `idx` of {submod_hint}"
-        check_collective_equality(
-            f"The type of {dt_hint}", dt.__class__.__name__
-        )
-        if dt not in inited_data_loaders:
-            dt.collective_init(dt_hint)
-            inited_data_loaders.add(dt)
-
-        submod.collective_init()
-
-    tensors = get_easier_tensors(modules)
-    check_collective_equality("The number of easier.Tensors", len(tensors))
-    for tensor, oset_modi_attrpath in tensors.items():
-        (modi, attrpath) = next(iter(oset_modi_attrpath))
-        tensor_hint = get_easier_inst_hint(modules[modi], attrpath, tensor)
-        check_collective_equality(
-            f"The partition mode of {tensor_hint}", tensor.is_partition
-        )
-
-        dt = tensor.easier_data_loader
-        dt_hint = f"the data loader of data of {submod_hint}"
-        check_collective_equality(
-            f"The type of {dt_hint}", dt.__class__.__name__
-        )
-        if dt not in inited_data_loaders:
-            dt.collective_init(dt_hint)
-            inited_data_loaders.add(dt)
-
-    # const attrnames equality has been checked in IR
-    def _eq_tensor(v, v0):
-        # torch.allclose support broadcasting, so we need to check shapes.
-        return v.shape == v0.shape and torch.allclose(v, v0)
-    for root, graph in zip(modules, graphs):
-        cc = ConstantsCollector([root], [graph]).run()
-        # collected tensors are all on CPU
-        check_collective_equality(
-            "Constant tensors", cc.constant_values, eq=_eq_tensor
-        )

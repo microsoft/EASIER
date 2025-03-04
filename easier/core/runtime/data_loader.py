@@ -60,7 +60,7 @@ class DataLoaderBase:
 
         # The device on which the data loader is intially defined.
         # This device configuration only take effect with "torch" JIT backend.
-        self.device: torch.device
+        self.user_device: torch.device
 
     def collective_init(self, hint_name) -> None:
         """
@@ -136,18 +136,18 @@ class DataLoaderBase:
         """
         raise NotImplementedError()
 
-    def fully_load(self, device: Union[torch.device, str, None]
-                   ) -> torch.Tensor:
+    def fully_load(self, device: Union[torch.device, str]) -> torch.Tensor:
         """
-        When fully loading the dataset.
+        Fully load the dataset, typically for compile backend=='none' case.
+
+        Can be called even without dist env set up -- but if not called on
+        rank-0, the result may be corrupted.
 
         Args:
-        - device:
-            If None, the initial device specified on the data loader is used;
-            otherwise, load the data to the input device.
+        - device: the device to load data to. (self.device will not be used.)
 
         Returns:
-        - torch.Tensor: the full tensor, on the resolved device.
+        - torch.Tensor: the full tensor, on the specified device.
         """
         raise NotImplementedError()
 
@@ -569,7 +569,7 @@ class FulledTensorLoader(DataLoaderBase):
 
     def fully_load(self, device: Union[torch.device, str, None]
                    ) -> torch.Tensor:
-        return self._full(None, device=device or self.device)
+        return self._full(None, device=device or self.user_device)
 
 
     def __repr__(self) -> str:
@@ -647,7 +647,7 @@ class ArangeTensorLoader(DataLoaderBase):
     def fully_load(self, device: Union[torch.device, str, None]
                    ) -> torch.Tensor:
         return torch.arange(self._start, self._end, self._step,
-                            dtype=self._dtype, device=device or self.device)
+                            dtype=self._dtype, device=device or self.user_device)
 
 
     def __repr__(self) -> str:

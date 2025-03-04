@@ -162,59 +162,6 @@ def _resolve_data_loader(arg) -> DataLoaderBase:
         raise TypeError(f"Unknown data type {type(arg)}")
 
 
-def _validate_idx_dataloader(module: Union['Selector', 'Reducer']):
-    dl = module.easier_data_loader
-    cls_name = module.__class__.__name__
-
-    dist_env = get_cpu_dist_env()
-    if dist_env.rank == 0:
-        try:
-            try:
-                iinfo = torch.iinfo(dl.dtype)
-            except TypeError:
-                raise TypeError(
-                    f"The index tensor to {cls_name} must be an integer tensor"
-                )
-
-            idxmin: int = iinfo.max
-            idxmax: int = iinfo.min
-            for chunk in dl.partially_load_by_chunk(1024 * 1024 * 128):
-                chunk_idxmin, chunk_idxmax = torch.aminmax(chunk)
-                idxmin = builtins.min(int(chunk_idxmin), idxmin)
-                idxmax = builtins.max(int(chunk_idxmax), idxmax)
-
-            if not (0 <= idxmin):
-                raise ValueError(
-                    f"The minimum value of the {cls_name} index tensor {idxmin}"
-                    f" must be greater than or equal 0"
-                )
-            if isinstance(module, Reducer):
-                n = module.n
-                if not isinstance(n, int):
-                    raise TypeError(
-                        f"The argument `n` to {cls_name} must be an integer"
-                    )
-                if not (idxmax < n):
-                    raise ValueError(
-                        f"The maximum value of the {cls_name} index tensor"
-                        f" {idxmax} must be smaller than {n} the length of"
-                        " the first dimension of the resultant tensor"
-                    )
-        except Exception as e:
-            logger.exception(e)
-
-            # Aborting one rank-0 will kill all processes and surpass barriers.
-            dist_env.abort()
-
-    else:  # rank != 0
-        idxmax = -1  # does not matter
-
-    # NOTE this bcast() also serves as a collective barrier.
-    [idxmax] = dist_env.broadcast_object_list(0, [idxmax])
-
-    if isinstance(module, Selector):
-        module.idx_max = idxmax
-
 
 def _dist_collect(tensor: 'Tensor') -> torch.Tensor:
     """
@@ -244,7 +191,7 @@ def _dist_collect(tensor: 'Tensor') -> torch.Tensor:
     for part, idx in zip(parts, idxes):
         synced[idx] = part
 
-    return synced.to(device=tensor.easier_data_loader.device)
+    return synced.to(device=tensor.easier_data_loader.user_device)
 
 
 IdxStatus: TypeAlias = Literal['placeholder', 'partially_loaded', 'rewritten']
@@ -292,8 +239,6 @@ class Selector(nn.Module):
         self.runtime_halos_local_idxes: List[torch.Tensor]
         self.runtime_halos_recv_lengths: List[int]
     
-    def spmd_init(self) -> None:
-        pass
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         if self.easier_index_status != 'rewritten':
@@ -346,8 +291,6 @@ class Reducer(nn.Module):
         self.runtime_halos_local_idxes: List[torch.Tensor]
         self.runtime_halos_recv_lengths: List[int]
 
-    def collective_init(self) -> None:
-        self.set_fullness()
 
     def set_fullness(self):
         """
@@ -531,7 +474,7 @@ class Tensor(nn.Parameter):
         if self.elempart is not None:
             return _dist_collect(self)
         else:
-            return self.data.to(self.easier_data_loader.device, copy=True)
+            return self.data.to(self.easier_data_loader.user_device, copy=True)
 
     def save(self, h5_file_path, h5_dataset_path, **h5_file_kwargs) -> None:
         if not self.easier_data_ready:
