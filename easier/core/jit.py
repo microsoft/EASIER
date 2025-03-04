@@ -268,6 +268,9 @@ def _fully_load_data_backend_none(
                 if m.easier_index_status == 'placeholder':
                     m.idx = m.easier_data_loader.fully_load(device)
                     m.easier_index_status = 'rewritten'
+            
+            if isinstance(m, esr.Module):
+                m.easier_jit_backend = 'none'
 
         for p in root.parameters(recurse=True):
             if isinstance(p, esr.Tensor):
@@ -352,12 +355,7 @@ def compile(
         esr.logger.warning(
             "Any HDF5 dataset to initialize easier.Tensor/Selector/Reducer"
             " will be fully loaded")
-
         _fully_load_data_backend_none(top_modules, orig_device_type)
-
-        for m in modules:
-            m.easier_jit_backend = backend
-
         return top_modules
 
     elif backend == 'torch':
