@@ -463,7 +463,7 @@ def get_sub_easier_modules(
     return modules
 
 EasierObj: TypeAlias = Union[
-    esr.Module, esr.Selector, esr.Reducer, esr.Tensor, torch.Tensor
+    esr.Module, esr.Selector, esr.Reducer, esr.Tensor, esr.DataLoaderBase
 ]
 
 ATTRNAME_EASIER_HINT_NAME = 'easier_hint_name'
@@ -497,21 +497,22 @@ def get_easier_objects(
         
         # top module may also be a nested module, e.g. mod A is also in Solver
         topmod_name = f"(modules[{rooti}]:{topmod.__class__.__name__})"
-        names = objs.setdefault(topmod, [])
-        names.append(topmod_name)
+        objs.setdefault(topmod, []).append(topmod_name)
 
         # attr path is like 'A.selector' or 'update_x.3.V'
         for path, obj in itertools.chain(
             topmod.named_modules(memo={topmod}),  # exclude topmod here
             topmod.named_parameters(),
-            topmod.named_buffers()
         ):
             if isinstance(obj, EasierObj.__args__):
-                names = objs.setdefault(obj, [])
-                # esr.Tensor and const torch.Tensor are both of "Tensor" type
-                names.append(
-                    f"{topmod_name}.({path}:{obj.__class__.__name__})"
-                )
+                obj_name = f"{topmod_name}.({path}:{obj.__class__.__name__})"
+                objs.setdefault(obj, []).append(obj_name)
+            
+                if isinstance(obj, (esr.Selector, esr.Reducer, esr.Tensor)):
+                    dt_name = obj_name + (
+                        ".data" if isinstance(obj, esr.Tensor) else ".idx"
+                    )
+                    objs.setdefault(obj.easier_data_loader, []).append(dt_name)
 
     return objs
 

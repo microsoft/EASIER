@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import itertools
 from typing import Dict, List, Optional, Sequence, Set, Tuple, \
     Type, Union, Callable, cast
 
@@ -8,9 +9,8 @@ import torch
 from torch import nn
 from torch.fx.graph import Graph
 from torch.fx.node import Node
-from easier.core.dump import ConstantsCollector
 from easier.core.passes.utils import \
-    EasierInterpreter, fx_graph_to_serializable_ir, get_easier_objects, get_easier_tensors, \
+    EasierInterpreter, OrderedSet, fx_graph_to_serializable_ir, get_easier_objects, get_easier_tensors, \
     get_selectors_reducers, ATTRNAME_EASIER_HINT_NAME
 
 from easier.core.runtime.data_loader import DataLoaderBase
@@ -79,10 +79,10 @@ class SyntaxChecker(EasierInterpreter):
             )
 
 def validate_idx(
-    module: Union[_EsrMod.Selector, _EsrMod.Reducer],
-    hint_name: str
+    module: Union[_EsrMod.Selector, _EsrMod.Reducer]
 ):
     dl = module.easier_data_loader
+    hint_name = module.easier_hint_name
 
     dist_env = get_runtime_dist_env()
     if dist_env.rank == 0:
@@ -130,22 +130,19 @@ def collectively_initialize_and_validate(
     e.g. what if, on same worker, two conceptually different Selectors
     bound to the names of different conceptual instances?
     """
-    dist_env = get_runtime_dist_env()
+    # avoid cyclic import
+    from easier.core.jit import EasierTracer
+    from easier.core.dump import ConstantsCollector
 
     modules: List[_EsrMod.Module] = []
 
     objs = get_easier_objects(top_modules)
     for obj, names in objs.items():
-        # Since torch.Tensors (constants) are also cared by EASIER, we simply
-        # record the hint name on all the instance using an
-        # "easier_" namespaced field.
-        setattr(obj, ATTRNAME_EASIER_HINT_NAME, names[0])
-
         if isinstance(obj, _EsrMod.Module):
             modules.append(obj)
 
-    # avoid cyclic import
-    from easier.core.jit import EasierTracer
+        obj.easier_hint_name = names[0]
+
     tracer = EasierTracer()
     graphs: List[Graph] = [tracer.trace(m) for m in modules]
 
@@ -166,48 +163,35 @@ def collectively_initialize_and_validate(
     # be hard to fix.
     check_collective_equality("The computational graph", irs, repr_str="")
 
-    inited_data_loaders = set()
-    def _coll_init_data_loader_once(
-        easier_obj: Union[_EsrMod.Selector, _EsrMod.Reducer, _EsrMod.Tensor]
-    ):
-        attached_obj_hint = objs[easier_obj][0]
-        dt: DataLoaderBase = easier_obj.easier_data_loader
-        if isinstance(attached_obj_hint, (_EsrMod.Selector, _EsrMod.Reducer)):
-            dt_hint = f"{attached_obj_hint}.idx"
-        else:
-            dt_hint = f"{attached_obj_hint}.data"
-        check_collective_equality(
-            f"The type of {dt_hint}", dt.__class__.__name__
-        )
-        if dt not in inited_data_loaders:
-            dt.collective_init(dt_hint)
-            inited_data_loaders.add(dt)
-
     # Dict[R|S, OSet[(modidx:int,attrpath:str)]
     # In the IR-reference order
     submods = get_selectors_reducers(modules, graphs)
     check_collective_equality(
         "The number of easier.Selectors/Reducers", len(submods)
     )
-    for submod, _attrpath in submods.items():
-        submod_hint = objs[submod][0]
-        check_collective_equality(
-            f"The type of {submod_hint}", submod.__class__.__name__
-        )
-
-        _coll_init_data_loader_once(submod)
-
-        validate_idx(submod, submod_hint)
-
-
     tensors = get_easier_tensors(modules)
     check_collective_equality("The number of easier.Tensors", len(tensors))
-    for tensor, _attrpath in tensors.items():
+
+    for dl in OrderedSet(
+        x.easier_data_loader for x in itertools.chain(submods, tensors)
+    ):
         check_collective_equality(
-            f"The partition mode of {objs[tensor][0]}", tensor.is_partition
+            f"The type of {dl.easier_hint_name}", dl.__class__.__name__
+        )
+        dl.collective_init()
+        
+    for submod in submods.keys():
+        check_collective_equality(
+            f"The type of {submod.easier_hint_name}", submod.__class__.__name__
+        )
+        validate_idx(submod)
+
+    for tensor in tensors.keys():
+        check_collective_equality(
+            f"The partition mode of {tensor.easier_hint_name}",
+            tensor.is_partition
         )
 
-        _coll_init_data_loader_once(tensor)
 
     #
     # Validate constant tensors

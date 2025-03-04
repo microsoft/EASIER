@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import os
 from typing import Iterator, Optional, Tuple, Union, cast
 import h5py
+import functools
 
 import numpy as np
 import torch
@@ -38,11 +39,6 @@ def _get_offset_exactly_nparts(orig_len: int, nparts: int, part: int
     return start, end
 
 
-def _check_dtype_shape_and_more(dt: 'DataLoaderBase', hint_name, *more_metas):
-    dt_metas = [dt.dtype, dt.shape] + list(more_metas)
-    check_collective_equality(f"Tensor properties of {hint_name}", dt_metas)
-
-
 class DataLoaderBase:
     """
     The data loader for one specified data source, e.g. a HDF5 dataset.
@@ -62,18 +58,24 @@ class DataLoaderBase:
         # This device configuration only take effect with "torch" JIT backend.
         self.user_device: torch.device
 
-    def collective_init(self, hint_name) -> None:
+        # e.g. "(Module).(a.b.c:Selector).idx"
+        # because `self.collective_init()` is not run when the data loader
+        # is constructed, we offer a clear hint name for users
+        # to locate the issue if reported.
+        self.easier_hint_name: str
+    
+    def coll_check_dtype_shape_devicetype(self):
+        check_collective_equality(
+            f"Tensor properties of {self.easier_hint_name}",
+            [self.dtype, self.shape, self.user_device.type]
+        )
+
+    def collective_init(self) -> None:
         """
         Validate if the the data of this data loader is collectively correct.
 
         Require callers to first ensure the data loders among workers are
         actually referring to the same data set.
-
-        Args:
-        - hint_name:
-            e.g. "the data loader of (Module.a.b.c:Selector)"
-            because spmd_init is not run when the data loader is constructed,
-            we offer a clear hint name for users to locate the issue reported.
         """
         raise NotImplementedError()
     
@@ -207,23 +209,31 @@ class InMemoryTensorLoader(DataLoaderBase):
 
         self.dtype = tensor.dtype
         self.shape = tensor.shape
+        self.user_device = tensor.device
 
         # The data is always stored as CPU tensor
-        self.tensor = tensor.to('cpu')
+        self.tensor = tensor.cpu()
     
-    def collective_init(self, hint_name) -> None:
-        _check_dtype_shape_and_more(self, hint_name)
+    def collective_init(self) -> None:
+        self.coll_check_dtype_shape_devicetype()
 
         def _eq_tensor(v, v0):
             # torch.allclose support broadcasting, so we need to check shapes.
             return v.shape == v0.shape and torch.allclose(v, v0)
         check_collective_equality(
-            f"The input tensor of {hint_name}", self.tensor, eq=_eq_tensor
+            f"The input tensor of {self.easier_hint_name}",
+            self.tensor,
+            eq=_eq_tensor
         )
 
+    @functools.cache
     def minmax(self) -> Tuple[object, object]:
         amin, amax = self.tensor.aminmax()
         return amin.item(), amax.item()
+    
+    @functools.cache
+    def count_unique(self) -> int:
+        return self.tensor.unique().shape[0]
 
     def partially_load_by_chunk(self, chunk_size: int
                                 ) -> Iterator[torch.Tensor]:
@@ -292,8 +302,9 @@ class H5DataLoader(DataLoaderBase):
     def __init__(self,
                  h5_file_path: str, h5_dataset_path: str,
                  *,
+                 device: torch.device,
                  # Optional reading configs for users to load the dataset.
-                 dtype: Optional[torch.dtype] = None,
+                 dtype: Optional[torch.dtype],
                  **h5_file_kwargs) -> None:
         super().__init__()
 
@@ -301,10 +312,16 @@ class H5DataLoader(DataLoaderBase):
         self._dataset_path = h5_dataset_path
         self._file_kwargs = h5_file_kwargs
         self._target_dtype = dtype
+        self.user_device = device
 
-    def collective_init(self, hint_name) -> None:
+        if dtype is not None:
+            self._target_np_dtype = torch_dtype_to_numpy_dtype(dtype)
+        else:
+            self._target_np_dtype = None
+
+    def collective_init(self) -> None:
         check_collective_equality(
-            f"The target dtype of {hint_name}", self._target_dtype
+            f"The target dtype of {self.easier_hint_name}", self._target_dtype
         )
         # Since H5 paths are only required on rank-0, let's not check them
         # collectively.
@@ -313,18 +330,15 @@ class H5DataLoader(DataLoaderBase):
         if dist_env.rank == 0:
             self._file_path = os.path.expanduser(self._unexpanded_file_path)
 
-            with self._dataset() as d:
+            with self._dataset() as d:  # type: ignore
                 assert isinstance(d, h5py.Dataset)
                 raw_np_dtype = cast(np.dtype, d.dtype)
 
                 self.shape = tuple(d.shape)
 
             if self._target_dtype is not None:
-                self._target_np_dtype = \
-                    torch_dtype_to_numpy_dtype(self._target_dtype)
                 self.dtype = self._target_dtype
             else:
-                self._target_np_dtype = raw_np_dtype
                 raw_dtype = numpy_dtype_to_torch_dtype(raw_np_dtype)
                 self.dtype = raw_dtype
 
@@ -332,6 +346,14 @@ class H5DataLoader(DataLoaderBase):
 
         else:
             [self.dtype, self.shape] = dist_env.broadcast_object_list(0)
+    
+    @functools.cache
+    def minmax(self) -> Tuple[object, object]:
+        return super().minmax()
+    
+    @functools.cache
+    def count_unique(self) -> int:
+        return super().count_unique()
 
     @contextmanager
     def _dataset(self):

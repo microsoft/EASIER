@@ -226,6 +226,7 @@ class Selector(nn.Module):
 
         # ======
         # Fields filled during JIT compilation
+        self.easier_hint_name: str
         self.easier_tensor_group: 'EasierTensorGroup'
 
         # Which part of the data is initially loaded for dist_pass rewriting,
@@ -276,6 +277,7 @@ class Reducer(nn.Module):
 
         # ======
         # Fields filled during JIT compilation
+        self.easier_hint_name: str
         self.easier_tensor_group: 'EasierTensorGroup'
 
         # Which part of the data is initially loaded for dist_pass rewriting,
@@ -421,6 +423,7 @@ class Tensor(nn.Parameter):
 
         # ======
         # Fields filled during JIT compilation
+        self.easier_hint_name: str
 
         # Only distributed tensors have tensor groups
         # (no matter if they are referenced by `get_attr` Nodes),
@@ -585,8 +588,8 @@ class Module(nn.Module):
 
         # ======
         # Fields filled during JIT compilation
+        self.easier_hint_name: str
 
-        # Only filled on top modules i.e. inputs to esr.compile()
         self.easier_jit_backend: Literal[
             'torch', 'cpu', 'gpu', 'none', None
         ] = None
