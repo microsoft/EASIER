@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-from .syntax_check import collectively_initialize_and_validate
+from .collective_initialization import collectively_initialize_and_validate
 from .tensor_grouping import group_tensors
 from .reducer_binding import bind_reducer
 from .tensor_group_partition import partition_tensor_groups
