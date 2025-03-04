@@ -376,7 +376,7 @@ def compile(
 
     config_runtime_dist_env(device_type, comm_backend)
 
-    modules, graphs = _initialize_and_validate_pass(top_modules)
+    modules, graphs = passes.collectively_initialize_and_validate(top_modules)
 
     for m, g in zip(modules, graphs):
         m.easier_jit_backend = backend
@@ -401,8 +401,6 @@ def compile(
         graphs = loaded_graphs
 
     else:  # the default case: run ahead-of-time passes
-        modules, graphs = passes.check_syntax(modules, graphs)
-
         modules, graphs = passes.group_tensors(modules, graphs)
 
         # After bind_reducer, new Selector instances and Nodes are inserted,

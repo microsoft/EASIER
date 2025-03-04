@@ -114,7 +114,7 @@ def validate_idx(
                 )
 
 def collectively_initialize_and_validate(
-    top_modules: Sequence[_EsrMod.Module]
+    top_modules: List[_EsrMod.Module]
 ):
     """
     Run collective initialization process of all EASIER submods and tensors:
@@ -226,3 +226,5 @@ def collectively_initialize_and_validate(
         check_collective_equality(
             "Constant tensors", cc.constant_values, eq=_eq_tensordict
         )
+
+    return modules, graphs
