@@ -139,22 +139,23 @@ class Poisson(esr.Module):
 
             with h5py.File(mesh, 'r') as f:
                 nc = f['cells'].shape[0]
+                ne = f['src'].shape[0]
 
-            torch.distributed.broadcast_object_list([mesh, poisson, nc], 0)
+            torch.distributed.broadcast_object_list([mesh, poisson, nc, ne], 0)
         else:
-            bcast_list = [None, None, None]
+            bcast_list = [None, None, None, None]
             torch.distributed.broadcast_object_list(bcast_list, 0)
-            mesh, poisson, nc = bcast_list  # type: ignore
+            mesh, poisson, nc, ne = bcast_list  # type: ignore
 
         mesh: str
         poisson: str
 
         # src (torch.LongTensor): src cell indices, with shape `(ne,)`
-        self.src = esr.hdf5(mesh, 'src', dtype=torch.long, device=device)
+        self.src = esr.hdf5(mesh, 'src', dtype=torch.long, device=device, shape=(ne,))
         # dst (torch.LongTensor): dst cell indices, with shape `(ne,)`
-        self.dst = esr.hdf5(mesh, 'dst', dtype=torch.long, device=device)
+        self.dst = esr.hdf5(mesh, 'dst', dtype=torch.long, device=device, shape=(ne,))
 
-        self.cells = esr.hdf5(mesh, 'cells', dtype=torch.long, device=device)
+        self.cells = esr.hdf5(mesh, 'cells', dtype=torch.long, device=device, shape=(nc,))
         self.nc = nc
 
         self.reducer = esr.Reducer(self.src, self.nc)
@@ -166,24 +167,24 @@ class Poisson(esr.Module):
         ) if x is None else x
         # b: (nc,)
         self.b = esr.Tensor(
-            esr.hdf5(poisson, 'b', dtype=torch.double, device=device),
+            esr.hdf5(poisson, 'b', dtype=torch.double, device=device, shape=(nc,)),
             mode='partition')
         # Ac: (nc,)
         self.Ac = esr.Tensor(
-            esr.hdf5(poisson, 'Ac', dtype=torch.double, device=device),
+            esr.hdf5(poisson, 'Ac', dtype=torch.double, device=device, shape=(nc,)),
             mode='partition')
         # Af: (src.shape[0],)
         self.Af = esr.Tensor(
-            esr.hdf5(poisson, 'Af', dtype=torch.double, device=device),
+            esr.hdf5(poisson, 'Af', dtype=torch.double, device=device, shape=(nc,)),
             mode='partition')
         self.A = Linsys(self.Ac, self.Af, self.selector, self.reducer)
 
         self.rho = esr.Tensor(
-            esr.hdf5(poisson, 'rho', dtype=torch.double, device=device),
+            esr.hdf5(poisson, 'rho', dtype=torch.double, device=device, shape=(nc,)),
             mode='partition')
         # centroid: (nc, 2)
         self.centroid = esr.Tensor(
-            esr.hdf5(poisson, 'centroid', dtype=torch.double, device=device),
+            esr.hdf5(poisson, 'centroid', dtype=torch.double, device=device, shape=(nc,)),
             mode='partition')
 
 

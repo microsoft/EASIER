@@ -533,7 +533,8 @@ def gather_csr_graph(
         res_adjw = torch.concat(adjws).cpu()
 
         res_rowptr = torch.concat(
-            [torch.tensor([0], dtype=torch.int64)] + row_sizes
+            [torch.tensor([0], dtype=torch.int64, device=dist_env.comm_device)]
+            + row_sizes
         ).cumsum(dim=0).cpu()
 
         return res_vwgt, res_rowptr, res_colidx, res_adjw

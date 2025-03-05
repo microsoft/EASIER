@@ -282,12 +282,15 @@ class H5DataLoader(DataLoaderBase):
                  device: Union[torch.device, str],
                  # Optional reading configs for users to load the dataset.
                  dtype: Optional[torch.dtype],
+                 shape,
                  **h5_file_kwargs) -> None:
         super().__init__()
 
         self._unexpanded_file_path = h5_file_path
         self._dataset_path = h5_dataset_path
         self._file_kwargs = h5_file_kwargs
+
+        self.shape = shape
 
         if dtype is not None:
             self._target_dtype = dtype

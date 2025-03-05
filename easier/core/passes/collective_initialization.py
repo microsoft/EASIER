@@ -78,7 +78,7 @@ class SyntaxChecker(EasierInterpreter):
                 "easier.Module.forward() cannot have return value"
             )
 
-def validate_idx(
+def validate_idx_range(
     module: Union[_EsrMod.Selector, _EsrMod.Reducer]
 ):
     dl = module.easier_data_loader
@@ -169,6 +169,18 @@ def collectively_initialize_and_validate(
     tensors = get_easier_tensors(modules)
     check_collective_equality("The number of easier.Tensors", len(tensors))
 
+    def _validate_dl_shape_for_partition_data(data, prefix, postfix):
+        dl = data.easier_data_loader
+        if not (len(dl.shape) >= 1):
+            raise EasierJitException(
+                f'{prefix}{data.easier_hint_name}{postfix} must have ndim >= 1'
+            )
+        if not (dl.shape[0] >= 1):
+            raise EasierJitException(
+                f'{prefix}{data.easier_hint_name}{postfix}'
+                ' must have shape[0] >= 1'
+            )
+
     #
     # Collectively initialize and validate DataLoaders
     #
@@ -179,14 +191,6 @@ def collectively_initialize_and_validate(
             f"The type of {dl.easier_hint_name}", dl.__class__.__name__
         )
         dl.collective_init()
-        if not (len(dl.shape) >= 1):
-            raise EasierJitException(
-                f'Data loader {dl.easier_hint_name} must have ndim >= 1'
-            )
-        if not (dl.shape[0] >= 1):
-            raise EasierJitException(
-                f'Data loader {dl.easier_hint_name} must have shape[0] >= 1'
-            )
         
     #
     # Collectively initialize and validate Selectors/Reducers
@@ -196,7 +200,8 @@ def collectively_initialize_and_validate(
             f"The type of {submod.easier_hint_name}",
             submod.__class__.__name__
         )
-        validate_idx(submod)
+        validate_idx_range(submod)
+        _validate_dl_shape_for_partition_data(submod, "", ".idx")
 
     #
     # Collectively initialize and validate easier.Tensors
@@ -206,6 +211,10 @@ def collectively_initialize_and_validate(
             f"The partition mode of {tensor.easier_hint_name}",
             tensor.is_partition
         )
+        if tensor.is_partition:
+            _validate_dl_shape_for_partition_data(
+                tensor, "Distributed easier.Tensor ", ".data"
+            )
 
 
     #

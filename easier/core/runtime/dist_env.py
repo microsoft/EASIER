@@ -738,6 +738,18 @@ class TorchDistGlooDistEnv(TorchDistEnv):
                                       dtype=send_tensor.dtype)
                 recv_buffers.append(recv)
         return recv_buffers
+    
+    def gather(self, dst: int, send_tensor: torch.Tensor) -> List[torch.Tensor] | None:
+        """
+        GLOO requires all tensors must have the same size.
+        """
+        return super().gather(dst, send_tensor)
+    
+    def scatter(self, src: int, tensors: Sequence[torch.Tensor] | None) -> torch.Tensor:
+        """
+        GLOO requires all tensors must have the same size.
+        """
+        return super().scatter(src, tensors)
 
 
 _runtime_devicetype_backend: Optional[Tuple[
