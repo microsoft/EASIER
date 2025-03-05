@@ -16,7 +16,7 @@ import copy
 import torch
 import torch.distributed as dist
 
-from easier.core.utils import logger, EasierJitException
+from easier.core.utils import logger, EasierJitException, LOGGING_TRACE
 
 _T = TypeVar("_T")
 
@@ -29,6 +29,12 @@ def _wrap_commapi_pre_filter(prefilter, api):
     """
     @functools.wraps(api)
     def wrapper(*args, **kwargs):
+        if logger.level <= LOGGING_TRACE:
+            logger.log(
+                LOGGING_TRACE,
+                f'DistEnv.{api.__name__}(*{args[1:]}, **{kwargs})'
+            )
+
         args, kwargs = prefilter(*args, **kwargs)
         return api(*args, **kwargs)
     return wrapper
@@ -544,12 +550,10 @@ class TorchDistEnv(DistEnv):
         """
         if src == self.rank:
             dist.broadcast_object_list([object_list], src)
-            print(f" ==> {object_list}")
             return object_list  # type: ignore
         else:
             recv_list = [None]
             dist.broadcast_object_list(recv_list, src)
-            print(f" <== {recv_list[0]}")
             return recv_list[0]  # type: ignore
 
     def def_isend(self, tensor: torch.Tensor, dst: int, tag: int) -> dist.P2POp:

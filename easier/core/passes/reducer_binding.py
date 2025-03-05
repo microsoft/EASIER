@@ -88,9 +88,8 @@ class CsrSelectorInserter(EasierInterpreter[None]):
             # created again -- it's ok as this is merely a data loader,
             # till its `.idx` get directly overwritten with the loaded data.
             csr_selector = esr.Selector(esr.arange(
-                submod.idx.shape[0],
-                dtype=submod.idx.dtype,
-                device=submod.idx.device
+                submod.easier_data_loader.shape[0],
+                dtype=submod.easier_data_loader.dtype,
             ))
 
             self.current_module.add_module(selector_attrname, csr_selector)

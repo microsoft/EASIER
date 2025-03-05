@@ -48,9 +48,9 @@ class EasierTensorGroup:
 
 def _get_tensordef_batch_size(tensordef: EasierTensorDef):
     if isinstance(tensordef, esr.Tensor):
-        n = tensordef.shape[0]
+        n = tensordef.easier_data_loader.shape[0]
     elif isinstance(tensordef, esr.Selector):
-        n = tensordef.idx.shape[0]
+        n = tensordef.easier_data_loader.shape[0]
     elif isinstance(tensordef, esr.Reducer):
         n = tensordef.n
     else:
@@ -222,7 +222,7 @@ class TensorGrouper(EasierInterpreter[Optional[EasierTensorDef]]):
                     " input distributed tensor"
                 )
         if isinstance(module, esr.Reducer):
-            if in_size != module.idx.shape[0]:
+            if in_size != module.easier_data_loader.shape[0]:
                 raise EasierJitException(
                     "The length of the first dimension of the"
                     " input distributed tensor to Reducer does not match"
@@ -263,7 +263,7 @@ def group_tensors(modules: List[esr.Module], graphs: List[Graph]):
 
     Also:
     -   check if Role transition is correct.
-    -   check if all Selector/Reducer.idx.shape[0] are compatible.
+    -   check if all Selector/Reducer.dataloader.shape[0] are compatible.
     """
     tensor_grouper = TensorGrouper(modules, graphs)
     tensor_grouper.run()

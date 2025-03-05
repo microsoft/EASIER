@@ -6,6 +6,8 @@ import logging
 import random
 import string
 
+LOGGING_TRACE = 5
+
 if os.getenv('EASIER_USE_MPIRUN') is not None:
     rank = os.environ.get("OMPI_COMM_WORLD_RANK", "0")
 else:
@@ -14,7 +16,12 @@ logger = logging.getLogger(f"Rank{rank}")
 # DEBUG, INFO, WARNING, ERROR, CRITICAL
 # NOTE environ variable EASIER_LOG_LEVEL can be specified on `torchrun` process
 # and will be inherited by all worker processes.
-logger.setLevel(os.environ.get("EASIER_LOG_LEVEL", logging.INFO))
+log_level = os.environ.get("EASIER_LOG_LEVEL", logging.INFO)
+try:
+    log_level = int(log_level)
+except ValueError:
+    pass
+logger.setLevel(log_level)
 handler = logging.StreamHandler()  # FileHandler, StreamHandler
 
 formatter = logging.Formatter(
