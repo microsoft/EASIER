@@ -29,15 +29,19 @@ def check_collective_equality(
     rank = dist_env.rank
     if rank == 0:
         [obj0] = dist_env.broadcast_object_list(0, [obj])
+        print(f'{category} => {obj}')
     else:
-        [obj0] = dist_env.broadcast_object_list(0)
+        # [obj0] = dist_env.broadcast_object_list(0)
+        a = dist_env.broadcast_object_list(0)
+        print(f'{category} <= {a}')
+        [obj0] = a
     
     eq = eq or object.__eq__
     if not eq(obj, obj0):
         if repr_str is None:
-            repr_str = " " + repr(obj)
+            repr_str = " = " + repr(obj)
         elif len(repr_str) > 0:
-            repr_str = " " + repr_str
+            repr_str = " = " + repr_str
 
         raise EasierJitException(
             f"{category}{repr_str} on rank-{rank} is not the same"

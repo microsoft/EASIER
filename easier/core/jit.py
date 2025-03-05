@@ -4,7 +4,7 @@
 import math
 import operator
 from types import ModuleType
-from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple, cast
 from typing_extensions import Literal
 import more_itertools
 import os
@@ -20,15 +20,12 @@ from torch.fx.graph import Graph
 import easier as esr
 from easier.core import passes
 from easier.core import module as _EsrMod
-from easier.core.dump import load_dumps, ConstantsCollector
+from easier.core.dump import load_dumps
 from easier.core.passes.utils import \
-    fx_graph_to_serializable_ir, \
-    get_selectors_reducers, get_easier_tensors, get_sub_easier_modules, \
-    get_easier_inst_hint, get_easier_objects
+    get_easier_objects
 from easier.core.utils import EasierJitException
 from easier.core.runtime.dist_env import \
     config_runtime_dist_env, get_runtime_dist_env
-from easier.core.runtime.utils import check_collective_equality
 
 
 class EasierProxy(Proxy):
@@ -128,20 +125,17 @@ class EasierTracer(Tracer):
 def infer_and_enforce_unique_device_type(top_modules: List[esr.Module]) -> str:
     objs = get_easier_objects(top_modules)
 
-    def _get_device_type(obj) -> str:
-        if isinstance(obj, (esr.Selector, esr.Reducer, esr.Tensor)):
-            return obj.easier_data_loader.user_device.type
-        if isinstance(obj, torch.Tensor):
-            return obj.device.type
-        return None  # type: ignore  # esr.Module
-    
+    dls = cast(
+        List[Tuple[_EsrMod.DataLoaderBase, List[str]]],
+        list(filter(
+            lambda kv: isinstance(kv[0], _EsrMod.DataLoaderBase),
+            objs.items()
+        ))
+    )
     device_type_grouped: Dict[str, List[str]] = more_itertools.map_reduce(
-        filter(
-            lambda kv: kv[0] is str,
-            ((_get_device_type(obj), names[0]) for obj, names in objs.items())
-        ),
-        keyfunc=lambda kv: kv[0],
-        valuefunc=lambda kv: kv[1],
+        dls,
+        keyfunc=lambda kv: kv[0].user_device.type,
+        valuefunc=lambda kv: kv[1][0],
         reducefunc=lambda name_list: name_list
     )
 

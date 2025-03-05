@@ -301,7 +301,7 @@ def group_tensors(modules: List[esr.Module], graphs: List[Graph]):
         if not hasattr(p, 'easier_tensor_group'):
 
             logger.warning("Distributed esr.Tensor at "
-                           f"{root.__class__.__name__}.{name} is never used"
+                           f"{p.easier_hint_name} is never used"
                            " in easier.Module")
             tensor_group = EasierTensorGroup(
                 OrderedSet([p]), n=p.shape[0],

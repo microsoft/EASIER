@@ -16,7 +16,7 @@ import easier.core.runtime.dist_env as _JitRuntimeDistEnv
 from easier.core.runtime.dist_env import DistEnv
 from easier.core.passes.tensor_group_partition import \
     CommPair, partition_tensor_groups_with_adjmat, parallel_partition_graph, \
-    synchronize_partition_result, get_cpu_dist_env, ElemPartArangeIdx
+    synchronize_partition_result, get_runtime_dist_env, ElemPartArangeIdx
 from easier.core.passes.tensor_grouping import \
     EasierTensorGroup
 from tests.utils import assert_tensor_list_equal
@@ -31,7 +31,7 @@ def mock_mpi_dist_env():
     # The module is `...tensor_partition` because we have had
     # `from import MPIDistEnv` therefore this ctor function is a new, standalone
     # symbol in `...tensor_partition` module, no longer `...jit.runtime` module.
-    with patch(f'{CommPair.__module__}.{get_cpu_dist_env.__name__}') as ctor:
+    with patch(f'{CommPair.__module__}.{get_runtime_dist_env.__name__}') as ctor:
         mpi_mock = Mock(spec=_JitRuntimeDistEnv.DistEnv)
         mpi_mock.world_size = 2  # by default world_size = 2
         mpi_mock.comm_device = 'cpu'

@@ -15,7 +15,7 @@ from torch.fx.graph import Graph
 from torch.fx.node import Node, Argument, map_arg
 from easier.core.passes.tensor_group_partition import ElemPart
 
-from easier.core.runtime.dist_env import get_cpu_dist_env, get_runtime_dist_env
+from easier.core.runtime.dist_env import get_runtime_dist_env, get_runtime_dist_env
 from easier.core.utils import \
     logger, EasierJitException
 import easier.core.module as esr
@@ -74,7 +74,7 @@ def calculate_paired_in_out_idx(
         `input_gidx_to_this` contains gidx for both local input elements and
         elements of potentially halos to this worker.
     """
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
 
     input_gidxes_to_others = []
     output_gidxes_on_others = []
@@ -168,7 +168,7 @@ def calculate_halo_info(
         Global and local idx in both of them have strict order, which follow
         the element order of `input_elempart`.
     """
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
 
     halo_lidxes_to_this = []
     halo_gidxes_to_this = []
@@ -271,7 +271,7 @@ def reorder_input_by_reducer(
     the concat-ed pre-reducer chunk, so that the Reducer can still
     read/write sequentially.
     """
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
 
     input_idx_part, output_idx_part = \
         get_selector_reducer_idx_partition_pair(reducer)
@@ -364,7 +364,7 @@ def rewrite_selector_instance(
         input_gidx_to_this, input_elempart
     )
 
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
     rank = dist_env.rank
 
     _reordered_output_gidx, reordered_input_gidx, _pos = zipsort_using_order(
@@ -611,7 +611,7 @@ def encode_sparsity(modules: List[esr.Module], graphs: List[Graph]):
 def log_rewrite_statistics(
     modules: Sequence[esr.Module], graphs: Sequence[Graph]
 ):
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
 
     nrecv_selector = 0
     nrecv_reducer = 0
@@ -633,9 +633,7 @@ def log_rewrite_statistics(
                 for wls in workers_recv_lengths
             )
 
-            submod_hint = \
-                f"(modules[{rooti}]:{modules[rooti].__class__.__name__})" \
-                f".({path}:{submod.__class__.__name__})"
+            submod_hint = submod.easier_hint_name
             logger.debug(f"{submod_hint} recvs: [\n{recvlenmat}\n]")
 
             for w, wls in enumerate(workers_recv_lengths):

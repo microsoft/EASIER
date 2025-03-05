@@ -16,7 +16,7 @@ from easier.core.distpart import CoarseningLevel, DistConfig, \
     align_coarser_vids, get_csr_mask_by_rows, CoarseningRowDataExchanger, \
     exchange_cadj_adjw, merge_cadj_adjw, distpart_kway, uncoarsen_level, \
     metis_wrapper
-from easier.core.runtime.dist_env import get_cpu_dist_env
+from easier.core.runtime.dist_env import get_runtime_dist_env
 import easier.cpp_extension as _C
 
 from ..utils import mpirun_singlenode, assert_tensor_list_equal
@@ -592,7 +592,7 @@ def worker__test_preserve_symmetry(local_rank, world_size):
     """
     nv = 100
     ne = 2000
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
 
     dist_config = DistConfig.create_default(nv)
 

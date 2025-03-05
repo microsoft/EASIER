@@ -25,7 +25,7 @@ from easier.core.passes.utils import \
     normalize_reducer_call_into_args, normalize_selector_call_into_args, \
     get_easier_tensors
 from easier.core.runtime.dist_env import \
-    get_cpu_dist_env
+    get_runtime_dist_env
 from easier.core.utils import EasierJitException, logger
 
 # METIS adj weights are ints
@@ -285,7 +285,7 @@ def partition_tensor_groups_with_adjmat(
         for pair in [unidirect_pair, unidirect_pair.get_symmetric_pair()]
     ]
 
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
     world_size = dist_env.world_size
     rank = dist_env.rank
     per_worker_n = (accum_n + world_size - 1) // world_size
@@ -440,7 +440,7 @@ def synchronize_partition_result(
     # Exchange partition result
     # to construct partition info of every TensorGroup on every worker
     #
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
     world_size = dist_env.world_size
     rank = dist_env.rank
 
@@ -558,7 +558,7 @@ def get_even_elemparts(modules, graphs):
         ElemPart/partition, i.e. not in `comm_elemparts: dict`,
         assign an even ElemPart for it.
     """
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
     world_size = dist_env.world_size
     rank = dist_env.rank
 

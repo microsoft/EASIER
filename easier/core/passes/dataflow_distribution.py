@@ -159,9 +159,12 @@ class ReorderingSelectorInserter(EasierInterpreter):
             )
             if reordering_selector is None:
                 reordering_selector = Selector(
-                    submod.easier_reordering_selector_idx,
-                    easier_noncollective_idx=True
+                    submod.easier_reordering_selector_idx
                 )
+                reordering_selector.idx = submod.easier_reordering_selector_idx
+                reordering_selector.easier_index_status = 'rewritten'
+                reordering_selector.easier_hint_name = \
+                    f"{submod.easier_hint_name}.reorderingSelector"
 
                 # Rewrite as a non-halo Selector so that EASIER-injected
                 # Selectors can be inspected just like user-defined Selectors.
@@ -172,7 +175,6 @@ class ReorderingSelectorInserter(EasierInterpreter):
                 ]
                 reordering_selector.runtime_halos_recv_lengths = \
                     [0] * world_size
-                reordering_selector.easier_index_status = 'rewritten'
 
                 self.reordering_selector_cache[submod] = reordering_selector
 

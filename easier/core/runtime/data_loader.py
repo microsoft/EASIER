@@ -3,7 +3,7 @@
 
 from contextlib import contextmanager
 import os
-from typing import Iterator, Optional, Tuple, Union, cast
+from typing import Iterator, Optional, Tuple, TypeAlias, Union, cast
 import h5py
 import functools
 
@@ -14,7 +14,7 @@ from easier.core.runtime.dist_env import get_runtime_dist_env
 from easier.core.runtime.utils import check_collective_equality
 
 
-ATTRIBUTE_PLACEHOLDER = "easier_placeholder"
+Num: TypeAlias = Union[int, float, bool]
 
 
 def _get_offset_exactly_nparts(orig_len: int, nparts: int, part: int
@@ -51,12 +51,16 @@ class DataLoaderBase:
         The constructor should do simple member data storage and local tasks.
         No collective calls should be done during construction.
         """
-        self.shape: Tuple[int, ...]
-        self.dtype: torch.dtype
+        # Give common properties an explicit "UNINIT" value to avoid
+        # "no attribute" error when `repr` is triggered (e.g. when viewing
+        # variables in debug)
+        uninit = "UNINITIALIZED"
+        self.shape: Tuple[int, ...] = uninit  # type: ignore
+        self.dtype: torch.dtype = uninit  # type: ignore
 
         # The device on which the data loader is intially defined.
         # This device configuration only take effect with "torch" JIT backend.
-        self.user_device: torch.device
+        self.user_device: torch.device = uninit  # type: ignore
 
         # e.g. "(Module).(a.b.c:Selector).idx"
         # because `self.collective_init()` is not run when the data loader
@@ -79,7 +83,7 @@ class DataLoaderBase:
         """
         raise NotImplementedError()
     
-    def minmax(self) -> Tuple[object, object]:
+    def minmax(self) -> Tuple[Num, Num]:
         raise NotImplementedError()
     
     def count_unique(self) -> int:
@@ -154,33 +158,6 @@ class DataLoaderBase:
         raise NotImplementedError()
 
 
-    # def get_placeholder(self) -> torch.Tensor:
-    #     """
-    #     Allocate a new placeholder torch.Tensor of the same dtype/shape/device
-    #     but generally consuming no memory to be compatible with cases where
-    #     torch.Tensor object and information is needed.
-
-    #     Any subclass implementation should add the attribute
-    #     "easier_placeholder" to indicate the result is a placeholder, too.
-
-    #     The placeholder is needed mainly to:
-    #     1.  ease the inspection of tensor properties like dtype/shape/device,
-    #         especially for the metadata pass.
-    #     2.  fulfil `esr.Tensor.__new__(cls, data)` where the underlying data
-    #         tensor should be set.
-    #     """
-    #     # torch.Tensor.expand can expand shape-(1,) to e.g. shape-(0,0,0),
-    #     # but not to ndim=0 shape ().
-    #     if len(self.shape) == 0:
-    #         ph = torch.zeros((), dtype=self.dtype, device=self.device)
-    #     else:
-    #         ph = torch.zeros(
-    #             (1,), dtype=self.dtype, device=self.device
-    #         ).expand(self.shape)  # can even expand to (0,0,0)
-
-    #     setattr(ph, ATTRIBUTE_PLACEHOLDER, True)
-    #     return ph
-
     def __repr__(self) -> str:
         """
         When possible, return a string which could be treated as valid Python
@@ -227,7 +204,7 @@ class InMemoryTensorLoader(DataLoaderBase):
         )
 
     @functools.cache
-    def minmax(self) -> Tuple[object, object]:
+    def minmax(self) -> Tuple[Num, Num]:
         amin, amax = self.tensor.aminmax()
         return amin.item(), amax.item()
     
@@ -237,8 +214,8 @@ class InMemoryTensorLoader(DataLoaderBase):
 
     def partially_load_by_chunk(self, chunk_size: int
                                 ) -> Iterator[torch.Tensor]:
-        cpu_dist_env = get_cpu_dist_env()
-        assert cpu_dist_env.rank == 0, \
+        dist_env = get_runtime_dist_env()
+        assert dist_env.rank == 0, \
             "Loading-by-chunk is only available on rank-0"
 
         orig_len = self.tensor.shape[0]
@@ -258,9 +235,9 @@ class InMemoryTensorLoader(DataLoaderBase):
             yield chunk
 
     def partially_load_by_rank(self) -> Tuple[torch.Tensor, int, int]:
-        cpu_dist_env = get_cpu_dist_env()
-        world_size = cpu_dist_env.world_size
-        rank = cpu_dist_env.rank
+        dist_env = get_runtime_dist_env()
+        world_size = dist_env.world_size
+        rank = dist_env.rank
         orig_len = self.tensor.shape[0]
 
         # Put tailing elements in the part for the last rank, making the size
@@ -302,7 +279,7 @@ class H5DataLoader(DataLoaderBase):
     def __init__(self,
                  h5_file_path: str, h5_dataset_path: str,
                  *,
-                 device: torch.device,
+                 device: Union[torch.device, str],
                  # Optional reading configs for users to load the dataset.
                  dtype: Optional[torch.dtype],
                  **h5_file_kwargs) -> None:
@@ -311,13 +288,15 @@ class H5DataLoader(DataLoaderBase):
         self._unexpanded_file_path = h5_file_path
         self._dataset_path = h5_dataset_path
         self._file_kwargs = h5_file_kwargs
-        self._target_dtype = dtype
-        self.user_device = device
 
         if dtype is not None:
+            self._target_dtype = dtype
             self._target_np_dtype = torch_dtype_to_numpy_dtype(dtype)
         else:
+            self._target_dtype = None
             self._target_np_dtype = None
+
+        self.user_device = torch.device(device)
 
     def collective_init(self) -> None:
         check_collective_equality(
@@ -328,10 +307,8 @@ class H5DataLoader(DataLoaderBase):
 
         dist_env = get_runtime_dist_env()
         if dist_env.rank == 0:
-            self._file_path = os.path.expanduser(self._unexpanded_file_path)
 
-            with self._dataset() as d:  # type: ignore
-                assert isinstance(d, h5py.Dataset)
+            with self._dataset() as d:
                 raw_np_dtype = cast(np.dtype, d.dtype)
 
                 self.shape = tuple(d.shape)
@@ -346,14 +323,9 @@ class H5DataLoader(DataLoaderBase):
 
         else:
             [self.dtype, self.shape] = dist_env.broadcast_object_list(0)
-    
-    @functools.cache
-    def minmax(self) -> Tuple[object, object]:
-        return super().minmax()
-    
-    @functools.cache
-    def count_unique(self) -> int:
-        return super().count_unique()
+        
+        # Simply to additionally check device
+        self.coll_check_dtype_shape_devicetype()
 
     @contextmanager
     def _dataset(self):
@@ -364,7 +336,8 @@ class H5DataLoader(DataLoaderBase):
         dist_env = get_runtime_dist_env()
         assert dist_env.rank == 0
 
-        with h5py.File(self._file_path, 'r', **self._file_kwargs) as f:
+        file_path = os.path.expanduser(self._unexpanded_file_path)
+        with h5py.File(file_path, 'r', **self._file_kwargs) as f:
             d = f[self._dataset_path]
             if not isinstance(d, h5py.Dataset):
                 raise TypeError()
@@ -374,11 +347,88 @@ class H5DataLoader(DataLoaderBase):
                 d = d.astype(self._target_np_dtype)
 
             yield d
+    
+    @functools.cache
+    def minmax(self) -> Tuple[Num, Num]:
+        if self.dtype.is_floating_point:
+            raise NotImplementedError("Not supporting floats yet")
+
+        dist_env = get_runtime_dist_env()
+        if dist_env.rank == 0:
+            # TODO basically this is only used for idx, which are ints,
+            # but if we want this to be a universal component, we need to
+            # ensure float.NaN etc. work as expected.
+            amin, amax = None, None
+            def _opt_cmp(a: Optional[torch.Tensor], c: torch.Tensor, op):
+                return c if a is None else op(a, c)
+
+            for chunk in self.partially_load_by_chunk(1024 * 1024 * 128):
+                chunk_min, chunk_max = torch.aminmax(chunk)
+                amin = _opt_cmp(amin, chunk_min, min)
+                amax = _opt_cmp(amax, chunk_max, max)
+            
+            amin, amax = amin.item(), amax.item()  # type: ignore
+
+            dist_env.broadcast_object_list(0, [amin, amax])
+        
+        else:
+            [amin, amax] = dist_env.broadcast_object_list(0)
+        
+        return amin, amax
+
+    
+    @functools.cache
+    def count_unique(self) -> int:
+        if self.dtype.is_floating_point:
+            raise NotImplementedError("Not supporting floats yet")
+
+        amin, amax = self.minmax()
+        assert amin >= 0, "simplify for Reducer.fullness cases"
+        assert isinstance(amax, int)
+
+        dist_env = get_runtime_dist_env()
+        if dist_env.rank == 0:
+            nunique = 0
+
+            # Each time we count elements that fall in the pack,
+            # in case the pack gets too big;
+            # For each such pack, traverse all .idx data and "set the bit" and
+            # count "bits".
+
+            bitpack_maxlen = 1024 * 1024 * 128  # 128MB with bools
+            bitpack_n, remainder = divmod(amax, bitpack_maxlen)
+            if remainder > 0:
+                bitpack_n += 1
+
+            # TODO use real bitmap and popcount instead of *bool*pack.
+            for bitpack_i in range(bitpack_n):
+                bitpack_min = bitpack_i * bitpack_maxlen
+                bitpack_max = min((bitpack_i + 1) * bitpack_maxlen, amax)
+
+                bitpack = torch.zeros(
+                    [bitpack_max - bitpack_min], dtype=torch.bool
+                )
+
+                for chunk in self.partially_load_by_chunk(1024 * 1024 * 128):
+                    in_bitpack = torch.logical_and(
+                        chunk >= bitpack_min, chunk < bitpack_max)
+                    bitpack[chunk[in_bitpack] - bitpack_min] = 1
+
+                bitpack_nnz = int(torch.count_nonzero(bitpack))
+                nunique += bitpack_nnz
+
+            dist_env.broadcast_object_list(0, [nunique])
+
+        else:
+            [nunique] = dist_env.broadcast_object_list(0)
+
+        return nunique
+
 
     def partially_load_by_chunk(self, chunk_size: int
                                 ) -> Iterator[torch.Tensor]:
-        cpu_dist_env = get_cpu_dist_env()
-        assert cpu_dist_env.rank == 0, \
+        dist_env = get_runtime_dist_env()
+        assert dist_env.rank == 0, \
             "Loading-by-chunk is only available on rank-0"
 
         orig_len = self.shape[0]
@@ -398,7 +448,7 @@ class H5DataLoader(DataLoaderBase):
                 yield chunk
 
     def partially_load_by_rank(self) -> Tuple[torch.Tensor, int, int]:
-        dist_env = get_cpu_dist_env()
+        dist_env = get_runtime_dist_env()
         rank = dist_env.rank
 
         orig_len = self.shape[0]
@@ -454,7 +504,7 @@ class H5DataLoader(DataLoaderBase):
 
         sorted_index, sort_pos = torch.sort(index, stable=True)
 
-        dist_env = get_cpu_dist_env()
+        dist_env = get_runtime_dist_env()
 
         orig_len = self.shape[0]
         sub_shape = self.shape[1:]
@@ -515,7 +565,7 @@ class H5DataLoader(DataLoaderBase):
             return _run(None)
 
     def fully_load(self, device: Union[torch.device, str]) -> torch.Tensor:
-        dist_env = get_cpu_dist_env()
+        dist_env = get_runtime_dist_env()
 
         if dist_env.rank == 0:
             with self._dataset() as d:
@@ -530,7 +580,7 @@ class H5DataLoader(DataLoaderBase):
         return ''.join([
             f'{self.__class__.__name__}(',
             # TODO we didn't escape the path strings properly
-            f'h5_file_path={self._file_path}, ',
+            f'h5_file_path={self._unexpanded_file_path}, ',
             f'h5_dataset_path={self._dataset_path}, ',
             f'dtype={self.dtype}',
             ')'
@@ -542,25 +592,35 @@ class FulledTensorLoader(DataLoaderBase):
         super().__init__()
 
         self.value = value
-        self._shape = tuple(shape)
-        self._dtype = dtype
-        self._device = torch.device(device)
+        self.shape = tuple(shape)
+        self.dtype = dtype
+        self.user_device = torch.device(device)
+    
+    def collective_init(self) -> None:
+        self.coll_check_dtype_shape_devicetype()
+        check_collective_equality(
+            f"fill value of {self.easier_hint_name}", self.value
+        )
 
-        _check_dtype_shape_and_more(self, self.value)
+    def minmax(self) -> Tuple[Num, Num]:
+        return self.value, self.value
+    
+    def count_unique(self) -> int:
+        return 1
 
     def _full(self, batch_dim_len: Optional[int] = None,
               device: Union[torch.device, str, None] = None):
         if batch_dim_len is None:
-            batch_dim_len = self._shape[0]
+            batch_dim_len = self.shape[0]
 
-        shape = (batch_dim_len,) + self._shape[1:]
+        shape = (batch_dim_len,) + self.shape[1:]
         return torch.full(
             shape, self.value, dtype=self.dtype, device=device)  # type: ignore
 
     def partially_load_by_chunk(self, chunk_size: int
                                 ) -> Iterator[torch.Tensor]:
-        cpu_dist_env = get_cpu_dist_env()
-        assert cpu_dist_env.rank == 0, \
+        dist_env = get_runtime_dist_env()
+        assert dist_env.rank == 0, \
             "Loading-by-chunk is only available on rank-0"
 
         orig_len = self.shape[0]
@@ -578,20 +638,20 @@ class FulledTensorLoader(DataLoaderBase):
             yield chunk
 
     def partially_load_by_rank(self) -> Tuple[torch.Tensor, int, int]:
-        cpu_dist_env = get_cpu_dist_env()
-        rank = cpu_dist_env.rank
-        orig_len = self._shape[0]
+        dist_env = get_runtime_dist_env()
+        rank = dist_env.rank
+        orig_len = self.shape[0]
         start, end = _get_offset_exactly_nparts(
-            orig_len, cpu_dist_env.world_size, rank)
+            orig_len, dist_env.world_size, rank)
         return self._full(end - start, 'cpu'), start, end
 
     def partially_load_by_index(self, index: torch.Tensor,
                                 **kwargs) -> torch.Tensor:
         return self._full(index.shape[0], 'cpu')
 
-    def fully_load(self, device: Union[torch.device, str, None]
+    def fully_load(self, device: Union[torch.device, str]
                    ) -> torch.Tensor:
-        return self._full(None, device=device or self.user_device)
+        return self._full(None, device)
 
 
     def __repr__(self) -> str:
@@ -608,21 +668,40 @@ class ArangeTensorLoader(DataLoaderBase):
     def __init__(self, start: int, end: int, step: int, dtype, device) -> None:
         super().__init__()
 
+        if step == 0:
+            raise ValueError("step must not be 0")
+
         self._start = start
         self._end = end
         self._step = step
 
         length = len(range(start, end, step))
-        self._shape = (length,)
-        self._dtype = dtype
-        self._device = torch.device(device)
+        self.shape = (length,)
+        self.dtype = dtype
+        self.user_device = torch.device(device)
 
-        _check_dtype_shape_and_more(self, start, end, step)
+
+    def collective_init(self) -> None:
+        self.coll_check_dtype_shape_devicetype()
+        check_collective_equality(
+            f"arange of {self.easier_hint_name}",
+            [self._start, self._end, self._step]
+        )
+    
+    def minmax(self) -> Tuple[Num, Num]:
+        r = range(self._start, self._end, self._step)
+        if self._step > 0:
+            return r[0], r[-1]
+        else:
+            return r[-1], r[0]
+    
+    def count_unique(self) -> int:
+        return self.shape[0]
 
     def partially_load_by_chunk(self, chunk_size: int
                                 ) -> Iterator[torch.Tensor]:
-        cpu_dist_env = get_cpu_dist_env()
-        assert cpu_dist_env.rank == 0, \
+        dist_env = get_runtime_dist_env()
+        assert dist_env.rank == 0, \
             "Loading-by-chunk is only available on rank-0"
 
         orig_len = self.shape[0]
@@ -641,15 +720,15 @@ class ArangeTensorLoader(DataLoaderBase):
                 range_end = max(self._end, range_end)
 
             chunk = torch.arange(range_start, range_end, self._step,
-                                 dtype=self._dtype, device='cpu')
+                                 dtype=self.dtype, device='cpu')
             yield chunk
 
     def partially_load_by_rank(self) -> Tuple[torch.Tensor, int, int]:
-        cpu_dist_env = get_cpu_dist_env()
-        rank = cpu_dist_env.rank
-        orig_len = self._shape[0]
+        dist_env = get_runtime_dist_env()
+        rank = dist_env.rank
+        orig_len = self.shape[0]
         offset_start, offset_end = _get_offset_exactly_nparts(
-            orig_len, cpu_dist_env.world_size, rank)
+            orig_len, dist_env.world_size, rank)
 
         range_start = self._start + offset_start * self._step
         range_end = self._start + offset_end * self._step
@@ -659,17 +738,17 @@ class ArangeTensorLoader(DataLoaderBase):
             range_end = max(self._end, range_end)
 
         chunk = torch.arange(range_start, range_end, self._step,
-                             dtype=self._dtype, device='cpu')
+                             dtype=self.dtype, device='cpu')
         return chunk, offset_start, offset_end
 
     def partially_load_by_index(self, index: torch.Tensor,
                                 **kwargs) -> torch.Tensor:
-        return (index * self._step + self._start).to(dtype=self._dtype)
+        return (index * self._step + self._start).to(dtype=self.dtype)
 
     def fully_load(self, device: Union[torch.device, str, None]
                    ) -> torch.Tensor:
         return torch.arange(self._start, self._end, self._step,
-                            dtype=self._dtype, device=device or self.user_device)
+                            dtype=self.dtype, device=device or self.user_device)
 
 
     def __repr__(self) -> str:

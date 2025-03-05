@@ -12,7 +12,7 @@ from torch import nn
 from torch.fx.graph import Graph
 from torch.fx.node import Node, Argument, map_arg
 
-from easier.core.runtime.dist_env import get_cpu_dist_env
+from easier.core.runtime.dist_env import get_runtime_dist_env
 from easier.core.utils import \
     logger, EasierJitException
 import easier.core.module as esr

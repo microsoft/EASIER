@@ -471,7 +471,7 @@ class DummyDistEnv(DistEnv):
 class TorchDistEnv(DistEnv):
     def __init__(
         self,
-        device_type: Literal['cpu', 'cuda'],
+        device_type: str,
         backend: Literal['gloo', 'nccl', 'mpi'],
         torch_dist_init_kwargs={}
     ) -> None:
@@ -482,10 +482,9 @@ class TorchDistEnv(DistEnv):
         else:
             raise EasierJitException(f"Unknown backend {backend}")
 
-        if device_type == 'cpu':
-            comm_device = torch.device('cpu')
-        else:
-            comm_device = torch.device(device_type, local_rank)
+        comm_device = torch.device(device_type, local_rank)
+        if device_type == 'cuda':
+            logger.info(f"Set default CUDA device: {comm_device}")
             torch.cuda.set_device(comm_device)
 
         if dist.is_initialized():
@@ -502,7 +501,7 @@ class TorchDistEnv(DistEnv):
         logger.info(
             f"torch.distributed"
             f" backend={dist.get_backend_config()} rank={dist.get_rank()}"
-            f" local_rank={self.local_rank}"
+            f" local_rank={local_rank}"
         )
 
         super().__init__(
@@ -545,10 +544,12 @@ class TorchDistEnv(DistEnv):
         """
         if src == self.rank:
             dist.broadcast_object_list([object_list], src)
+            print(f" ==> {object_list}")
             return object_list  # type: ignore
         else:
             recv_list = [None]
             dist.broadcast_object_list(recv_list, src)
+            print(f" <== {recv_list[0]}")
             return recv_list[0]  # type: ignore
 
     def def_isend(self, tensor: torch.Tensor, dst: int, tag: int) -> dist.P2POp:
@@ -746,7 +747,10 @@ class TorchDistGlooDistEnv(TorchDistEnv):
         return recv_buffers
 
 
-_runtime_devicetype_backend: Optional[Tuple[str, str]] = None
+_runtime_devicetype_backend: Optional[Tuple[
+    str,  # whatever device type, may be other than 'cpu' and 'cuda'
+    Literal['gloo', 'nccl', 'mpi']  # must be explicitly supported by EASIER
+]] = None
 
 _dist_envs: Dict[Tuple[str, str], DistEnv] = {}
 
@@ -798,12 +802,12 @@ def get_runtime_dist_env() -> DistEnv:
 
     if _runtime_devicetype_backend not in _dist_envs:
         device_type, comm_backend = _runtime_devicetype_backend
-            
-        dist.get_backend_config
+
         if comm_backend == 'gloo':
-            dist_env = TorchDistGlooDistEnv(device_type, comm_backend)
+            dist_env = TorchDistGlooDistEnv(device_type, 'gloo')
         else:
             dist_env = TorchDistEnv(device_type, comm_backend)
 
         _dist_envs[_runtime_devicetype_backend] = dist_env
 
+    return _dist_envs[_runtime_devicetype_backend]

@@ -18,7 +18,7 @@ import scipy.sparse
 from torch.nn.modules import Module
 
 import easier.core.module as esr
-from easier.core.runtime.dist_env import get_cpu_dist_env
+from easier.core.runtime.dist_env import get_runtime_dist_env
 from easier.core.utils import EasierJitException, logger
 import easier.cpp_extension as _C
 
@@ -32,14 +32,14 @@ class DistConfig:
     def create_default(nv: int):
         # TODO use an incremental lengths sequence like [N, N+B, N+2B, ...]
         # since subsequent workers do less remote matching.
-        dist_env = get_cpu_dist_env()
+        dist_env = get_runtime_dist_env()
         per_worker_n, residue = divmod(nv, dist_env.world_size)
         local_nvs = [per_worker_n] * dist_env.world_size
         local_nvs[-1] += residue
         return DistConfig(nv, local_nvs)
 
     def get_start_end(self, rank=None):
-        dist_env = get_cpu_dist_env()
+        dist_env = get_runtime_dist_env()
         if rank == None:
             rank = dist_env.rank
 
@@ -165,7 +165,7 @@ class CoarseningRowDataExchanger:
     # are mapped to the same coarser vertex, we are yet to merge
     # old vertexes' weights and adj lists.
     def __init__(self, c_dist_config: DistConfig, cvids: torch.Tensor) -> None:
-        dist_env = get_cpu_dist_env()
+        dist_env = get_runtime_dist_env()
         c_start, c_end = c_dist_config.get_start_end()
 
         rows_to_other_masks = []
@@ -195,7 +195,7 @@ class CoarseningRowDataExchanger:
         self.local_cnv = c_end - c_start
 
     def exchange(self, row_data: torch.Tensor):
-        dist_env = get_cpu_dist_env()
+        dist_env = get_runtime_dist_env()
         row_data_to_others = []
         for w in range(dist_env.world_size):
             row_to_w_mask = self.rows_to_other_masks[w]
@@ -254,7 +254,7 @@ def exchange_cadj_adjw(
 
     # Because CSR does not have equal row substructure, we cannot directly
     # call `exchange`
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
     cadj_unmerged_to_others = []
     adjwgt_unmerged_to_others = []
     for w in range(dist_env.world_size):
@@ -347,7 +347,7 @@ def map_adj_by_cvids(
     """
     Use OTHERS' cvids mappings to map/transform LOCAL adj list.
     """
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
 
     cadj_unmerged = torch.full_like(colidx, fill_value=-1, dtype=torch.int64)
     for w in range(dist_env.world_size):
@@ -506,7 +506,7 @@ def gather_csr_graph(
         concat-ed colidx;
         concat-ed adj weights
     """
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
     vwgts = dist_env.gather(
         dst_rank, clv.vertex_weights.to(dist_env.comm_device)
     )
@@ -545,7 +545,7 @@ def coarsen_level(
     prev_lv: CoarseningLevel
 ) -> Tuple[CoarseningLevel, torch.Tensor]:
 
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
 
     # TODO make later workers have more rows to process
     start, end = prev_lv.dist_config.get_start_end()
@@ -650,7 +650,7 @@ def distpart_kway(
     colidx: torch.Tensor,
     adjwgt: torch.Tensor,
 ):
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
     local_nv = dist_config.local_nvs[dist_env.rank]
 
     cur_lv = CoarseningLevel(
@@ -789,7 +789,7 @@ def uncoarsen_level(
     To uncoarsen level-(i+1) back to level-i, the cvids length is about
     local vertexes in level-i, its values are level-(i+1) vertex IDs.
     """
-    dist_env = get_cpu_dist_env()
+    dist_env = get_runtime_dist_env()
     local_membership = torch.full(
         (cvids.shape[0],), fill_value=-1, dtype=torch.int64
     )

@@ -11,7 +11,7 @@ from torch.fx.graph import Graph
 from torch.fx.node import Node
 from easier.core.passes.utils import \
     EasierInterpreter, OrderedSet, fx_graph_to_serializable_ir, get_easier_objects, get_easier_tensors, \
-    get_selectors_reducers, ATTRNAME_EASIER_HINT_NAME
+    get_selectors_reducers
 
 from easier.core.runtime.data_loader import DataLoaderBase
 from easier.core.utils import \
@@ -84,34 +84,31 @@ def validate_idx(
     dl = module.easier_data_loader
     hint_name = module.easier_hint_name
 
-    dist_env = get_runtime_dist_env()
-    if dist_env.rank == 0:
-        # NOTE Only the rank-0 will throw
-        try:
-            iinfo = torch.iinfo(dl.dtype)
-        except TypeError:
-            raise TypeError(
-                f"The index tensor to {hint_name} must be integer"
-            )
-        
-        idxmin, idxmax = cast(Tuple[int, int], dl.minmax())
+    try:
+        iinfo = torch.iinfo(dl.dtype)
+    except TypeError:
+        raise TypeError(
+            f"The index tensor to {hint_name} must be integer"
+        )
+    
+    idxmin, idxmax = cast(Tuple[int, int], dl.minmax())
 
-        if not (0 <= idxmin):
-            raise ValueError(
-                f"The minimum of {hint_name}.idx {idxmin}"
-                " must be greater than or equal 0"
+    if not (0 <= idxmin):
+        raise ValueError(
+            f"The minimum of {hint_name}.idx {idxmin}"
+            " must be greater than or equal 0"
+        )
+    if isinstance(module, _EsrMod.Reducer):
+        n = module.n
+        if not isinstance(n, int):
+            raise TypeError(
+                f"{hint_name}.n must be an integer"
             )
-        if isinstance(module, _EsrMod.Reducer):
-            n = module.n
-            if not isinstance(n, int):
-                raise TypeError(
-                    f"{hint_name}.n must be an integer"
-                )
-            if not (idxmax < n):
-                raise ValueError(
-                    f"The maximum of {hint_name}.idx {idxmax}"
-                    f" must be smaller than {hint_name}.n {n}"
-                )
+        if not (idxmax < n):
+            raise ValueError(
+                f"The maximum of {hint_name}.idx {idxmax}"
+                f" must be smaller than {hint_name}.n {n}"
+            )
 
 def collectively_initialize_and_validate(
     top_modules: List[_EsrMod.Module]
@@ -172,6 +169,9 @@ def collectively_initialize_and_validate(
     tensors = get_easier_tensors(modules)
     check_collective_equality("The number of easier.Tensors", len(tensors))
 
+    #
+    # Collectively initialize and validate DataLoaders
+    #
     for dl in OrderedSet(
         x.easier_data_loader for x in itertools.chain(submods, tensors)
     ):
@@ -179,13 +179,28 @@ def collectively_initialize_and_validate(
             f"The type of {dl.easier_hint_name}", dl.__class__.__name__
         )
         dl.collective_init()
+        if not (len(dl.shape) >= 1):
+            raise EasierJitException(
+                f'Data loader {dl.easier_hint_name} must have ndim >= 1'
+            )
+        if not (dl.shape[0] >= 1):
+            raise EasierJitException(
+                f'Data loader {dl.easier_hint_name} must have shape[0] >= 1'
+            )
         
+    #
+    # Collectively initialize and validate Selectors/Reducers
+    #
     for submod in submods.keys():
         check_collective_equality(
-            f"The type of {submod.easier_hint_name}", submod.__class__.__name__
+            f"The type of {submod.easier_hint_name}",
+            submod.__class__.__name__
         )
         validate_idx(submod)
 
+    #
+    # Collectively initialize and validate easier.Tensors
+    #
     for tensor in tensors.keys():
         check_collective_equality(
             f"The partition mode of {tensor.easier_hint_name}",

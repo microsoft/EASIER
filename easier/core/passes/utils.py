@@ -466,8 +466,6 @@ EasierObj: TypeAlias = Union[
     esr.Module, esr.Selector, esr.Reducer, esr.Tensor, esr.DataLoaderBase
 ]
 
-ATTRNAME_EASIER_HINT_NAME = 'easier_hint_name'
-
 def get_easier_objects(
     top_modules: Sequence[esr.Module]
 ) -> Dict[EasierObj, List[str]]:
@@ -501,7 +499,7 @@ def get_easier_objects(
 
         # attr path is like 'A.selector' or 'update_x.3.V'
         for path, obj in itertools.chain(
-            topmod.named_modules(memo={topmod}),  # exclude topmod here
+            topmod.named_modules(),
             topmod.named_parameters(),
         ):
             if isinstance(obj, EasierObj.__args__):
@@ -518,25 +516,6 @@ def get_easier_objects(
 
 
 
-def get_easier_inst_hint(
-    root: esr.Module,
-    attrpath: str,
-    inst: Union[esr.Selector, esr.Reducer, esr.Tensor]
-):
-    """
-    Returns a hint name of the instance of an EASIER API class,
-    to help locate the instance, e.g. `(MyEasierMod.x.y.z:Selector)`
-
-    TODO
-    MyEasierMod may not be a top-level module (e.g. GMRES has many instances
-    of the same mod class, in a ModuleList). we may need a hint like:
-    `(modules[I]:TopLevelMod).(a.b[J]:MyEasierMod).(x.y.z:Selector)`
-    this requires the help of `get_sub_easier_modules` to return the
-    attribute hierarchy too.
-    """
-    hint_name = \
-        f"({root.__class__.__name__}.{attrpath}:{inst.__class__.__name__})"
-    return hint_name
 
 # torch.fx constants
 

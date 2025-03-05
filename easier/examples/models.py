@@ -136,11 +136,15 @@ class Poisson(esr.Module):
         if torch.distributed.get_rank() == 0:
             mesh = get_triagular_mesh(mesh_size)
             poisson = _assemble_poisson(mesh)
-            torch.distributed.broadcast_object_list([mesh, poisson], 0)
+
+            with h5py.File(mesh, 'r') as f:
+                nc = f['cells'].shape[0]
+
+            torch.distributed.broadcast_object_list([mesh, poisson, nc], 0)
         else:
-            bcast_list = [None, None]
+            bcast_list = [None, None, None]
             torch.distributed.broadcast_object_list(bcast_list, 0)
-            mesh, poisson = bcast_list  # type: ignore
+            mesh, poisson, nc = bcast_list  # type: ignore
 
         mesh: str
         poisson: str
@@ -150,8 +154,8 @@ class Poisson(esr.Module):
         # dst (torch.LongTensor): dst cell indices, with shape `(ne,)`
         self.dst = esr.hdf5(mesh, 'dst', dtype=torch.long, device=device)
 
-        cells = esr.hdf5(mesh, 'cells', dtype=torch.long, device=device)
-        self.nc = cells.shape[0]
+        self.cells = esr.hdf5(mesh, 'cells', dtype=torch.long, device=device)
+        self.nc = nc
 
         self.reducer = esr.Reducer(self.src, self.nc)
         self.selector = esr.Selector(self.dst)
