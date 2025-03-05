@@ -272,9 +272,11 @@ def _gather_dump_files(local_dumpfile: str, rank0_jitdir: str) -> None:
             rank_dumpfile = os.path.join(rank0_jitdir, f'jit_{w}.hdf5')
 
             length = dist_env.recv_int64(src=w, tag=w)  # tag source
-            u8 = torch.empty((length,), dtype=torch.uint8, device=dist_env.comm_device)
+            u8 = torch.empty(
+                (length,), dtype=torch.uint8, device=dist_env.comm_device
+            )
             dist_env.recv(u8, src=w, tag=w)
-            u8.numpy(force=True).tofile(rank_dumpfile)
+            u8.cpu().numpy(force=True).tofile(rank_dumpfile)
 
             logger.debug(
                 f'Gather dump file and save to {rank_dumpfile}'
@@ -320,9 +322,11 @@ def _scatter_dump_files(rank0_jitdir: str) -> str:
         temp_dumpfile = os.path.join(temp_jitdir, f'jit_{rank}.hdf5')
 
         length = dist_env.recv_int64(src=0, tag=rank)  # tag destination
-        u8 = torch.empty((length,), dtype=torch.uint8, device=dist_env.comm_device)
+        u8 = torch.empty(
+            (length,), dtype=torch.uint8, device=dist_env.comm_device
+        )
         dist_env.recv(u8, src=0, tag=rank)
-        u8.numpy(force=True).tofile(temp_dumpfile)
+        u8.cpu().numpy(force=True).tofile(temp_dumpfile)
 
         logger.debug(
             f'Recv scattered dump file and save to {temp_dumpfile}'
@@ -643,12 +647,12 @@ def dump_selectors_reducers(
         grp_basepath: str = submod_grp.name  # type: ignore
 
         submod_grp.create_dataset(
-            H5_DATASET_PRIM_IDX, data=submod.idx.to('cpu')
+            H5_DATASET_PRIM_IDX, data=submod.idx.cpu()
         )
 
         lidx_grp = submod_grp.create_group(H5_GROUP_PRIM_HALOLOCALIDXES)
         for t, lidx_for_t in enumerate(submod.runtime_halos_local_idxes):
-            lidx_grp.create_dataset(str(t), data=lidx_for_t.to('cpu'))
+            lidx_grp.create_dataset(str(t), data=lidx_for_t.cpu())
 
         if not hasattr(submod, 'easier_data_loader'):
             # reordering Selector, will not be validated during loading
@@ -748,7 +752,7 @@ class ConstantsCollector(EasierInterpreter):
             assert '.' not in path, \
                 "constant tensors must be attrs of the root module"
 
-            self.constant_values[path] = attr_val.to('cpu')
+            self.constant_values[path] = attr_val.cpu()
 
 
 def dump_modules(
@@ -807,7 +811,7 @@ def _get_data_loader_repr(data_loader: DataLoaderBase) -> Tuple[
     and a "repr_str" for other DataLoaders.
     """
     if isinstance(data_loader, InMemoryTensorLoader):
-        return 'tensor', data_loader.tensor.to('cpu'), None
+        return 'tensor', data_loader.tensor.cpu(), None
     else:
         return 'repr', None, repr(data_loader)
 

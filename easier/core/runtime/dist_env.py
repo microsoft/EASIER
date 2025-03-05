@@ -365,14 +365,6 @@ class DistEnv:
 
         return (self, src, objs), {}
 
-    def abort(self):
-        """
-        Abort all processes.
-
-        This method is not required to be called collectively.
-        """
-        raise NotImplementedError()
-
     def barrier(self):
         raise NotImplementedError()
 
@@ -681,9 +673,6 @@ class TorchDistEnv(DistEnv):
         recvs = [None]
         dist.scatter_object_list(recvs, objs, src=src)
         return recvs[0]  # type: ignore
-
-    def abort(self):
-        raise NotImplementedError("Consider aborting using CPU dist env.")
 
     def barrier(self):
         dist.barrier()

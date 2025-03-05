@@ -191,12 +191,12 @@ def calculate_halo_info(
 
         halo_lidx_u_to_this = torch.isin(
             input_elempart_u, input_gidx_to_this
-        ).argwhere().ravel()
+        ).argwhere().ravel().to(dist_env.comm_device)
         halo_lidxes_to_this.append(halo_lidx_u_to_this)
 
         halo_gidx_u_to_this = input_elempart_u[halo_lidx_u_to_this]
         halo_gidxes_to_this.append(
-            halo_gidx_u_to_this.to(dist_env.comm_device)
+            halo_gidx_u_to_this
         )
 
     halo_lidxes_to_others: List[torch.Tensor] = [

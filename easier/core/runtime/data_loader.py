@@ -481,7 +481,10 @@ class H5DataLoader(DataLoaderBase):
         else:
             start, end = _get_offset_exactly_nparts(
                 orig_len, dist_env.world_size, rank)
-            buffer = torch.empty((end - start,) + sub_shape, dtype=self.dtype, device=dist_env.comm_device)
+            buffer = torch.empty(
+                (end - start,) + sub_shape,
+                dtype=self.dtype, device=dist_env.comm_device
+            )
             irecv = dist_env.def_irecv(buffer, src=0, tag=rank)
             for req in dist_env.batch_isend_irecv([irecv]):
                 req.wait()

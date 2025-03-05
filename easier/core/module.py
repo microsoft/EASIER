@@ -191,13 +191,16 @@ def _dist_collect(tensor: 'Tensor') -> torch.Tensor:
 
     synced = torch.empty(
         (builtins.sum(elempart.lengths),) + subshp,  # type: ignore
-        dtype=tensor.dtype, device='cpu')
+        dtype=tensor.dtype, device=dist_env.comm_device
+    )
 
     parts = dist_env.all_gather(
-        tensor.data.to('cpu'),
+        tensor.data.to(dist_env.comm_device),
         shapes=[(bs,) + subshp for bs in elempart.lengths])
     idxes = dist_env.all_gather(
-        elempart.idx, shapes=[(bs,) for bs in elempart.lengths])
+        elempart.idx.to(dist_env.comm_device),
+        shapes=[(bs,) for bs in elempart.lengths]
+    )
 
     for part, idx in zip(parts, idxes):
         synced[idx] = part
@@ -447,7 +450,7 @@ class Tensor(nn.Parameter):
                 if self.elempart is not None:
                     _dist_save(self, h5d)  # collectively save dist tensor
                 else:
-                    h5d[...] = self.data.to('cpu')  # replica
+                    h5d[...] = self.data.cpu()  # replica
 
         else:
             if self.elempart is not None:
@@ -495,8 +498,8 @@ def _dist_save(tensor: 'Tensor', h5d: Optional[h5py.Dataset]) -> None:
         slice_len = int(chunk_counts[i])
         idx_end = idx_start + slice_len
 
-        idx_slice = idx[idx_start:idx_end].to('cpu')
-        data_slice = tensor[idx_start:idx_end].to('cpu')
+        idx_slice = idx[idx_start:idx_end].to(dist_env.comm_device)
+        data_slice = tensor[idx_start:idx_end].to(dist_env.comm_device)
 
         idx_slices = dist_env.gather(0, idx_slice)
         data_slices = dist_env.gather(0, data_slice)
@@ -513,13 +516,16 @@ def _dist_save(tensor: 'Tensor', h5d: Optional[h5py.Dataset]) -> None:
             assert builtins.sum(s.shape[0] for s in idx_slices) == chuck_size_i
 
             h5d_slice = torch.empty(
-                (chuck_size_i,) + sub_shape, dtype=tensor.dtype)
+                (chuck_size_i,) + sub_shape,
+                dtype=tensor.dtype,
+                device=dist_env.comm_device
+            )
             for idx_slice, data_slice in zip(idx_slices, data_slices):
                 assert idx_slice.shape[0] == data_slice.shape[0]
                 h5d_slice[idx_slice] = data_slice
 
             assert h5d is not None
-            h5d[(chunk_size*i):(chunk_size*i+chuck_size_i)] = h5d_slice
+            h5d[(chunk_size*i):(chunk_size*i+chuck_size_i)] = h5d_slice.cpu()
 
 
 class Module(nn.Module):
