@@ -791,13 +791,27 @@ class TorchDistMpiDistEnv(TorchDistEnv):
             return torch.concat(tensors)
         else:
             return torch.stack(tensors)
+    
+    def def_isend(self, tensor: torch.Tensor, dst: int, tag: int) -> Any:
+        return (dist.isend, tensor, dst, tag)
 
-    def batch_isend_irecv(self, p2p_ops: List[dist.P2POp]) -> List[dist.Work]:
+    def def_irecv(self, buffer: torch.Tensor, src: int, tag: int) -> Any:
+        return (dist.irecv, buffer, src, tag)
+
+    def batch_isend_irecv(self, p2p_ops: List[tuple]) -> List[dist.Work]:
         """
         MPI backend invokes send and recv immediately,
         and will raise if dist.batch_isend_irecv is called.
+
+        We keep the definition-only semantics of def_isend/irecv and
+        invoke all at once here.
         """
-        return []
+        works = []
+        for tp in p2p_ops:
+            op, tensor, peer, tag = tp
+            work = op(tensor, peer, tag=tag)
+            works.append(work)
+        return works
     
 
 
