@@ -140,9 +140,9 @@ class Poisson(esr.Module):
             mesh = get_triagular_mesh(mesh_size)
             poisson = _assemble_poisson(mesh)
 
-            with h5py.File(mesh, 'r') as f:
-                nc = f['cells'].shape[0]
-                ne = f['src'].shape[0]
+            with h5py.File(mesh, 'r') as mesh_h5f:
+                nc = mesh_h5f['cells'].shape[0]
+                ne = mesh_h5f['src'].shape[0]
 
             torch.distributed.broadcast_object_list([mesh, poisson, nc, ne], 0)
         else:
@@ -152,6 +152,7 @@ class Poisson(esr.Module):
 
         mesh: str
         poisson: str
+        self.nc = nc
 
         # src (torch.LongTensor): src cell indices, with shape `(ne,)`
         self.src = esr.hdf5(mesh, 'src', dtype=torch.long, device=device, shape=(ne,))
@@ -159,7 +160,6 @@ class Poisson(esr.Module):
         self.dst = esr.hdf5(mesh, 'dst', dtype=torch.long, device=device, shape=(ne,))
 
         self.cells = esr.hdf5(mesh, 'cells', dtype=torch.long, device=device, shape=(nc,))
-        self.nc = nc
 
         self.reducer = esr.Reducer(self.src, self.nc)
         self.selector = esr.Selector(self.dst)

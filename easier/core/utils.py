@@ -8,11 +8,10 @@ import string
 
 LOGGING_TRACE = 5
 
-if os.getenv('EASIER_USE_MPIRUN') is not None:
-    rank = os.environ.get("OMPI_COMM_WORLD_RANK", "0")
-else:
-    rank = os.environ.get("RANK", "0")
-logger = logging.getLogger(f"Rank{rank}")
+# We cannot decide
+ompi_rank = os.environ.get("OMPI_COMM_WORLD_RANK", None)
+torchrun_rank = os.environ.get("RANK", None)
+logger = logging.getLogger(f"Rank{torchrun_rank or ompi_rank}")
 # DEBUG, INFO, WARNING, ERROR, CRITICAL
 # NOTE environ variable EASIER_LOG_LEVEL can be specified on `torchrun` process
 # and will be inherited by all worker processes.

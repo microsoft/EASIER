@@ -241,8 +241,7 @@ def _validate_compile_args(
     
 
 def _fully_load_data_backend_none(
-    top_modules: List[esr.Module],
-    device_type: str
+    top_modules: List[esr.Module], device_type: str
 ):
     """
     Fully load index and data onto the specified device.
@@ -255,22 +254,21 @@ def _fully_load_data_backend_none(
 
     device = torch.device(type=device_type, index=0)
 
-    for root in top_modules:
-        for m in root.modules():  # recursively
-            if isinstance(m, (esr.Selector, esr.Reducer)):
-                assert m.easier_index_status in ['placeholder', 'rewritten']
-                if m.easier_index_status == 'placeholder':
-                    m.idx = m.easier_data_loader.fully_load(device)
-                    m.easier_index_status = 'rewritten'
-            
-            if isinstance(m, esr.Module):
-                m.easier_jit_backend = 'none'
+    for obj, names in get_easier_objects(top_modules).items():
 
-        for p in root.parameters(recurse=True):
-            if isinstance(p, esr.Tensor):
-                if not p.easier_data_ready:
-                    p.data = p.easier_data_loader.fully_load(device)
-                    p.easier_data_ready = True
+        if isinstance(obj, (esr.Selector, esr.Reducer)):
+            assert obj.easier_index_status in ['placeholder', 'rewritten']
+            if obj.easier_index_status == 'placeholder':
+                obj.idx = obj.easier_data_loader.fully_load(device)
+                obj.easier_index_status = 'rewritten'
+        
+        if isinstance(obj, esr.Module):
+            obj.easier_jit_backend = 'none'
+
+        if isinstance(obj, esr.Tensor):
+            if not obj.easier_data_ready:
+                obj.data = obj.easier_data_loader.fully_load(device)
+                obj.easier_data_ready = True
 
 
 
