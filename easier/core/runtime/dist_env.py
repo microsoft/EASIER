@@ -30,9 +30,10 @@ def _wrap_commapi_pre_filter(prefilter, api):
     @functools.wraps(api)
     def wrapper(*args, **kwargs):
         if logger.level <= LOGGING_TRACE:
+            this = args[0].__class__.__name__
             logger.log(
                 LOGGING_TRACE,
-                f'DistEnv.{api.__name__}(*{args[1:]}, **{kwargs})'
+                f'{this}.{api.__name__}(*{args[1:]}, **{kwargs})'
             )
 
         args, kwargs = prefilter(*args, **kwargs)
@@ -616,27 +617,42 @@ class TorchDistEnv(DistEnv):
         dist.all_gather(recv_buffers, send_tensor)
         return recv_buffers
 
-    def gather(self, dst: int, send_tensor: torch.Tensor
-               ) -> Optional[List[torch.Tensor]]:
+    def gather(
+        self, dst: int, send_tensor: torch.Tensor
+    ) -> Optional[List[torch.Tensor]]:
+        """
+        torch.distributed doc says all tensor sizes must be the same,
+        NCCL can take different shapes but GLOO cannot. Use P2P to unify.
+        """
         shape = tuple(send_tensor.shape)
         shapes = self.gather_object(dst, shape)
 
         if self.rank == dst:
             assert shapes is not None
-            recv_buffers = [
-                torch.empty(shape, dtype=send_tensor.dtype,
-                            device=self.comm_device)
-                for shape in shapes
-            ]
-        else:
-            recv_buffers = None
+            recv_buffers = []
+            ops = []
+            for w in range(self.world_size):
+                if w != self.rank:
+                    buffer = torch.empty(
+                        shapes[w],
+                        dtype=send_tensor.dtype,
+                        device=self.comm_device
+                    )
+                    recv_buffers.append(buffer)
 
-        dist.gather(send_tensor, recv_buffers, dst)
-
-        if self.rank == dst:
+                    irecv = self.def_irecv(buffer, w, w)
+                    ops.append(irecv)
+                else:
+                    recv_buffers.append(send_tensor)
+            for req in self.batch_isend_irecv(ops):
+                req.wait()
+            
             return recv_buffers
+
         else:
+            self.send(send_tensor, dst, self.rank)
             return None
+
 
     def gather_object(self, dst: int, obj: _T) -> Optional[List[_T]]:
         if self.rank == dst:
@@ -652,22 +668,31 @@ class TorchDistEnv(DistEnv):
     def scatter(
         self, src: int, tensors: Optional[Sequence[torch.Tensor]]
     ) -> torch.Tensor:
+        """
+        torch.distributed doc says all tensor sizes must be the same,
+        NCCL can take different shapes but GLOO cannot. Use P2P to unify.
+        """
         if self.rank == src:
             assert tensors is not None
-            [dtype] = self.broadcast_object_list(
-                src, [tensors[0].dtype]
-            )  # type: ignore
-            shape = self.scatter_object(src, [t.shape for t in tensors])
-            tensors = list(tensors)
+            shapes_dtypes = [(t.shape, t.dtype) for t in tensors]
+            self.scatter_object(src, shapes_dtypes)
+
+            ops = []
+            for w in range(self.world_size):
+                if w != self.rank:
+                    isend = self.def_isend(tensors[w], w, w)
+                    ops.append(isend)
+            for req in self.batch_isend_irecv(ops):
+                req.wait()
+            
+            return tensors[src]
+        
         else:
-            [dtype] = self.broadcast_object_list(src)  # type: ignore
-            shape = self.scatter_object(src)  # type: ignore
-            tensors = None
-
-        buffer = torch.empty(shape, dtype=dtype, device=self.comm_device)
-        dist.scatter(buffer, tensors, src)
-
-        return buffer
+            shape, dtype = self.scatter_object(src)
+            buffer = self.recv(torch.empty(
+                shape, dtype=dtype, device=self.comm_device
+            ), src=src, tag=self.rank)
+            return buffer
 
     def scatter_object(self, src: int, objs: Optional[List[_T]] = None) -> _T:
         recvs = [None]
@@ -713,7 +738,7 @@ class TorchDistGlooDistEnv(TorchDistEnv):
         return buffers
 
     
-    def all_gather_into_tensor(self, send_tensor: torch.Tensor, form: Literal['concat'] | Literal['stack'] = 'concat'):
+    def all_gather_into_tensor(self, send_tensor: torch.Tensor, form: Literal['concat','stack'] = 'concat'):
         tensors = [
             torch.empty_like(send_tensor, device=self.comm_device)
             for _ in range(self.world_size)
@@ -739,17 +764,6 @@ class TorchDistGlooDistEnv(TorchDistEnv):
                 recv_buffers.append(recv)
         return recv_buffers
     
-    def gather(self, dst: int, send_tensor: torch.Tensor) -> List[torch.Tensor] | None:
-        """
-        GLOO requires all tensors must have the same size.
-        """
-        return super().gather(dst, send_tensor)
-    
-    def scatter(self, src: int, tensors: Sequence[torch.Tensor] | None) -> torch.Tensor:
-        """
-        GLOO requires all tensors must have the same size.
-        """
-        return super().scatter(src, tensors)
 
 
 _runtime_devicetype_backend: Optional[Tuple[

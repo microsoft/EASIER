@@ -131,7 +131,10 @@ class Poisson(esr.Module):
         super().__init__()
 
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group('cpu:gloo,cuda:nccl')
+            if torch.cuda.is_available():
+                torch.distributed.init_process_group('cpu:gloo,cuda:nccl')
+            else:
+                torch.distributed.init_process_group('gloo')
 
         if torch.distributed.get_rank() == 0:
             mesh = get_triagular_mesh(mesh_size)

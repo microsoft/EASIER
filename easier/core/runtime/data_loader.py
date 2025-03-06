@@ -335,9 +335,12 @@ class H5DataLoader(DataLoaderBase):
         """
         Temporarily open the H5 File and Dataset.
         After reading, the dataset should be closed in time to free memeory.
+
+        Only callable on rank-0.
         """
-        dist_env = get_runtime_dist_env()
-        assert dist_env.rank == 0
+        # NOTE we cannot really check rank == 0 here as in some situations
+        # we haven't yet initialized the DistEnv.
+        # assert rank == 0
 
         file_path = os.path.expanduser(self._unexpanded_file_path)
         with h5py.File(file_path, 'r', **self._file_kwargs) as f:
@@ -571,16 +574,14 @@ class H5DataLoader(DataLoaderBase):
             return _run(None)
 
     def fully_load(self, device: Union[torch.device, str]) -> torch.Tensor:
-        dist_env = get_runtime_dist_env()
-
-        if dist_env.rank == 0:
-            with self._dataset() as d:
-                t = torch.from_numpy(d[...]).to(dist_env.comm_device)
-                dist_env.broadcast(0, t)
-        else:
-            t = dist_env.broadcast(0, shape=self.shape, dtype=self.dtype)
-
-        return t.to(device=device)
+        """
+        Called by backend=='none' case, EASIER does not initialize DistEnv.
+        EASIER requires there is only one process.
+        # dist_env = get_runtime_dist_env()
+        """
+        with self._dataset() as d:
+            t = torch.from_numpy(d[...]).to(device)
+            return t
 
     def __repr__(self) -> str:
         return ''.join([
@@ -751,10 +752,12 @@ class ArangeTensorLoader(DataLoaderBase):
                                 **kwargs) -> torch.Tensor:
         return (index * self._step + self._start).to(dtype=self.dtype)
 
-    def fully_load(self, device: Union[torch.device, str, None]
+    def fully_load(self, device: Union[torch.device, str]
                    ) -> torch.Tensor:
-        return torch.arange(self._start, self._end, self._step,
-                            dtype=self.dtype, device=device or self.user_device)
+        return torch.arange(
+            self._start, self._end, self._step,
+            dtype=self.dtype, device=device
+        )
 
 
     def __repr__(self) -> str:
