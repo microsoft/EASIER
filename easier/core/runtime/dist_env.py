@@ -767,6 +767,38 @@ class TorchDistGlooDistEnv(TorchDistEnv):
                 recv_buffers.append(recv)
         return recv_buffers
     
+class TorchDistMpiDistEnv(TorchDistEnv):
+    def all_gather_into_tensor(
+        self,
+        send_tensor: torch.Tensor,
+        form: Literal['concat', 'stack'] = 'concat'
+    ):
+        """
+        torch.distributed.all_gather_into_tensor API is not supported by
+        the MPI backend. Use all_gather to implement.
+        Currently we only use all_gather_into_tensor for runtime aggregators,
+        we explicitly exclude cases of different sizes.
+        """
+        shape = list(send_tensor.shape)
+
+        if shape[0] != 1:
+            raise NotImplementedError("Support different tensor sizes")
+
+        # In our use cases of aggregators all input tensors have the same size.
+        tensors = self.all_gather(send_tensor, [shape] * self.world_size)
+
+        if form == 'concat':
+            return torch.concat(tensors)
+        else:
+            return torch.stack(tensors)
+
+    def batch_isend_irecv(self, p2p_ops: List[dist.P2POp]) -> List[dist.Work]:
+        """
+        MPI backend invokes send and recv immediately,
+        and will raise if dist.batch_isend_irecv is called.
+        """
+        return []
+    
 
 
 _runtime_devicetype_backend: Optional[Tuple[
@@ -827,6 +859,8 @@ def get_runtime_dist_env() -> DistEnv:
 
         if comm_backend == 'gloo':
             dist_env = TorchDistGlooDistEnv(device_type, 'gloo')
+        elif comm_backend == 'mpi':
+            dist_env = TorchDistMpiDistEnv(device_type, 'mpi')
         else:
             dist_env = TorchDistEnv(device_type, comm_backend)
 
