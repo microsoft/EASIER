@@ -19,6 +19,7 @@ import torch.distributed as dist
 from easier.core.utils import logger, EasierJitException, LOGGING_TRACE
 
 _T = TypeVar("_T")
+gloo_agit_count = 0
 
 
 def _wrap_commapi_pre_filter(prefilter, api):
@@ -588,9 +589,12 @@ class TorchDistEnv(DistEnv):
 
         return buffers
 
-
     def all_gather_into_tensor(self, send_tensor: torch.Tensor,
                                form: Literal['concat', 'stack'] = 'concat'):
+        global gloo_agit_count
+        if gloo_agit_count == 0:
+            logger.fatal("DOC SAY GLOO DOES NOT SUPPORT ALL_GATHER_INTO_TENSOR")
+            gloo_agit_count = 1
         shape = list(send_tensor.shape)
         if form == 'concat':
             shape[0] = shape[0] * self.world_size
@@ -738,31 +742,31 @@ class TorchDistGlooDistEnv(TorchDistEnv):
         return buffers
 
     
-    def all_gather_into_tensor(self, send_tensor: torch.Tensor, form: Literal['concat','stack'] = 'concat'):
-        tensors = [
-            torch.empty_like(send_tensor, device=self.comm_device)
-            for _ in range(self.world_size)
-        ]
-        dist.all_gather(tensors, send_tensor)
+    # def all_gather_into_tensor(self, send_tensor: torch.Tensor, form: Literal['concat','stack'] = 'concat'):
+    #     tensors = [
+    #         torch.empty_like(send_tensor, device=self.comm_device)
+    #         for _ in range(self.world_size)
+    #     ]
+    #     dist.all_gather(tensors, send_tensor)
 
-        if form == 'concat':
-            return torch.concat(tensors)
-        else:
-            return torch.stack(tensors)
+    #     if form == 'concat':
+    #         return torch.concat(tensors)
+    #     else:
+    #         return torch.stack(tensors)
     
-    def all_gather(self, send_tensor: torch.Tensor, shapes: Sequence[Sequence[int]]) -> List[torch.Tensor]:
-        # PyTorch GLOO communication backend doesn't support all_gather with
-        # different shapes.
-        recv_buffers = []
-        for i in range(self.world_size):
-            if i == self.rank:
-                self.broadcast(src=i, tensor=send_tensor)
-                recv_buffers.append(send_tensor.clone())
-            else:
-                recv = self.broadcast(src=i, shape=shapes[i],
-                                      dtype=send_tensor.dtype)
-                recv_buffers.append(recv)
-        return recv_buffers
+    # def all_gather(self, send_tensor: torch.Tensor, shapes: Sequence[Sequence[int]]) -> List[torch.Tensor]:
+    #     # PyTorch GLOO communication backend doesn't support all_gather with
+    #     # different shapes.
+    #     recv_buffers = []
+    #     for i in range(self.world_size):
+    #         if i == self.rank:
+    #             self.broadcast(src=i, tensor=send_tensor)
+    #             recv_buffers.append(send_tensor.clone())
+    #         else:
+    #             recv = self.broadcast(src=i, shape=shapes[i],
+    #                                   dtype=send_tensor.dtype)
+    #             recv_buffers.append(recv)
+    #     return recv_buffers
     
 
 

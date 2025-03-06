@@ -446,21 +446,6 @@ def get_easier_tensors(
     return tensors
 
 
-def get_sub_easier_modules(
-    top_modules: Sequence[esr.Module]
-) -> 'OrderedSet[Tuple[esr.Module, str]]':
-
-    modules = OrderedSet()
-    for module in top_modules:
-        if not isinstance(module, esr.Module):
-            raise EasierJitException(
-                f"Instance of {module.__class__} cannot be jitted")
-
-        for m in module.modules():
-            if isinstance(m, esr.Module):
-                modules.add(m)
-
-    return modules
 
 EasierObj: TypeAlias = Union[
     esr.Module, esr.Selector, esr.Reducer, esr.Tensor, esr.DataLoaderBase

@@ -90,6 +90,7 @@ class CsrSelectorInserter(EasierInterpreter[None]):
             csr_selector = esr.Selector(esr.arange(
                 submod.easier_data_loader.shape[0],
                 dtype=submod.easier_data_loader.dtype,
+                device=submod.easier_data_loader.user_device
             ))
 
             self.current_module.add_module(selector_attrname, csr_selector)

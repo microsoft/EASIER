@@ -88,7 +88,7 @@ def validate_idx_range(
         iinfo = torch.iinfo(dl.dtype)
     except TypeError:
         raise TypeError(
-            f"The index tensor to {hint_name} must be integer"
+            f"{hint_name}.idx must be integer"
         )
     
     idxmin, idxmax = cast(Tuple[int, int], dl.minmax())
@@ -139,6 +139,9 @@ def collectively_initialize_and_validate(
             modules.append(obj)
 
         obj.easier_hint_name = names[0]
+    
+    objs2 = { type(o): v for o, v in objs.items() }
+    check_collective_equality("debug objs2", objs2)
 
     tracer = EasierTracer()
     graphs: List[Graph] = [tracer.trace(m) for m in modules]

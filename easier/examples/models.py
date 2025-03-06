@@ -178,7 +178,7 @@ class Poisson(esr.Module):
             mode='partition')
         # Af: (src.shape[0],)
         self.Af = esr.Tensor(
-            esr.hdf5(poisson, 'Af', dtype=torch.double, device=device, shape=(nc,)),
+            esr.hdf5(poisson, 'Af', dtype=torch.double, device=device, shape=(ne,)),
             mode='partition')
         self.A = Linsys(self.Ac, self.Af, self.selector, self.reducer)
 
@@ -187,7 +187,7 @@ class Poisson(esr.Module):
             mode='partition')
         # centroid: (nc, 2)
         self.centroid = esr.Tensor(
-            esr.hdf5(poisson, 'centroid', dtype=torch.double, device=device, shape=(nc,)),
+            esr.hdf5(poisson, 'centroid', dtype=torch.double, device=device, shape=(nc, 2)),
             mode='partition')
 
 

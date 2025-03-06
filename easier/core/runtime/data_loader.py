@@ -39,6 +39,10 @@ def _get_offset_exactly_nparts(orig_len: int, nparts: int, part: int
     return start, end
 
 
+class _DataLoaderMetaNotInitialized:
+    pass
+
+
 class DataLoaderBase:
     """
     The data loader for one specified data source, e.g. a HDF5 dataset.
@@ -51,10 +55,10 @@ class DataLoaderBase:
         The constructor should do simple member data storage and local tasks.
         No collective calls should be done during construction.
         """
-        # Give common properties an explicit "UNINIT" value to avoid
+        # Give common properties an explicitly typed value to avoid
         # "no attribute" error when `repr` is triggered (e.g. when viewing
         # variables in debug)
-        uninit = "UNINITIALIZED"
+        uninit = _DataLoaderMetaNotInitialized()
         self.shape: Tuple[int, ...] = uninit  # type: ignore
         self.dtype: torch.dtype = uninit  # type: ignore
 
@@ -290,7 +294,10 @@ class H5DataLoader(DataLoaderBase):
         self._dataset_path = h5_dataset_path
         self._file_kwargs = h5_file_kwargs
 
+        from easier.core.utils import logger
+        logger.fatal("REMOVE THIS DEBUG FLAG")
         self.shape = shape
+        self.dtype = dtype
 
         if dtype is not None:
             self._target_dtype = dtype
@@ -470,7 +477,8 @@ class H5DataLoader(DataLoaderBase):
                         orig_len, nparts=dist_env.world_size, part=w)
 
                     part_np: np.ndarray = d[start:end]
-                    part: torch.Tensor = torch.from_numpy(part_np).to(dist_env.comm_device)
+                    part: torch.Tensor = \
+                        torch.from_numpy(part_np).to(dist_env.comm_device)
                     isend = dist_env.def_isend(part, dst=w, tag=w)
                     for req in dist_env.batch_isend_irecv([isend]):
                         req.wait()
@@ -499,7 +507,8 @@ class H5DataLoader(DataLoaderBase):
 
     def partially_load_by_index(
         self, index: torch.Tensor, *,
-        chunk_size=1024 * 1024 * 128  # roughly 128M elements
+        chunk_size=1024 * 1024 * 128,  # roughly 128M elements
+        **kwargs
     ) -> torch.Tensor:
         """
         Each time, rank-0 broadcasts a chunk [chunk_size*i, chunk_size*(i+1))
@@ -533,7 +542,8 @@ class H5DataLoader(DataLoaderBase):
 
                 if dist_env.rank == 0:
                     chunk_np: np.ndarray = d[start:end]
-                    chunk: torch.Tensor = torch.from_numpy(chunk_np).to(dist_env.comm_device)
+                    chunk: torch.Tensor = \
+                        torch.from_numpy(chunk_np).to(dist_env.comm_device)
                     chunk = dist_env.broadcast(src=0, tensor=chunk)
 
                 else:
@@ -543,7 +553,8 @@ class H5DataLoader(DataLoaderBase):
                     # we can use P2P instead of broadcasting.
                     chunk = dist_env.broadcast(
                         src=0, shape=(end - start,) + sub_shape,
-                        dtype=self.dtype)
+                        dtype=self.dtype
+                    )
 
                 chunk = chunk.cpu()
 
@@ -615,8 +626,9 @@ class FulledTensorLoader(DataLoaderBase):
     def count_unique(self) -> int:
         return 1
 
-    def _full(self, batch_dim_len: Optional[int] = None,
-              device: Union[torch.device, str, None] = None):
+    def _full(
+        self, batch_dim_len: Optional[int], device: Union[torch.device, str]
+    ):
         if batch_dim_len is None:
             batch_dim_len = self.shape[0]
 

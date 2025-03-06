@@ -84,6 +84,8 @@ def zeros(size, dtype=None, device=None):
     Args:
     - dtype: Optional[torch.dtype]:
         If None, the default dtype is `torch.int64`.
+    - device: Optional[torch.Device]:
+        If None, the default device is `"cpu"`.
     """
     if dtype is None:
         dtype = torch.float64
@@ -98,6 +100,8 @@ def ones(size, dtype=None, device=None):
     Args:
     - dtype: Optional[torch.dtype]:
         If None, the default dtype is `torch.int64`.
+    - device: Optional[torch.Device]:
+        If None, the default device is `"cpu"`.
     """
     if dtype is None:
         dtype = torch.float64
@@ -114,10 +118,10 @@ def arange(start, end, step=1, dtype=None, device=None): ...
 
 
 def arange(*args, **kwargs):
-    def _end_matcher(end, dtype, device):
+    def _end_matcher(end, dtype=None, device=None):
         return (0, end, 1, dtype, device)
 
-    def _start_end_matcher(start, end, step, dtype, device):
+    def _start_end_matcher(start, end, step=1, dtype=None, device=None):
         return (start, end, step, dtype, device)
 
     def _resolve():
@@ -344,7 +348,7 @@ class Tensor(nn.Parameter):
                 requires_grad: bool = False) -> "Tensor":
         dl = _resolve_data_loader(data)
 
-        data = torch.empty(dl.shape, device=dl.user_device)
+        data = torch.zeros(dl.shape, device=dl.user_device)
         tensor = super().__new__(cls, data, requires_grad)  # type: ignore
 
         # store the parsing results to
