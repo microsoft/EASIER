@@ -348,7 +348,7 @@ class Tensor(nn.Parameter):
                 requires_grad: bool = False) -> "Tensor":
         dl = _resolve_data_loader(data)
 
-        data = torch.zeros(dl.shape, device=dl.user_device)
+        data = torch.zeros(dl.shape, dtype=dl.dtype, device=dl.user_device)
         tensor = super().__new__(cls, data, requires_grad)  # type: ignore
 
         # store the parsing results to
