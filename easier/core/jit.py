@@ -4,7 +4,8 @@
 import math
 import operator
 from types import ModuleType
-from typing import Callable, Dict, Iterator, List, Optional, Sequence, Tuple, cast
+from typing import \
+    Callable, Dict, Iterator, List, Optional, Sequence, Tuple, cast
 from typing_extensions import Literal
 import more_itertools
 import os
@@ -23,9 +24,9 @@ from easier.core import module as _EsrMod
 from easier.core.dump import load_dumps
 from easier.core.passes.utils import \
     get_easier_objects
-from easier.core.utils import EasierJitException
+from easier.core.utils import EasierJitException, logger
 from easier.core.runtime.dist_env import \
-    config_runtime_dist_env, get_runtime_dist_env
+    set_dist_env_backend, set_dist_env_device_type, get_runtime_dist_env
 
 
 class EasierProxy(Proxy):
@@ -159,12 +160,10 @@ def _validate_compile_args(
     top_modules,
     backend,
     partition_mode,
-    comm_backend
 ) -> Tuple[
     List[esr.Module],  # top_modules
     Literal['torch', 'cpu', 'gpu', 'none'],  # backend
     Literal['metis', 'evenly'],  # partition_mode,
-    Literal['gloo', 'nccl', 'mpi', None],  # comm_backend
 ]:
     # validate top_modules must never be compiled
     def _raise():
@@ -216,28 +215,7 @@ def _validate_compile_args(
             f"Argument `partition_mode` cannot be {partition_mode}"
         )
 
-    # validate comm_backend
-    """
-    TODO although we'll just pass `comm_backend` to
-    `torch.distributed.init_process_group()`, we must limit the values like
-    these three, because we need concrete and single backend name to
-    dispatch DistEnv for certain implementation, like GlooDistEnv,
-    because different comm backend has different API set.
-    """
-    if comm_backend is None:
-        env_comm_backend = os.environ.get("EASIER_COMM_BACKEND", None)
-        if env_comm_backend not in ['gloo', 'nccl', 'mpi', None]:
-            raise EasierJitException(
-                "Detected invalid value of EASIER_COMM_BACKEND: "
-                + env_comm_backend  # type: ignore
-            )
-        comm_backend = env_comm_backend  # type: ignore
-    if comm_backend not in ['gloo', 'nccl', 'mpi', None]:
-        raise EasierJitException(
-            f"Argument `comm_backend` cannot be {comm_backend}"
-        )
-
-    return top_modules, backend, partition_mode, comm_backend  # type: ignore
+    return top_modules, backend, partition_mode  # type: ignore
     
 
 def _fully_load_data_backend_none(
@@ -271,8 +249,76 @@ def _fully_load_data_backend_none(
                 obj.easier_data_ready = True
 
 
+def init(
+    comm_backend: Literal['gloo', 'nccl', 'mpi', None] = None,
+    **kwargs
+) -> None:
+    """
+    Initialize the distributed environment for the EASIER compiler.
 
+    Args:
+    -   comm_backend (str):
+            if provided, EASIER compiler will use the specified communication
+            backend for runtime communication, supporting:
+            - "gloo": GLOO backend provided by `torch.distributed`, CPU-only
+            - "nccl": NCCL backend provided by `torch.distributed`, GPU-only
+            - "mpi": MPI backend provided by `torch.distributed`,
+                supporting CPU and GPU TODO CPU-only?
+            
+            If None is provided, use the value specified by the
+            environment variable EASIER_COMPILE_BACKEND.
+            If EASIER_COMM_BACKEND is not defined, will use "gloo" for CPU
+            and "nccl" for GPU.
+    """
+    # TODO although we'll just pass `comm_backend` to
+    # `torch.distributed.init_process_group()`, we must limit the values like
+    # these three, because we need concrete and single backend name to
+    # dispatch DistEnv for certain implementation, like GlooDistEnv,
+    # because different comm backend has different API set.
+    if comm_backend is None:
+        env_comm_backend = os.environ.get("EASIER_COMM_BACKEND", None)
+        if env_comm_backend not in ['gloo', 'nccl', 'mpi', None]:
+            raise EasierJitException(
+                "Detected invalid value of EASIER_COMM_BACKEND: "
+                + env_comm_backend  # type: ignore
+            )
+        comm_backend = env_comm_backend  # type: ignore
+    
+    if comm_backend is None:
+        # TODO or fallback to GLOO?
+        raise EasierJitException(
+            f"Argument `comm_backend` is not specified"
+        )
 
+    if comm_backend not in ['gloo', 'nccl', 'mpi']:
+        raise EasierJitException(
+            f"Argument `comm_backend` cannot be {comm_backend}"
+        )
+
+    set_dist_env_backend(comm_backend)
+
+    logger.info("Initializing torch.distributed")
+
+    import torch.distributed as dist
+    dist.init_process_group(comm_backend, **kwargs)
+
+    if comm_backend in ['gloo', 'nccl']:
+        local_rank = int(os.environ['LOCAL_RANK'])
+    elif comm_backend in ['mpi']:
+        # P.S. it's possible to use MPIRUN but use `nccl` instead,
+        # if users set WORLD_SIZE RANK LOCAL_RANK MASTER_ADDR MASTER_PORT etc.
+        # to reconstruct the environment that `torch.distributed + nccl` needs.
+        local_rank = int(os.environ["OMPI_COMM_WORLD_LOCAL_RANK"])
+    else:
+        assert False, "unreachable"
+    
+    # the `get_backend_config()` may return like "cpu:gloo,cuda:nccl"
+    logger.info(
+        f"torch.distributed"
+        f" backend={dist.get_backend_config()} rank={dist.get_rank()}"
+        f" local_rank={local_rank}"
+    )
+    
 
 def compile(
     modules: List[esr.Module],
@@ -280,7 +326,6 @@ def compile(
     *,
     load_dir: Optional[str] = None,
     partition_mode: Literal['metis', 'evenly'] = 'metis',
-    comm_backend: Literal['gloo', 'nccl', 'mpi', None] = None
 ) -> List[esr.Module]:
     """
     Just in time compilation for a list of fx compatible easier.Modules
@@ -315,25 +360,14 @@ def compile(
             - "metis": use METIS to partition, will result in less amount of
                 communication, but will make `compile()` run longer
             - "evenly": partition evenly and take less time than mode "metis"
-    -   comm_backend (str):
-            if provided, EASIER compiler will use the specified communication
-            backend for runtime communication, supporting:
-            - "gloo": GLOO backend provided by `torch.distributed`, CPU-only
-            - "nccl": NCCL backend provided by `torch.distributed`, GPU-only
-            - "mpi": MPI backend provided by `torch.distributed`
-                support CPU or GPU TODO CPU-only?
-            - None: use the value specified by environment variable
-                EASIER_COMPILE_BACKEND.
-                If EASIER_COMM_BACKEND is not defined, will use "gloo" for CPU
-                and "nccl" for GPU.
 
     Returns:
     -   List[easier.Module]
             the jitted input easier.Modules that can run on the
             specified backend platform distributively
     """
-    top_modules, backend, partition_mode, comm_backend = \
-        _validate_compile_args(modules, backend, partition_mode, comm_backend)
+    top_modules, backend, partition_mode = \
+        _validate_compile_args(modules, backend, partition_mode)
 
     # No matter what backend is specified, we enforce the input modules are
     # on the same device, like 'cuda:3' or whatever kind of device.
@@ -364,7 +398,7 @@ def compile(
         f", device_type={device_type}"
     )
 
-    config_runtime_dist_env(device_type, comm_backend)
+    set_dist_env_device_type(device_type)
 
     modules, graphs = passes.collectively_initialize_and_validate(top_modules)
 

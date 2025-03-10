@@ -7,8 +7,8 @@ from .core.module import (
     Module,
     Selector, Reducer,
     sum, prod, norm, max, min,
-    hdf5, full, zeros, ones
+    hdf5, full, zeros, ones, full_like, zeros_like, ones_like
 )
-from .core.jit import compile
+from .core.jit import init, compile
 from .core.utils import logger, EasierJitException
 from . import numeric

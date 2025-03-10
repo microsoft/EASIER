@@ -1,7 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-from typing import Callable, Dict, List, Optional, Tuple, Type, Union, cast, \
+from typing import \
+    Callable, Dict, List, Optional, Sequence, Tuple, Type, Union, cast, \
     overload, TYPE_CHECKING
 import torch.types
 from typing_extensions import TypeAlias
@@ -25,7 +26,7 @@ import h5py
 from easier.core.runtime.dist_env import get_runtime_dist_env
 from easier.core.runtime.data_loader import \
     ArangeTensorLoader, DataLoaderBase, InMemoryTensorLoader, H5DataLoader, \
-    FulledTensorLoader, torch_dtype_to_numpy_dtype
+    FulledTensorLoader, ATTRIBUTE_PLACEHOLDER, torch_dtype_to_numpy_dtype
 from easier.core.utils import logger, get_random_str
 
 
@@ -52,8 +53,10 @@ def hdf5(
                         **h5_file_kwargs)
 
 
-def full(size, fill_value, *,
-         dtype: Optional[torch.dtype] = None, device=None):
+def full(
+    size: Sequence[int], fill_value, *,
+    dtype: Optional[torch.dtype] = None, device=None
+):
     """
     Args:
     - dtype: Optional[torch.dtype]:
@@ -77,8 +80,23 @@ def full(size, fill_value, *,
         device = 'cpu'
     return FulledTensorLoader(fill_value, size, dtype, device)
 
+def full_like(
+    input: Union[DataLoaderBase, torch.Tensor], fill_value, *,
+    dtype: Optional[torch.dtype] = None, device=None
+):
+    """
+    Args:
+    - dtype: Optional[torch.dtype]:
+        If None, the default dtype is `torch.int64` for integer `fill_value`
+        and `torch.float64` for floating-poin `fill_value`.
+    - device: Optional[torch.Device]:
+        If None, the default device is `"cpu"`.
+    """
+    size = input.shape
+    return full(size, fill_value, dtype=dtype, device=device)
 
-def zeros(size, dtype=None, device=None):
+
+def zeros(size: Sequence[int], dtype=None, device=None):
     # TODO torch.zeros/ones can have `size` be both tuple and `*size:int`.
     """
     Args:
@@ -95,7 +113,22 @@ def zeros(size, dtype=None, device=None):
     return full(size, 0, dtype=dtype, device=device)
 
 
-def ones(size, dtype=None, device=None):
+def zeros_like(
+    input: Union[DataLoaderBase, torch.Tensor],
+    dtype: Optional[torch.dtype] = None, device=None
+):
+    """
+    Args:
+    - dtype: Optional[torch.dtype]:
+        If None, the default dtype is `torch.int64` for integer `fill_value`
+        and `torch.float64` for floating-poin `fill_value`.
+    - device: Optional[torch.Device]:
+        If None, the default device is `"cpu"`.
+    """
+    return zeros(input.shape, dtype=dtype, device=device)
+
+
+def ones(size: Sequence[int], dtype=None, device=None):
     """
     Args:
     - dtype: Optional[torch.dtype]:
@@ -109,6 +142,20 @@ def ones(size, dtype=None, device=None):
         # TODO like torch.set_default_device()
         device = 'cpu'
     return full(size, 1, dtype=dtype, device=device)
+
+def ones_like(
+    input: Union[DataLoaderBase, torch.Tensor],
+    dtype: Optional[torch.dtype] = None, device=None
+):
+    """
+    Args:
+    - dtype: Optional[torch.dtype]:
+        If None, the default dtype is `torch.int64` for integer `fill_value`
+        and `torch.float64` for floating-poin `fill_value`.
+    - device: Optional[torch.Device]:
+        If None, the default device is `"cpu"`.
+    """
+    return ones(input.shape, dtype=dtype, device=device)
 
 
 @overload
@@ -164,12 +211,13 @@ def arange(*args, **kwargs):
 def _resolve_data_loader(arg) -> DataLoaderBase:
     if isinstance(arg, DataLoaderBase):
         return arg
-    elif isinstance(arg, Tensor):
+    elif isinstance(arg, Tensor) or hasattr(arg, ATTRIBUTE_PLACEHOLDER):
         # The .data is banned before it's an empty placeholder, even for cases
         # of InMemoryTensorLoader. We specifically insert a private
         # "easier_placeholder" attr on the placeholder tensors.
         raise TypeError(
-            "Cannot use another easier.Tensor to initialize easier.Tensor"
+            "Cannot use another easier.Tensor (or its .data property)"
+            " to initialize easier.Tensor"
         )
     elif isinstance(arg, torch.Tensor):
         return InMemoryTensorLoader(arg)
@@ -222,7 +270,7 @@ class Selector(nn.Module):
         self.easier_data_loader = _resolve_data_loader(idx)
         self.easier_index_status: IdxStatus = 'placeholder'
 
-        self.idx: torch.Tensor
+        self.idx: torch.Tensor = self.easier_data_loader.get_placeholder()
 
         # ======
         # Fields filled during JIT compilation
@@ -273,7 +321,7 @@ class Reducer(nn.Module):
         self.easier_data_loader = _resolve_data_loader(idx)
         self.easier_index_status: IdxStatus = 'placeholder'
 
-        self.idx: torch.Tensor
+        self.idx: torch.Tensor = self.easier_data_loader.get_placeholder()
 
         # ======
         # Fields filled during JIT compilation
@@ -347,9 +395,8 @@ class Tensor(nn.Parameter):
                 mode: Literal['partition', 'replicate'],
                 requires_grad: bool = False) -> "Tensor":
         dl = _resolve_data_loader(data)
-
-        data = torch.zeros(dl.shape, dtype=dl.dtype, device=dl.user_device)
-        tensor = super().__new__(cls, data, requires_grad)  # type: ignore
+        data_ph: torch.Tensor = dl.get_placeholder()
+        tensor = super().__new__(cls, data_ph, requires_grad)  # type: ignore
 
         # store the parsing results to
         # avoid parsing args/kwargs in __init__ again.

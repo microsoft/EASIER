@@ -87,12 +87,9 @@ class CG(esr.Module):
         self.x = x
         self.M = M if M else lambda x: x
 
-        self.r = esr.Tensor(esr.zeros(x.shape, dtype=x.dtype,
-                            device=x.device), mode='partition')
-        self.z = esr.Tensor(esr.zeros(x.shape, dtype=x.dtype,
-                            device=x.device), mode='partition')
-        self.p = esr.Tensor(esr.zeros(x.shape, dtype=x.dtype,
-                            device=x.device), mode='partition')
+        self.r = esr.Tensor(esr.zeros_like(x), mode='partition')
+        self.z = esr.Tensor(esr.zeros_like(x), mode='partition')
+        self.p = esr.Tensor(esr.zeros_like(x), mode='partition')
 
         self.rzsum = esr.Tensor(
             torch.tensor([0.0], dtype=x.dtype, device=x.device),

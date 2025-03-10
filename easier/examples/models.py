@@ -130,36 +130,24 @@ class Poisson(esr.Module):
     def __init__(self, mesh_size=100, device='cpu', x=None) -> None:
         super().__init__()
 
-        if not torch.distributed.is_initialized():
-            if torch.cuda.is_available():
-                torch.distributed.init_process_group('cpu:gloo,cuda:nccl')
-            else:
-                torch.distributed.init_process_group('gloo')
-
         if torch.distributed.get_rank() == 0:
             mesh = get_triagular_mesh(mesh_size)
             poisson = _assemble_poisson(mesh)
-
-            with h5py.File(mesh, 'r') as mesh_h5f:
-                nc = mesh_h5f['cells'].shape[0]
-                ne = mesh_h5f['src'].shape[0]
-
-            torch.distributed.broadcast_object_list([mesh, poisson, nc, ne], 0)
+            torch.distributed.broadcast_object_list([mesh, poisson], 0)
         else:
-            bcast_list = [None, None, None, None]
-            torch.distributed.broadcast_object_list(bcast_list, 0)
-            mesh, poisson, nc, ne = bcast_list  # type: ignore
-
+            recv_objs = [None, None]
+            torch.distributed.broadcast_object_list(recv_objs, 0)
+            mesh, poisson = recv_objs
         mesh: str
         poisson: str
-        self.nc = nc
 
         # src (torch.LongTensor): src cell indices, with shape `(ne,)`
-        self.src = esr.hdf5(mesh, 'src', dtype=torch.long, device=device, shape=(ne,))
+        self.src = esr.hdf5(mesh, 'src', dtype=torch.long, device=device)
         # dst (torch.LongTensor): dst cell indices, with shape `(ne,)`
-        self.dst = esr.hdf5(mesh, 'dst', dtype=torch.long, device=device, shape=(ne,))
+        self.dst = esr.hdf5(mesh, 'dst', dtype=torch.long, device=device)
 
-        self.cells = esr.hdf5(mesh, 'cells', dtype=torch.long, device=device, shape=(nc,))
+        cells = esr.hdf5(mesh, 'cells', dtype=torch.long, device=device)
+        self.nc = cells.shape[0]
 
         self.reducer = esr.Reducer(self.src, self.nc)
         self.selector = esr.Selector(self.dst)
@@ -170,24 +158,24 @@ class Poisson(esr.Module):
         ) if x is None else x
         # b: (nc,)
         self.b = esr.Tensor(
-            esr.hdf5(poisson, 'b', dtype=torch.double, device=device, shape=(nc,)),
+            esr.hdf5(poisson, 'b', dtype=torch.double, device=device),
             mode='partition')
         # Ac: (nc,)
         self.Ac = esr.Tensor(
-            esr.hdf5(poisson, 'Ac', dtype=torch.double, device=device, shape=(nc,)),
+            esr.hdf5(poisson, 'Ac', dtype=torch.double, device=device),
             mode='partition')
         # Af: (src.shape[0],)
         self.Af = esr.Tensor(
-            esr.hdf5(poisson, 'Af', dtype=torch.double, device=device, shape=(ne,)),
+            esr.hdf5(poisson, 'Af', dtype=torch.double, device=device),
             mode='partition')
         self.A = Linsys(self.Ac, self.Af, self.selector, self.reducer)
 
         self.rho = esr.Tensor(
-            esr.hdf5(poisson, 'rho', dtype=torch.double, device=device, shape=(nc,)),
+            esr.hdf5(poisson, 'rho', dtype=torch.double, device=device),
             mode='partition')
         # centroid: (nc, 2)
         self.centroid = esr.Tensor(
-            esr.hdf5(poisson, 'centroid', dtype=torch.double, device=device, shape=(nc, 2)),
+            esr.hdf5(poisson, 'centroid', dtype=torch.double, device=device),
             mode='partition')
 
 

@@ -471,8 +471,7 @@ class TorchDistEnv(DistEnv):
     def __init__(
         self,
         device_type: str,
-        backend: Literal['gloo', 'nccl', 'mpi'],
-        torch_dist_init_kwargs={}
+        backend: Literal['gloo', 'nccl', 'mpi']
     ) -> None:
         if backend in ['gloo', 'nccl']:
             local_rank = int(os.environ['LOCAL_RANK'])
@@ -486,22 +485,6 @@ class TorchDistEnv(DistEnv):
             logger.info(f"Set default CUDA device: {comm_device}")
             torch.cuda.set_device(comm_device)
 
-        if dist.is_initialized():
-            logger.info(
-                "The user has initialized torch.distributed. Please ensure"
-                " torch.distributed communication backend is compatible with"
-                " EASIER compilation backend"
-            )
-        else:
-            logger.info("Initializing torch.distributed")
-            dist.init_process_group(backend, **torch_dist_init_kwargs)
-
-        # the `get_backend_config()` may return like "cpu:gloo,cuda:nccl"
-        logger.info(
-            f"torch.distributed"
-            f" backend={dist.get_backend_config()} rank={dist.get_rank()}"
-            f" local_rank={local_rank}"
-        )
 
         super().__init__(
             world_size=dist.get_world_size(),
@@ -775,7 +758,8 @@ class TorchDistMpiDistEnv(TorchDistEnv):
     ):
         """
         torch.distributed.all_gather_into_tensor API is not supported by
-        the MPI backend. Use all_gather to implement.
+        the MPI backend. Use all_gather to implement (causing unnecessry
+        split and concat).
         Currently we only use all_gather_into_tensor for runtime aggregators,
         we explicitly exclude cases of different sizes.
         """
@@ -814,70 +798,78 @@ class TorchDistMpiDistEnv(TorchDistEnv):
         return works
     
 
-
-_runtime_devicetype_backend: Optional[Tuple[
-    str,  # whatever device type, may be other than 'cpu' and 'cuda'
-    Literal['gloo', 'nccl', 'mpi']  # must be explicitly supported by EASIER
-]] = None
-
 _dist_envs: Dict[Tuple[str, str], DistEnv] = {}
 
-def config_runtime_dist_env(
-    comm_device_type: str,
-    comm_backend: Literal['gloo', 'nccl', 'mpi', None]
+# must be explicitly supported by EASIER
+_comm_backend: Optional[Literal['gloo', 'nccl', 'mpi']] = None
+
+# whatever device type, may be other than 'cpu' and 'cuda'
+_runtime_device_type: Optional[str] = None
+
+def set_dist_env_backend(
+    comm_backend: Literal['gloo', 'nccl', 'mpi']
 ):
-    """
-    If `comm_backend_type` is not specified, infer from the environment:
+    # TODO will data-to-send still be too big for CUDA memory, even though
+    # we move AOT-compilation data back to CPU each time after comm?
+    global _comm_backend
+    assert _comm_backend is None
+    _comm_backend = comm_backend
 
-    -   'gloo' for 'cpu', 'nccl' for 'cuda';
+def set_dist_env_device_type(
+    comm_device_type: str
+):
+    global _runtime_device_type
+    assert _runtime_device_type is None
+    _runtime_device_type = comm_device_type
 
-    If users would like to use MPIRUN plus `torch.distributed` built from
-    source with (CUDA-aware) MPI support,
-    they should specify 'mpi' explicitly.
-
-    P.S. it's possible to use MPIRUN but use `nccl` instead,
-    if users set WORLD_SIZE RANK LOCAL_RANK MASTER_ADDR MASTER_PORT etc.
-    to reconstruct the environment that `torch.distributed + nccl` needs.
-
-    TODO will data-to-send still be too big for CUDA memory, even though
-    we move AOT-compilation data back to CPU each time after comm?
-    """
-    if comm_backend is None:
-        if comm_device_type == 'cpu':
-            comm_backend = 'gloo'
-        elif comm_device_type == 'cuda':
-            comm_backend = 'nccl'
-        else:
-            raise EasierJitException(
-                "Cannot device communication backend for device_type"
-                f" {comm_device_type}, please specify `comm_backend` parameter"
-                " or EASIER_COMM_BACKEND environment variable explicitly"
-            )
-    assert comm_backend is not None
+def _get_or_init_dist_env(device_type: str) -> DistEnv:
+    if _comm_backend is None:
+        raise EasierJitException("The backend for runtime isn't set")
     
-    # DummyDistEnv is not a standard DistEnv for public use.
-    global _runtime_devicetype_backend
-    assert _runtime_devicetype_backend is None
-    _runtime_devicetype_backend = (comm_device_type, comm_backend)
+    key = (_comm_backend, device_type)
+    if key not in _dist_envs:
+        if _comm_backend == 'gloo':
+            dist_env = TorchDistGlooDistEnv(device_type, 'gloo')
+        elif _comm_backend == 'mpi':
+            dist_env = TorchDistMpiDistEnv(device_type, 'mpi')
+        else:
+            dist_env = TorchDistEnv(device_type, _comm_backend)
+
+        _dist_envs[key] = dist_env
+
+    return _dist_envs[key]
+
+
+def get_default_dist_env() -> DistEnv:
+    """
+    Get a working DistEnv on the default device of the comm backend.
+    Typically used when the device of the most performance is not decided yet
+    or may not exist.
+    """
+    if _comm_backend is None:
+        raise EasierJitException(
+            "The runtime communication backend isn't set,"
+            " please ensure `easier.init()` has been called properly."
+        )
+
+    if _comm_backend == 'nccl':
+        device_type = 'cuda'
+    else:
+        device_type = 'cpu'
+
+    return _get_or_init_dist_env(device_type)
+    
 
 def get_runtime_dist_env() -> DistEnv:
     """
     Get the DistEnv instance for communication during JIT runtime.
     This instance can be retrieved only during or after JIT process.
     """
-    if _runtime_devicetype_backend is None:
-        raise EasierJitException("The backend for runtime isn't set")
-
-    if _runtime_devicetype_backend not in _dist_envs:
-        device_type, comm_backend = _runtime_devicetype_backend
-
-        if comm_backend == 'gloo':
-            dist_env = TorchDistGlooDistEnv(device_type, 'gloo')
-        elif comm_backend == 'mpi':
-            dist_env = TorchDistMpiDistEnv(device_type, 'mpi')
-        else:
-            dist_env = TorchDistEnv(device_type, comm_backend)
-
-        _dist_envs[_runtime_devicetype_backend] = dist_env
-
-    return _dist_envs[_runtime_devicetype_backend]
+    if _comm_backend is None:
+        raise EasierJitException(
+            "The runtime communication backend isn't set,"
+            " please ensure `easier.init()` has been called properly."
+        )
+    if _runtime_device_type is None:
+        raise EasierJitException("The device type for runtime isn't set")
+    return _get_or_init_dist_env(_runtime_device_type)

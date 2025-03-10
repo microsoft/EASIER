@@ -153,7 +153,7 @@ class GMRES(esr.Module):
         self.M = M if M else lambda x: x
         self.restart = restart
 
-        self.r = esr.Tensor(torch.zeros_like(x), mode='partition')
+        self.r = esr.Tensor(esr.zeros_like(x), mode='partition')
         self.rnorm = esr.Tensor(
             torch.tensor([0.0], dtype=x.dtype, device=x.device),
             mode='replicate')
@@ -172,11 +172,11 @@ class GMRES(esr.Module):
             mode='replicate')
 
         V_shape = x.shape + (restart,)
-        self.V = esr.Tensor(torch.zeros(
+        self.V = esr.Tensor(esr.zeros(
             V_shape, dtype=x.dtype, device=x.device), mode='partition')
         self.init_V = InitV(self.r, self.rnorm, self.V)
 
-        self.w = esr.Tensor(torch.zeros_like(x), mode='partition')
+        self.w = esr.Tensor(esr.zeros_like(x), mode='partition')
         self.init_w = InitW(A, self.M, self.V, self.w)
 
         self.h = esr.Tensor(

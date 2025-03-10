@@ -10,9 +10,12 @@ import functools
 import numpy as np
 import torch
 
-from easier.core.runtime.dist_env import get_runtime_dist_env
+from easier.core.runtime.dist_env import \
+    get_default_dist_env, get_runtime_dist_env
 from easier.core.runtime.utils import check_collective_equality
 
+
+ATTRIBUTE_PLACEHOLDER = "easier_placeholder"
 
 Num: TypeAlias = Union[int, float, bool]
 
@@ -39,10 +42,6 @@ def _get_offset_exactly_nparts(orig_len: int, nparts: int, part: int
     return start, end
 
 
-class _DataLoaderMetaNotInitialized:
-    pass
-
-
 class DataLoaderBase:
     """
     The data loader for one specified data source, e.g. a HDF5 dataset.
@@ -53,23 +52,20 @@ class DataLoaderBase:
     def __init__(self) -> None:
         """
         The constructor should do simple member data storage and local tasks.
-        No collective calls should be done during construction.
+
+        When collective operations are needed, implementations should use
+        `get_default_dist_env` because the constructors are called by users
+        before `esr.compile()`.
         """
-        # Give common properties an explicitly typed value to avoid
-        # "no attribute" error when `repr` is triggered (e.g. when viewing
-        # variables in debug)
-        uninit = _DataLoaderMetaNotInitialized()
-        self.shape: Tuple[int, ...] = uninit  # type: ignore
-        self.dtype: torch.dtype = uninit  # type: ignore
+        self.shape: Tuple[int, ...]
+        self.dtype: torch.dtype
 
         # The device on which the data loader is intially defined.
         # This device configuration only take effect with "torch" JIT backend.
-        self.user_device: torch.device = uninit  # type: ignore
+        self.user_device: torch.device
 
         # e.g. "(Module).(a.b.c:Selector).idx"
-        # because `self.collective_init()` is not run when the data loader
-        # is constructed, we offer a clear hint name for users
-        # to locate the issue if reported.
+        # Decided during `esr.compile()`
         self.easier_hint_name: str
     
     def coll_check_dtype_shape_devicetype(self):
@@ -83,7 +79,7 @@ class DataLoaderBase:
         Validate if the the data of this data loader is collectively correct.
 
         Require callers to first ensure the data loders among workers are
-        actually referring to the same data set.
+        actually referring to the same data set i.e. of the same type.
         """
         raise NotImplementedError()
     
@@ -161,6 +157,32 @@ class DataLoaderBase:
         """
         raise NotImplementedError()
 
+    def get_placeholder(self) -> torch.Tensor:
+        """
+        Allocate a new placeholder torch.Tensor of the same dtype/shape/device
+        but generally consuming no memory to be compatible with cases where
+        torch.Tensor object and information is needed.
+
+        Any subclass implementation should add the attribute
+        "easier_placeholder" to indicate the result is a placeholder, too.
+
+        The placeholder is needed mainly to:
+        1.  ease the inspection of tensor properties like dtype/shape/device,
+            especially for the metadata pass.
+        2.  fulfil `esr.Tensor.__new__(cls, data)` where the underlying data
+            tensor should be set.
+        """
+        # torch.Tensor.expand can expand shape-(1,) to e.g. shape-(0,0,0),
+        # but not to ndim=0 shape ().
+        if len(self.shape) == 0:
+            ph = torch.zeros((), dtype=self.dtype, device=self.user_device)
+        else:
+            ph = torch.zeros(
+                (1,), dtype=self.dtype, device=self.user_device
+            ).expand(self.shape)  # can even expand to (0,0,0)
+
+        setattr(ph, ATTRIBUTE_PLACEHOLDER, True)
+        return ph
 
     def __repr__(self) -> str:
         """
@@ -279,68 +301,54 @@ class H5DataLoader(DataLoaderBase):
     Read the specified dataset from rank-0,
     broadcast or distribute to other ranks.
     """
-
     def __init__(self,
                  h5_file_path: str, h5_dataset_path: str,
                  *,
                  device: Union[torch.device, str],
                  # Optional reading configs for users to load the dataset.
                  dtype: Optional[torch.dtype],
-                 shape,
                  **h5_file_kwargs) -> None:
         super().__init__()
 
-        self._unexpanded_file_path = h5_file_path
+        self._file_path = os.path.expanduser(h5_file_path)
         self._dataset_path = h5_dataset_path
         self._file_kwargs = h5_file_kwargs
-
-        from easier.core.utils import logger
-        logger.fatal("REMOVE THIS DEBUG FLAG")
-        self.shape = shape
-        self.dtype = dtype
-
-        if dtype is not None:
-            self._target_dtype = dtype
-            self._target_np_dtype = torch_dtype_to_numpy_dtype(dtype)
-        else:
-            self._target_dtype = None
-            self._target_np_dtype = None
-
+        
         self.user_device = torch.device(device)
 
-    def collective_init(self) -> None:
-        check_collective_equality(
-            f"The target dtype of {self.easier_hint_name}", self._target_dtype
-        )
-        # Since H5 paths are only required on rank-0, let's not check them
-        # collectively.
-
-        dist_env = get_runtime_dist_env()
+        dist_env = get_default_dist_env()  # runtime dist env not decided yet
         if dist_env.rank == 0:
-
-            with self._dataset() as d:
-                raw_np_dtype = cast(np.dtype, d.dtype)
+            with h5py.File(self._file_path, 'r', **self._file_kwargs) as f:
+                d = f[self._dataset_path]
+                if not isinstance(d, h5py.Dataset):
+                    raise TypeError()
 
                 self.shape = tuple(d.shape)
 
-            if self._target_dtype is not None:
-                self.dtype = self._target_dtype
+            if dtype is not None:
+                self._target_np_dtype = torch_dtype_to_numpy_dtype(dtype)
+                self.dtype = dtype
             else:
-                raw_dtype = numpy_dtype_to_torch_dtype(raw_np_dtype)
-                self.dtype = raw_dtype
+                self._target_np_dtype = None
+                raw_np_dtype = cast(np.dtype, d.dtype)
+                self.dtype = numpy_dtype_to_torch_dtype(raw_np_dtype)
 
             dist_env.broadcast_object_list(0, [self.dtype, self.shape])
 
         else:
             [self.dtype, self.shape] = dist_env.broadcast_object_list(0)
-        
+
+    def collective_init(self) -> None:
         # Simply to additionally check device
         self.coll_check_dtype_shape_devicetype()
 
+        # Since H5 paths are only required on rank-0, let's not check them
+        # collectively.
+
     @contextmanager
-    def _dataset(self):
+    def _dataset_as_dtype(self):
         """
-        Temporarily open the H5 File and Dataset.
+        Temporarily open the H5 File and cast the Dataset to the target dtype.
         After reading, the dataset should be closed in time to free memeory.
 
         Only callable on rank-0.
@@ -349,15 +357,12 @@ class H5DataLoader(DataLoaderBase):
         # we haven't yet initialized the DistEnv.
         # assert rank == 0
 
-        file_path = os.path.expanduser(self._unexpanded_file_path)
-        with h5py.File(file_path, 'r', **self._file_kwargs) as f:
+        with h5py.File(self._file_path, 'r', **self._file_kwargs) as f:
             d = f[self._dataset_path]
-            if not isinstance(d, h5py.Dataset):
-                raise TypeError()
-
+            assert isinstance(d, h5py.Dataset)
             if self._target_np_dtype is not None:
                 # NOTE the result type of `astype` has no attr `.shape/dtype`.
-                d = d.astype(self._target_np_dtype)
+                d = d.astype(self._target_np_dtype)  # type: ignore
 
             yield d
     
@@ -451,7 +456,7 @@ class H5DataLoader(DataLoaderBase):
         if remainder > 0:
             nchunk += 1
 
-        with self._dataset() as d:
+        with self._dataset_as_dtype() as d:
             for i in range(nchunk):
                 start = chunk_size * i
                 end = min(orig_len, chunk_size * (i + 1))
@@ -471,7 +476,7 @@ class H5DataLoader(DataLoaderBase):
         # simply call dist.scatter.
         # Instead, we load the part for each rank once, and do P2P.
         if rank == 0:
-            with self._dataset() as d:
+            with self._dataset_as_dtype() as d:
                 for w in range(1, dist_env.world_size):
                     start, end = _get_offset_exactly_nparts(
                         orig_len, nparts=dist_env.world_size, part=w)
@@ -579,7 +584,7 @@ class H5DataLoader(DataLoaderBase):
                 return res
 
         if dist_env.rank == 0:
-            with self._dataset() as d:
+            with self._dataset_as_dtype() as d:
                 return _run(d)
         else:
             return _run(None)
@@ -590,7 +595,7 @@ class H5DataLoader(DataLoaderBase):
         EASIER requires there is only one process.
         # dist_env = get_runtime_dist_env()
         """
-        with self._dataset() as d:
+        with self._dataset_as_dtype() as d:
             t = torch.from_numpy(d[...]).to(device)
             return t
 
@@ -598,7 +603,7 @@ class H5DataLoader(DataLoaderBase):
         return ''.join([
             f'{self.__class__.__name__}(',
             # TODO we didn't escape the path strings properly
-            f'h5_file_path={self._unexpanded_file_path}, ',
+            f'h5_file_path={self._file_path}, ',
             f'h5_dataset_path={self._dataset_path}, ',
             f'dtype={self.dtype}',
             ')'
