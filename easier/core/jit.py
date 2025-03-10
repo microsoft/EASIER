@@ -26,7 +26,7 @@ from easier.core.passes.utils import \
     get_easier_objects
 from easier.core.utils import EasierJitException, logger
 from easier.core.runtime.dist_env import \
-    set_dist_env_backend, set_dist_env_device_type, get_runtime_dist_env
+    set_dist_env_runtime_backend, set_dist_env_runtime_device_type, get_runtime_dist_env
 
 
 class EasierProxy(Proxy):
@@ -295,7 +295,7 @@ def init(
             f"Argument `comm_backend` cannot be {comm_backend}"
         )
 
-    set_dist_env_backend(comm_backend)
+    set_dist_env_runtime_backend(comm_backend)
 
     logger.info("Initializing torch.distributed")
 
@@ -398,7 +398,7 @@ def compile(
         f", device_type={device_type}"
     )
 
-    set_dist_env_device_type(device_type)
+    set_dist_env_runtime_device_type(device_type)
 
     modules, graphs = passes.collectively_initialize_and_validate(top_modules)
 

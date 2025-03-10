@@ -22,7 +22,7 @@ from easier.core.passes.sparse_encoding.sparse_encoding import \
     reorder_input_by_reducer, rewrite_reducer_instance
 from easier.core.passes.dataflow_distribution import \
     HaloExchangerInserter, ReorderingSelectorInserter, HaloExchanger
-from tests.utils import assert_tensor_list_equal, mpirun_singlenode
+from tests.utils import assert_tensor_list_equal, torchrun_singlenode
 import easier
 
 
@@ -128,7 +128,7 @@ def worker__test_halo_exchanger_insertion_for_selector(
 
 
 def test_halo_exchanger_insertion_for_selector():
-    mpirun_singlenode(3, worker__test_halo_exchanger_insertion_for_selector)
+    torchrun_singlenode(3, worker__test_halo_exchanger_insertion_for_selector)
 
 
 def worker__test_halo_exchanger_insertion_for_reducer(
@@ -246,4 +246,4 @@ def worker__test_halo_exchanger_insertion_for_reducer(
 
 
 def test_halo_exchanger_insertion_for_reducer():
-    mpirun_singlenode(3, worker__test_halo_exchanger_insertion_for_reducer)
+    torchrun_singlenode(3, worker__test_halo_exchanger_insertion_for_reducer)

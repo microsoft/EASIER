@@ -19,7 +19,7 @@ from easier.core.passes.sparse_encoding.reorder_plan import \
 from easier.core.passes.sparse_encoding.sparse_encoding import \
     reorder_output_by_selector, rewrite_selector_instance, \
     reorder_input_by_reducer, rewrite_reducer_instance
-from tests.utils import assert_tensor_list_equal, mpirun_singlenode
+from tests.utils import assert_tensor_list_equal, torchrun_singlenode
 
 
 def vec(*longs):
@@ -213,7 +213,7 @@ def worker__test_reroder_rewrite_selector(
 
 
 def test_reroder_rewrite_selector():
-    mpirun_singlenode(3, worker__test_reroder_rewrite_selector)
+    torchrun_singlenode(3, worker__test_reroder_rewrite_selector)
 
 
 def worker__test_reroder_rewrite_reducer(
@@ -297,4 +297,4 @@ def worker__test_reroder_rewrite_reducer(
 
 
 def test_reroder_rewrite_reducer():
-    mpirun_singlenode(3, worker__test_reroder_rewrite_reducer)
+    torchrun_singlenode(3, worker__test_reroder_rewrite_reducer)

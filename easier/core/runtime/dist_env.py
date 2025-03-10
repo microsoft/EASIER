@@ -465,36 +465,28 @@ class DummyDistEnv(DistEnv):
 
     def barrier(self):
         return None
+    
+
+def get_local_rank_for_backend(backend: Literal['gloo', 'nccl', 'mpi']):
+    """
+    NOTE for cases of nccl backend started by mpirun, users are supposed to
+    properly set LOCAL_RANK etc. env vars.
+    """
+    if backend in ['gloo', 'nccl']:
+        local_rank = int(os.environ['LOCAL_RANK'])
+    elif backend in ['mpi']:
+        local_rank = int(os.environ["OMPI_COMM_WORLD_LOCAL_RANK"])
+    else:
+        raise EasierJitException(f"Unknown backend {backend}")
+    
+    return local_rank
 
 
 class TorchDistEnv(DistEnv):
     def __init__(
-        self,
-        device_type: str,
-        backend: Literal['gloo', 'nccl', 'mpi']
+        self, world_size: int, rank: int, local_rank: int, device: torch.device
     ) -> None:
-        if backend in ['gloo', 'nccl']:
-            local_rank = int(os.environ['LOCAL_RANK'])
-        elif backend in ['mpi']:
-            local_rank = int(os.environ["OMPI_COMM_WORLD_LOCAL_RANK"])
-        else:
-            raise EasierJitException(f"Unknown backend {backend}")
-
-        comm_device = torch.device(device_type, local_rank)
-        if device_type == 'cuda':
-            logger.info(f"Set default CUDA device: {comm_device}")
-            torch.cuda.set_device(comm_device)
-
-
-        super().__init__(
-            world_size=dist.get_world_size(),
-            rank=dist.get_rank(),
-            local_rank=local_rank,
-            device=comm_device
-        )
-
-        self.backend = backend
-
+        super().__init__(world_size, rank, local_rank, device)
 
     def broadcast(self, src: int, tensor: Optional[torch.Tensor] = None,
                   *,
@@ -801,40 +793,72 @@ class TorchDistMpiDistEnv(TorchDistEnv):
 _dist_envs: Dict[Tuple[str, str], DistEnv] = {}
 
 # must be explicitly supported by EASIER
-_comm_backend: Optional[Literal['gloo', 'nccl', 'mpi']] = None
+_runtime_backend: Optional[Literal['gloo', 'nccl', 'mpi']] = None
 
 # whatever device type, may be other than 'cpu' and 'cuda'
 _runtime_device_type: Optional[str] = None
 
-def set_dist_env_backend(
+def set_dist_env_runtime_backend(
     comm_backend: Literal['gloo', 'nccl', 'mpi']
 ):
     # TODO will data-to-send still be too big for CUDA memory, even though
     # we move AOT-compilation data back to CPU each time after comm?
-    global _comm_backend
-    assert _comm_backend is None
-    _comm_backend = comm_backend
+    global _runtime_backend
+    assert _runtime_backend is None
+    _runtime_backend = comm_backend
 
-def set_dist_env_device_type(
+def set_dist_env_runtime_device_type(
     comm_device_type: str
 ):
+    if _runtime_backend is None:
+        raise EasierJitException(
+            "The runtime communication backend isn't set,"
+            " please ensure `easier.init()` has been called properly."
+        )
+
     global _runtime_device_type
     assert _runtime_device_type is None
     _runtime_device_type = comm_device_type
 
+    local_rank = get_local_rank_for_backend(_runtime_backend)
+
+    if comm_device_type == 'cpu':
+        pass
+    elif comm_device_type == 'cuda':
+        cuda_device = torch.device('cuda', local_rank)
+        logger.info(f"Set default CUDA device: {cuda_device}")
+        torch.cuda.set_device(cuda_device)
+    else:
+        # TODO although torch.distributed supports custom added backends,
+        # EASIER cannot directly use them due to the inconsistent supports on
+        # each comm API, therefore we don't actually allow devices beyond
+        # what are supported by GLOO/NCCL/MPI backends, that are: CUDA & CUDA.
+        logger.warning(
+            f"The device type {comm_device_type} is not known by EASIER,"
+            " please ensure the data are properly assigned to each device"
+        )
+        
+
+
 def _get_or_init_dist_env(device_type: str) -> DistEnv:
-    if _comm_backend is None:
+    if _runtime_backend is None:
         raise EasierJitException("The backend for runtime isn't set")
     
-    key = (_comm_backend, device_type)
+    world_size = dist.get_world_size()
+    rank = dist.get_rank()
+    local_rank = get_local_rank_for_backend(_runtime_backend)
+    comm_device = torch.device(device_type, local_rank)
+    
+    key = (_runtime_backend, device_type)
     if key not in _dist_envs:
-        if _comm_backend == 'gloo':
-            dist_env = TorchDistGlooDistEnv(device_type, 'gloo')
-        elif _comm_backend == 'mpi':
-            dist_env = TorchDistMpiDistEnv(device_type, 'mpi')
+        if _runtime_backend == 'gloo':
+            dist_env_cls = TorchDistGlooDistEnv
+        elif _runtime_backend == 'mpi':
+            dist_env_cls = TorchDistMpiDistEnv
         else:
-            dist_env = TorchDistEnv(device_type, _comm_backend)
+            dist_env_cls = TorchDistEnv
 
+        dist_env = dist_env_cls(world_size, rank, local_rank, comm_device)
         _dist_envs[key] = dist_env
 
     return _dist_envs[key]
@@ -846,13 +870,13 @@ def get_default_dist_env() -> DistEnv:
     Typically used when the device of the most performance is not decided yet
     or may not exist.
     """
-    if _comm_backend is None:
+    if _runtime_backend is None:
         raise EasierJitException(
             "The runtime communication backend isn't set,"
             " please ensure `easier.init()` has been called properly."
         )
 
-    if _comm_backend == 'nccl':
+    if _runtime_backend == 'nccl':
         device_type = 'cuda'
     else:
         device_type = 'cpu'
@@ -865,7 +889,7 @@ def get_runtime_dist_env() -> DistEnv:
     Get the DistEnv instance for communication during JIT runtime.
     This instance can be retrieved only during or after JIT process.
     """
-    if _comm_backend is None:
+    if _runtime_backend is None:
         raise EasierJitException(
             "The runtime communication backend isn't set,"
             " please ensure `easier.init()` has been called properly."

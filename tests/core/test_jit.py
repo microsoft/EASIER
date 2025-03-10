@@ -15,7 +15,7 @@ from easier.core.passes.utils import OrderedSet
 from easier.examples import Poisson
 from easier.core.runtime.dist_env import DummyDistEnv
 
-from ..utils import mpirun_singlenode, get_random_str
+from ..utils import torchrun_singlenode, get_random_str
 
 
 @pytest.fixture(scope='function')
@@ -276,11 +276,11 @@ class TestJittedUsage:
         pytest.param('gpu', marks=when_ngpus_ge_2)
     ])
     def test_collect(self, dev_type: str, jit_backend: str):
-        mpirun_singlenode(2, worker__test_collect, (dev_type, jit_backend))
+        torchrun_singlenode(2, worker__test_collect, (dev_type, jit_backend))
 
     @pytest.mark.parametrize('dev_type', [
         'cpu',
         pytest.param('cuda', marks=when_ngpus_ge_2)
     ])
     def test_save(self, dev_type: str):
-        mpirun_singlenode(2, worker__test_save, (dev_type,))
+        torchrun_singlenode(2, worker__test_save, (dev_type,))

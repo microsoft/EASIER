@@ -15,7 +15,7 @@ from easier.core.runtime.data_loader import \
     DataLoaderBase, InMemoryTensorLoader, H5DataLoader, FulledTensorLoader, \
     ArangeTensorLoader
 
-from ..utils import mpirun_singlenode, get_random_str
+from ..utils import torchrun_singlenode, get_random_str
 
 
 def get_in_memory_tensor_loader(
@@ -114,12 +114,12 @@ class TestDataLoader:
 
     def test_load_by_rank(self, data_loader_ctor, dtype: torch.dtype,
                           device_type: str):
-        mpirun_singlenode(2, worker__test_load_by_rank,
+        torchrun_singlenode(2, worker__test_load_by_rank,
                           (data_loader_ctor, dtype, device_type))
 
     def test_load_by_index(self, data_loader_ctor, dtype: torch.dtype,
                            device_type: str):
-        mpirun_singlenode(2, worker__test_load_by_index,
+        torchrun_singlenode(2, worker__test_load_by_index,
                           (data_loader_ctor, dtype, device_type))
 
     @pytest.mark.parametrize('target_device_type', [
@@ -207,11 +207,11 @@ class TestFulledLoader:
         assert torch.equal(torch.full([3, 2], 42, dtype=dtype), chunks[2])
 
     def test_load_by_rank(self, dtype: torch.dtype, device_type: str):
-        mpirun_singlenode(2, worker__test_load_full_by_rank,
+        torchrun_singlenode(2, worker__test_load_full_by_rank,
                           (dtype, device_type))
 
     def test_load_by_index(self, dtype: torch.dtype, device_type: str):
-        mpirun_singlenode(2, worker__test_load_full_by_index,
+        torchrun_singlenode(2, worker__test_load_full_by_index,
                           (dtype, device_type))
 
 
@@ -279,9 +279,9 @@ class TestArangeLoader:
         assert torch.equal(torch.arange(28, 34, 2, dtype=dtype), chunks[2])
 
     def test_load_by_rank(self, dtype: torch.dtype, device_type: str):
-        mpirun_singlenode(2, worker__test_load_arange_by_rank,
+        torchrun_singlenode(2, worker__test_load_arange_by_rank,
                           (dtype, device_type))
 
     def test_load_by_index(self, dtype: torch.dtype, device_type: str):
-        mpirun_singlenode(2, worker__test_load_arange_by_index,
+        torchrun_singlenode(2, worker__test_load_arange_by_index,
                           (dtype, device_type))

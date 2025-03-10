@@ -19,7 +19,7 @@ from easier.core.distpart import CoarseningLevel, DistConfig, \
 from easier.core.runtime.dist_env import get_runtime_dist_env
 import easier.cpp_extension as _C
 
-from ..utils import mpirun_singlenode, assert_tensor_list_equal
+from ..utils import torchrun_singlenode, assert_tensor_list_equal
 
 
 def _C_hem(
@@ -179,7 +179,7 @@ def worker__test_gather_csr_rowptr(local_rank: int, world_size: int):
 
 
 def test_gather_csr_rowptr():
-    mpirun_singlenode(4, worker__test_gather_csr_rowptr)
+    torchrun_singlenode(4, worker__test_gather_csr_rowptr)
 
 
 class TestCoarserVertexID:
@@ -472,7 +472,7 @@ def worker__test_row_exchanger(local_rank: int, world_size: int):
 
 
 def test_row_exchanger():
-    mpirun_singlenode(3, worker__test_row_exchanger)
+    torchrun_singlenode(3, worker__test_row_exchanger)
 
 
 def worker__test_exchange_merge_adj(local_rank: int, world_size: int):
@@ -582,7 +582,7 @@ def worker__test_exchange_merge_adj(local_rank: int, world_size: int):
 
 
 def test_exchange_merge_adj():
-    mpirun_singlenode(3, worker__test_exchange_merge_adj)
+    torchrun_singlenode(3, worker__test_exchange_merge_adj)
 
 
 def worker__test_preserve_symmetry(local_rank, world_size):
@@ -659,7 +659,7 @@ def worker__test_preserve_symmetry(local_rank, world_size):
 
 
 def test_preserve_symmetry():
-    mpirun_singlenode(3, worker__test_preserve_symmetry)
+    torchrun_singlenode(3, worker__test_preserve_symmetry)
 
 
 def worker__test_uncoarsen_level(local_rank: int, world_size: int):
@@ -689,4 +689,4 @@ def worker__test_uncoarsen_level(local_rank: int, world_size: int):
 
 
 def test_uncoarsen_level():
-    mpirun_singlenode(3, worker__test_uncoarsen_level)
+    torchrun_singlenode(3, worker__test_uncoarsen_level)

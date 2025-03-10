@@ -15,7 +15,7 @@ from easier.examples.models import Poisson
 import easier as esr
 
 from ..utils import \
-    mpirun_singlenode, get_random_str, assert_tensor_list_equal, \
+    torchrun_singlenode, get_random_str, assert_tensor_list_equal, \
     when_ngpus_ge_2
 
 
@@ -190,9 +190,9 @@ class TestModuleDump:
     def test_jitted_dump(self, dev_type):
         dumpdir = os.path.join(tempfile.gettempdir(), "easier", "tests",
                                get_random_str())
-        mpirun_singlenode(2, worker__test_jitted_dump, (dev_type, dumpdir,))
+        torchrun_singlenode(2, worker__test_jitted_dump, (dev_type, dumpdir,))
 
     def test_jitted_shared(self, dev_type):
         dumpdir = os.path.join(tempfile.gettempdir(), "easier", "tests",
                                get_random_str())
-        mpirun_singlenode(2, worker__test_jitted_shared, (dev_type, dumpdir,))
+        torchrun_singlenode(2, worker__test_jitted_shared, (dev_type, dumpdir,))
