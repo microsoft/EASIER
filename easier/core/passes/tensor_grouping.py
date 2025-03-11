@@ -48,9 +48,9 @@ class EasierTensorGroup:
 
 def _get_tensordef_batch_size(tensordef: EasierTensorDef):
     if isinstance(tensordef, esr.Tensor):
-        n = tensordef.easier_data_loader.shape[0]
+        n = tensordef.shape[0]
     elif isinstance(tensordef, esr.Selector):
-        n = tensordef.easier_data_loader.shape[0]
+        n = tensordef.idx.shape[0]
     elif isinstance(tensordef, esr.Reducer):
         n = tensordef.n
     else:

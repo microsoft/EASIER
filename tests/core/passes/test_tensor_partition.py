@@ -464,6 +464,7 @@ def test_sync_parmetis_result(mock_mpi_dist_env):
                              [g7_w2_to_w0, g7_w2_to_w1, g7_w2_to_w2])
 
 
+@pytest.mark.usefixtures('dummy_dist_env')
 def test_evenly_mode():
     class M(easier.Module):
         def __init__(self):

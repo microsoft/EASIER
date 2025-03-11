@@ -39,6 +39,7 @@ def worker__test_halo_exchanger_insertion_for_selector(
 ):
     idx = vec(0)  # doesn't matter
     selector = Selector(idx)
+    selector.easier_hint_name = 'targetSelector'
 
     input_elempart_idxes = torch.arange(18).split(6)
     input_elempart = ElemPart(input_elempart_idxes[local_rank], [6, 6, 6])
@@ -99,7 +100,6 @@ def worker__test_halo_exchanger_insertion_for_selector(
     graph = EasierTracer().trace(m)
     [jm], [graph] = passes.group_tensors([m], [graph])
 
-    _JitRuntimeDistEnv.config_runtime_dist_env('cpu')
     elemparts = {m.v.easier_tensor_group: output_elempart}
     HaloExchangerInserter(
         [jm], [graph], elemparts,  # type: ignore
@@ -136,6 +136,7 @@ def worker__test_halo_exchanger_insertion_for_reducer(
 ):
     idx = torch.arange(6)  # doesn't matter
     reducer = Reducer(idx, 6)  # assume to be local Reducer to pass metaprop
+    reducer.easier_hint_name = 'targetReducer'
 
     class M(easier.Module):
         def __init__(self):
@@ -202,7 +203,6 @@ def worker__test_halo_exchanger_insertion_for_reducer(
             torch.arange(6)
         ])
 
-    _JitRuntimeDistEnv.config_runtime_dist_env('cpu')
     elemparts = {m.v.easier_tensor_group: output_elempart}
     HaloExchangerInserter(
         [jm], [graph], elemparts,  # type: ignore

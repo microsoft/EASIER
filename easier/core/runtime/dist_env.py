@@ -817,14 +817,14 @@ def set_dist_env_runtime_device_type(
         )
 
     global _runtime_device_type
-    assert _runtime_device_type is None
+    # TODO leaving this unchecked enable multiple runs of esr.compile
+    # assert _runtime_device_type is None
     _runtime_device_type = comm_device_type
-
-    local_rank = get_local_rank_for_backend(_runtime_backend)
 
     if comm_device_type == 'cpu':
         pass
     elif comm_device_type == 'cuda':
+        local_rank = get_local_rank_for_backend(_runtime_backend)
         cuda_device = torch.device('cuda', local_rank)
         logger.info(f"Set default CUDA device: {cuda_device}")
         torch.cuda.set_device(cuda_device)

@@ -150,9 +150,6 @@ class TestCppDistPart:
 
 
 def worker__test_gather_csr_rowptr(local_rank: int, world_size: int):
-    from easier.core.runtime.dist_env import set_runtime_dist_env_backend
-    set_runtime_dist_env_backend('cpu')
-
     colidx = vec(1, 2, 3, 4, 5, 6)
     rowptr = vec(0, 3, 6)
     csr = gather_csr_graph(

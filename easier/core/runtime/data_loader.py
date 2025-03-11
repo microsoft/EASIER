@@ -333,10 +333,13 @@ class H5DataLoader(DataLoaderBase):
                 raw_np_dtype = cast(np.dtype, d.dtype)
                 self.dtype = numpy_dtype_to_torch_dtype(raw_np_dtype)
 
-            dist_env.broadcast_object_list(0, [self.dtype, self.shape])
+            dist_env.broadcast_object_list(
+                0, [self._target_np_dtype, self.dtype, self.shape]
+            )
 
         else:
-            [self.dtype, self.shape] = dist_env.broadcast_object_list(0)
+            [self._target_np_dtype, self.dtype, self.shape] = \
+                dist_env.broadcast_object_list(0)
 
     def collective_init(self) -> None:
         # Simply to additionally check device

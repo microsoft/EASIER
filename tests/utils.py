@@ -3,7 +3,7 @@
 
 import random
 import string
-from typing import List
+from typing import List, Literal
 from unittest.mock import patch
 import os
 import pytest
@@ -14,6 +14,7 @@ from torch.multiprocessing.spawn import spawn
 
 import easier.core.runtime.dist_env as _DM
 from easier.core.utils import get_random_str
+from easier import init
 
 have_cuda = pytest.mark.skipif(
     not torch.cuda.is_available(),
@@ -31,7 +32,8 @@ when_ngpus_ge_2 = pytest.mark.skipif(
 
 
 def _torchrun_spawn_target(
-    local_rank: int, world_size: int, func, args, kwargs
+    local_rank: int, world_size: int, func, args, kwargs,
+    init_type: Literal['none', 'dist', 'cpu', 'cuda']
 ):
     os.environ["EASIER_LOG_LEVEL"] = "DEBUG"
 
@@ -42,23 +44,55 @@ def _torchrun_spawn_target(
 
     # Fake torch.distributed.is_torchelastic_launched() to return True
     os.environ["TORCHELASTIC_RUN_ID"] = "EASIER_UNIT_TEST_RUN"
+    
+    if init_type in ['cpu', 'cuda']:
+        init(
+            'gloo',
+            init_method='tcp://localhost:24689',
+            world_size=world_size,
+            rank=local_rank
+        )
+        _DM.set_dist_env_runtime_device_type(init_type)
 
-    # Fake esr.init('gloo') for both CPU and CUDA
-    dist.init_process_group(
-        'gloo',
-        init_method='tcp://localhost:24689',
-        world_size=world_size,
-        rank=local_rank
-    )
+    if init_type == 'dist':
+        init(
+            'gloo',
+            init_method='tcp://localhost:24689',
+            world_size=world_size,
+            rank=local_rank
+        )
+    
+    else:
+        assert init_type == 'none'
 
     func(local_rank, world_size, *args, **kwargs)
 
-def torchrun_singlenode(nprocs: int, func, args=(), kwargs={}):
+def torchrun_singlenode(
+    nprocs: int, func, args=(), kwargs={},
+    init_type: Literal['none', 'dist', 'cpu', 'cuda']='cpu'
+):
     """
     To see exception details, run unit tests in the command line with
     `pytest -s tests/.../test.py::test_func` where `-s` captures stderr.
+
+    Args:
+    - init_type:
+        'none': no special initialization is done, a worker process is just
+            like a brand new torchrun subprocess, with only env vars set.
+        'dist': `easier.init('gloo')` is called, which does:
+            - torch.distributed.init_process_group('gloo');
+            - dist_env.set_runtime_backend('gloo');
+            - get_default_dist_env() is callable and returns GLOO+CPU DistEnv;
+        'cpu'/'cuda': additional to the 'dist' case:
+            - dist_env.set_runtime_device_type('cpu' or 'cuda') is called;
+            - get_runtime_dist_env() is callable.
     """
-    spawn(_torchrun_spawn_target, (nprocs, func, args, kwargs), nprocs=nprocs)
+    spawn(
+        _torchrun_spawn_target,
+        (nprocs, func, args, kwargs, init_type),
+        nprocs=nprocs,
+        join=True
+    )
 
 def assert_tensor_list_equal(la: List[torch.Tensor],
                              lb: List[torch.Tensor]):

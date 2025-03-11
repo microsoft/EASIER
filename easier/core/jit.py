@@ -407,10 +407,11 @@ def compile(
         m.partition_mode = partition_mode
 
         raw_g = Graph()
-        # NOTE: graph_copy doesn't insert the output Node but returns it,
-        # since we don't do the insertion raw_g will not have the `return None`
-        # output Node, but it's ok for esr.Modules.
-        raw_g.graph_copy(g, {})
+        # NOTE: graph_copy doesn't insert the output Node but returns the arg
+        # Node, additionally adding the output Node to make the graph format
+        # consistent, no matter it's loaded or newly traced.
+        retval = raw_g.graph_copy(g, {})
+        raw_g.output(retval)
         m.easier_raw_graph = raw_g
 
     loaded_graphs = None

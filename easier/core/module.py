@@ -220,6 +220,8 @@ def _resolve_data_loader(arg) -> DataLoaderBase:
             " to initialize easier.Tensor"
         )
     elif isinstance(arg, torch.Tensor):
+        # This does not require it to be collective. The only collective ctors
+        # e.g. H5DataLoader/esr.hdf5() are always called explicitly by users.
         return InMemoryTensorLoader(arg)
     else:
         raise TypeError(f"Unknown data type {type(arg)}")

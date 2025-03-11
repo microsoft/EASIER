@@ -10,6 +10,7 @@ from easier.numeric import solver
 from easier.examples.models import Poisson, Circuit, Poisson1D
 
 
+@pytest.mark.usefixtures('dummy_dist_env')
 class TestLinearSolver:
 
     backend_list = ['torch', 'cpu', 'gpu'] if torch.cuda.is_available() \

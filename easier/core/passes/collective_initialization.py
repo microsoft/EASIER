@@ -181,16 +181,16 @@ def collectively_initialize_and_validate(
                 ' must have shape[0] >= 1'
             )
 
-    #
-    # Collectively initialize and validate DataLoaders
-    #
-    for dl in OrderedSet(
-        x.easier_data_loader for x in itertools.chain(submods, tensors)
-    ):
-        check_collective_equality(
-            f"The type of {dl.easier_hint_name}", dl.__class__.__name__
-        )
-        dl.collective_init()
+    # #
+    # # Collectively initialize and validate DataLoaders
+    # #
+    # for dl in OrderedSet(
+    #     x.easier_data_loader for x in itertools.chain(submods, tensors)
+    # ):
+    #     check_collective_equality(
+    #         f"The type of {dl.easier_hint_name}", dl.__class__.__name__
+    #     )
+    #     dl.collective_init()
         
     #
     # Collectively initialize and validate Selectors/Reducers

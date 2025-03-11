@@ -92,6 +92,11 @@ class CsrSelectorInserter(EasierInterpreter[None]):
                 dtype=submod.easier_data_loader.dtype,
                 device=submod.easier_data_loader.user_device
             ))
+            csr_selector.easier_hint_name = \
+                f"{submod.easier_hint_name}.{selector_attrname}"
+            # TODO if we reuse the Selector instance the naming will be
+            # as consistent as dataflow_distribution
+            # f"{submod.easier_hint_name}.reorderingSelector"
 
             self.current_module.add_module(selector_attrname, csr_selector)
 

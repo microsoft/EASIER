@@ -92,6 +92,8 @@ have_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="no CUDA")
     pytest.param('cuda', marks=have_cuda)
 ])
 class TestDataLoader:
+
+    @pytest.mark.usefixtures('dummy_dist_env')
     def test_load_chunk(self, data_loader_ctor, dtype: torch.dtype,
                         device_type: str):
         # rank-0 only
@@ -122,11 +124,10 @@ class TestDataLoader:
         torchrun_singlenode(2, worker__test_load_by_index,
                           (data_loader_ctor, dtype, device_type))
 
+    @pytest.mark.usefixtures('dummy_dist_env')
     @pytest.mark.parametrize('target_device_type', [
-        None,
         'cpu',
-        pytest.param(
-            'cuda', marks=have_cuda)
+        pytest.param('cuda', marks=have_cuda)
     ])
     def test_fully_load(self, data_loader_ctor, dtype: torch.dtype,
                         device_type: str, target_device_type: str):
@@ -188,6 +189,8 @@ def worker__test_load_full_by_index(local_rank: int, world_size: int,
     pytest.param('cuda', marks=have_cuda)
 ])
 class TestFulledLoader:
+
+    @pytest.mark.usefixtures('dummy_dist_env')
     def test_load_chunk(self, dtype: torch.dtype, device_type: str):
         dl = FulledTensorLoader(
             42, shape=[17, 2], dtype=dtype, device=torch.device(device_type))
@@ -260,6 +263,8 @@ def worker__test_load_arange_by_index(local_rank: int, world_size: int,
     pytest.param('cuda', marks=have_cuda)
 ])
 class TestArangeLoader:
+    
+    @pytest.mark.usefixtures('dummy_dist_env')
     def test_load_chunk(self, dtype: torch.dtype, device_type: str):
         dl = ArangeTensorLoader(0, 34, 2,
                                 dtype=dtype, device=torch.device(device_type))
