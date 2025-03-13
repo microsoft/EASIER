@@ -54,8 +54,11 @@ def hdf5(
 
 
 def full(
-    size: Sequence[int], fill_value, *,
-    dtype: Optional[torch.dtype] = None, device=None
+    size: Sequence[int],
+    fill_value,
+    *,
+    dtype: Optional[torch.dtype] = None,
+    device: Optional[Union[torch.device, str]] = None
 ):
     """
     Args:
@@ -80,23 +83,12 @@ def full(
         device = 'cpu'
     return FulledTensorLoader(fill_value, size, dtype, device)
 
-def full_like(
-    input: Union[DataLoaderBase, torch.Tensor], fill_value, *,
-    dtype: Optional[torch.dtype] = None, device=None
+
+def zeros(
+    size: Sequence[int],
+    dtype: Optional[torch.dtype] = None,
+    device: Optional[Union[torch.device, str]] = None
 ):
-    """
-    Args:
-    - dtype: Optional[torch.dtype]:
-        If None, the default dtype is `torch.int64` for integer `fill_value`
-        and `torch.float64` for floating-poin `fill_value`.
-    - device: Optional[torch.Device]:
-        If None, the default device is `"cpu"`.
-    """
-    size = input.shape
-    return full(size, fill_value, dtype=dtype, device=device)
-
-
-def zeros(size: Sequence[int], dtype=None, device=None):
     # TODO torch.zeros/ones can have `size` be both tuple and `*size:int`.
     """
     Args:
@@ -113,22 +105,11 @@ def zeros(size: Sequence[int], dtype=None, device=None):
     return full(size, 0, dtype=dtype, device=device)
 
 
-def zeros_like(
-    input: Union[DataLoaderBase, torch.Tensor],
-    dtype: Optional[torch.dtype] = None, device=None
+def ones(
+    size: Sequence[int],
+    dtype: Optional[torch.dtype] = None,
+    device: Optional[Union[torch.device, str]] = None
 ):
-    """
-    Args:
-    - dtype: Optional[torch.dtype]:
-        If None, the default dtype is `torch.int64` for integer `fill_value`
-        and `torch.float64` for floating-poin `fill_value`.
-    - device: Optional[torch.Device]:
-        If None, the default device is `"cpu"`.
-    """
-    return zeros(input.shape, dtype=dtype, device=device)
-
-
-def ones(size: Sequence[int], dtype=None, device=None):
     """
     Args:
     - dtype: Optional[torch.dtype]:
@@ -143,9 +124,27 @@ def ones(size: Sequence[int], dtype=None, device=None):
         device = 'cpu'
     return full(size, 1, dtype=dtype, device=device)
 
-def ones_like(
+def _dtype_device_like(
     input: Union[DataLoaderBase, torch.Tensor],
-    dtype: Optional[torch.dtype] = None, device=None
+    dtype: Optional[torch.dtype] = None,
+    device: Optional[Union[torch.device, str]] = None
+) -> Tuple[torch.dtype, torch.device]:
+    if dtype is None:
+        dtype = input.dtype
+
+    if device is None:
+        device = input.device
+    device = torch.device(device)
+
+    return dtype, device
+    
+
+def full_like(
+    input: Union[DataLoaderBase, torch.Tensor], 
+    fill_value,
+    *,
+    dtype: Optional[torch.dtype] = None,
+    device: Optional[Union[torch.device, str]] = None
 ):
     """
     Args:
@@ -155,6 +154,40 @@ def ones_like(
     - device: Optional[torch.Device]:
         If None, the default device is `"cpu"`.
     """
+    size = input.shape
+    dtype, device = _dtype_device_like(input, dtype, device)
+    return full(size, fill_value, dtype=dtype, device=device)
+
+def zeros_like(
+    input: Union[DataLoaderBase, torch.Tensor],
+    dtype: Optional[torch.dtype] = None,
+    device: Optional[Union[torch.device, str]] = None
+):
+    """
+    Args:
+    - dtype: Optional[torch.dtype]:
+        If None, the default dtype is `torch.int64` for integer `fill_value`
+        and `torch.float64` for floating-poin `fill_value`.
+    - device: Optional[torch.Device]:
+        If None, the default device is `"cpu"`.
+    """
+    dtype, device = _dtype_device_like(input, dtype, device)
+    return zeros(input.shape, dtype=dtype, device=device)
+
+def ones_like(
+    input: Union[DataLoaderBase, torch.Tensor],
+    dtype: Optional[torch.dtype] = None,
+    device: Optional[Union[torch.device, str]] = None
+):
+    """
+    Args:
+    - dtype: Optional[torch.dtype]:
+        If None, the default dtype is `torch.int64` for integer `fill_value`
+        and `torch.float64` for floating-poin `fill_value`.
+    - device: Optional[torch.Device]:
+        If None, the default device is `"cpu"`.
+    """
+    dtype, device = _dtype_device_like(input, dtype, device)
     return ones(input.shape, dtype=dtype, device=device)
 
 
@@ -259,7 +292,7 @@ def _dist_collect(tensor: 'Tensor') -> torch.Tensor:
     for part, idx in zip(parts, idxes):
         synced[idx] = part
 
-    return synced.to(device=tensor.easier_data_loader.user_device)
+    return synced.to(device=tensor.easier_data_loader.device)
 
 
 IdxStatus: TypeAlias = Literal['placeholder', 'partially_loaded', 'rewritten']
@@ -477,7 +510,7 @@ class Tensor(nn.Parameter):
         if self.elempart is not None:
             return _dist_collect(self)
         else:
-            return self.data.to(self.easier_data_loader.user_device, copy=True)
+            return self.data.to(self.easier_data_loader.device, copy=True)
 
     def save(self, h5_file_path, h5_dataset_path, **h5_file_kwargs) -> None:
         if not self.easier_data_ready:

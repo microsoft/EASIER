@@ -62,7 +62,7 @@ class DataLoaderBase:
 
         # The device on which the data loader is intially defined.
         # This device configuration only take effect with "torch" JIT backend.
-        self.user_device: torch.device
+        self.device: torch.device
 
         # e.g. "(Module).(a.b.c:Selector).idx"
         # Decided during `esr.compile()`
@@ -71,7 +71,7 @@ class DataLoaderBase:
     def coll_check_dtype_shape_devicetype(self):
         check_collective_equality(
             f"Tensor properties of {self.easier_hint_name}",
-            [self.dtype, self.shape, self.user_device.type]
+            [self.dtype, self.shape, self.device.type]
         )
 
     def collective_init(self) -> None:
@@ -175,10 +175,10 @@ class DataLoaderBase:
         # torch.Tensor.expand can expand shape-(1,) to e.g. shape-(0,0,0),
         # but not to ndim=0 shape ().
         if len(self.shape) == 0:
-            ph = torch.zeros((), dtype=self.dtype, device=self.user_device)
+            ph = torch.zeros((), dtype=self.dtype, device=self.device)
         else:
             ph = torch.zeros(
-                (1,), dtype=self.dtype, device=self.user_device
+                (1,), dtype=self.dtype, device=self.device
             ).expand(self.shape)  # can even expand to (0,0,0)
 
         setattr(ph, ATTRIBUTE_PLACEHOLDER, True)
@@ -212,7 +212,7 @@ class InMemoryTensorLoader(DataLoaderBase):
 
         self.dtype = tensor.dtype
         self.shape = tensor.shape
-        self.user_device = tensor.device
+        self.device = tensor.device
 
         # The data is always stored as CPU tensor
         self.tensor = tensor.cpu()
@@ -314,7 +314,7 @@ class H5DataLoader(DataLoaderBase):
         self._dataset_path = h5_dataset_path
         self._file_kwargs = h5_file_kwargs
         
-        self.user_device = torch.device(device)
+        self.device = torch.device(device)
 
         dist_env = get_default_dist_env()  # runtime dist env not decided yet
         if dist_env.rank == 0:
@@ -620,7 +620,7 @@ class FulledTensorLoader(DataLoaderBase):
         self.value = value
         self.shape = tuple(shape)
         self.dtype = dtype
-        self.user_device = torch.device(device)
+        self.device = torch.device(device)
     
     def collective_init(self) -> None:
         self.coll_check_dtype_shape_devicetype()
@@ -705,7 +705,7 @@ class ArangeTensorLoader(DataLoaderBase):
         length = len(range(start, end, step))
         self.shape = (length,)
         self.dtype = dtype
-        self.user_device = torch.device(device)
+        self.device = torch.device(device)
 
 
     def collective_init(self) -> None:

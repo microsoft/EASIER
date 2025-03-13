@@ -90,7 +90,7 @@ class CsrSelectorInserter(EasierInterpreter[None]):
             csr_selector = esr.Selector(esr.arange(
                 submod.easier_data_loader.shape[0],
                 dtype=submod.easier_data_loader.dtype,
-                device=submod.easier_data_loader.user_device
+                device=submod.easier_data_loader.device
             ))
             csr_selector.easier_hint_name = \
                 f"{submod.easier_hint_name}.{selector_attrname}"

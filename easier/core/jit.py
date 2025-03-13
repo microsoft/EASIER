@@ -135,7 +135,7 @@ def infer_and_enforce_unique_device_type(top_modules: List[esr.Module]) -> str:
     )
     device_type_grouped: Dict[str, List[str]] = more_itertools.map_reduce(
         dls,
-        keyfunc=lambda kv: kv[0].user_device.type,
+        keyfunc=lambda kv: kv[0].device.type,
         valuefunc=lambda kv: kv[1][0],
         reducefunc=lambda name_list: name_list
     )
