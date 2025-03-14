@@ -26,6 +26,7 @@ from easier.core.passes.utils import \
     get_easier_tensors
 from easier.core.runtime.dist_env import \
     get_runtime_dist_env
+from easier.core.distpart import distpart_kway, DistConfig
 from easier.core.utils import EasierJitException, logger
 
 # METIS adj weights are ints
@@ -94,43 +95,15 @@ def parallel_partition_graph(
     graph.setdiag(0, off_diag)
     graph = graph.tocsr()
 
-    metis_impl = os.environ.get('EASIER_METIS_IMPL', 'EASIER').upper()
-    if metis_impl == 'EASIER':
-        from easier.core.distpart import distpart_kway, DistConfig
-        local_membership = distpart_kway(
-            DistConfig(
-                int(vtxdist[-1]),
-                (vtxdist[1:] - vtxdist[:-1]).tolist()
-            ),
-            torch.from_numpy(graph.indptr).to(torch.int64),
-            torch.from_numpy(graph.indices).to(torch.int64),
-            torch.from_numpy(graph.data).to(torch.int64)
-        )
-
-    elif metis_impl == 'PARMETIS':
-        from mgmetis import parmetis
-        from mpi4py import MPI
-        import time
-        comm: MPI.Intracomm = MPI.COMM_WORLD
-        parmetis_start = time.time()
-        # `ncuts` is already summed up and replicated;
-        # `local_membership` works like this:
-        #   the result of`AllGather(local_membership)` is the result of
-        #   non-distributed version of graph partitioning.
-        ncuts, local_membership = parmetis.part_kway(
-            comm.size, graph.indptr, graph.indices, vtxdist, comm,
-            adjwgt=graph.data)
-
-        parmetis_latency = time.time() - parmetis_start
-        logger.debug(
-            f"ParMetis finished: ncuts={ncuts},"
-            f" total time: {parmetis_latency}sec"
-        )
-
-        local_membership = torch.tensor(local_membership)
-
-    else:
-        raise EasierJitException('Unknown Metis implementation')
+    local_membership = distpart_kway(
+        DistConfig(
+            int(vtxdist[-1]),
+            (vtxdist[1:] - vtxdist[:-1]).tolist()
+        ),
+        torch.from_numpy(graph.indptr).to(torch.int64),
+        torch.from_numpy(graph.indices).to(torch.int64),
+        torch.from_numpy(graph.data).to(torch.int64)
+    )
 
     return local_membership
 
