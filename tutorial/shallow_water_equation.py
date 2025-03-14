@@ -11,7 +11,7 @@ import torch.distributed
 from tqdm import tqdm
 
 import easier as esr
-from easier.examples.mesh import get_triangular_mesh, get_triangular_mesh
+from easier.examples.mesh import get_triangular_mesh
 
 
 class ShallowWaterAssembler:

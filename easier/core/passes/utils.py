@@ -446,10 +446,10 @@ def get_easier_tensors(
     return tensors
 
 
-
 EasierObj: TypeAlias = Union[
     esr.Module, esr.Selector, esr.Reducer, esr.Tensor, esr.DataLoaderBase
 ]
+
 
 def get_easier_objects(
     top_modules: Sequence[esr.Module]
@@ -477,7 +477,7 @@ def get_easier_objects(
         if not isinstance(topmod, esr.Module):
             raise EasierJitException(
                 f"Instance of {topmod.__class__} cannot be jitted")
-        
+
         # top module may also be a nested module, e.g. mod A is also in Solver
         topmod_name = f"(modules[{rooti}]:{topmod.__class__.__name__})"
         objs.setdefault(topmod, []).append(topmod_name)
@@ -490,7 +490,7 @@ def get_easier_objects(
             if isinstance(obj, EasierObj.__args__):
                 obj_name = f"{topmod_name}.({path}:{obj.__class__.__name__})"
                 objs.setdefault(obj, []).append(obj_name)
-            
+
                 if isinstance(obj, (esr.Selector, esr.Reducer, esr.Tensor)):
                     dt_name = obj_name + (
                         ".data" if isinstance(obj, esr.Tensor) else ".idx"
@@ -498,8 +498,6 @@ def get_easier_objects(
                     objs.setdefault(obj.easier_data_loader, []).append(dt_name)
 
     return objs
-
-
 
 
 # torch.fx constants

@@ -126,6 +126,7 @@ def ones(
         device = 'cpu'
     return full(size, 1, dtype=dtype, device=device)
 
+
 def _dtype_device_like(
     input: Union[DataLoaderBase, torch.Tensor],
     dtype: Optional[torch.dtype] = None,
@@ -139,10 +140,10 @@ def _dtype_device_like(
     device = torch.device(device)
 
     return dtype, device
-    
+
 
 def full_like(
-    input: Union[DataLoaderBase, torch.Tensor], 
+    input: Union[DataLoaderBase, torch.Tensor],
     fill_value,
     *,
     dtype: Optional[torch.dtype] = None,
@@ -160,6 +161,7 @@ def full_like(
     dtype, device = _dtype_device_like(input, dtype, device)
     return full(size, fill_value, dtype=dtype, device=device)
 
+
 def zeros_like(
     input: Union[DataLoaderBase, torch.Tensor],
     dtype: Optional[torch.dtype] = None,
@@ -175,6 +177,7 @@ def zeros_like(
     """
     dtype, device = _dtype_device_like(input, dtype, device)
     return zeros(input.shape, dtype=dtype, device=device)
+
 
 def ones_like(
     input: Union[DataLoaderBase, torch.Tensor],
@@ -262,7 +265,6 @@ def _resolve_data_loader(arg) -> DataLoaderBase:
         raise TypeError(f"Unknown data type {type(arg)}")
 
 
-
 def _dist_collect(tensor: 'Tensor') -> torch.Tensor:
     """
     Collect all distributed part of an `esr.Tensor` into its original device.
@@ -324,7 +326,6 @@ class Selector(nn.Module):
         # backend device during JIT.
         self.runtime_halos_local_idxes: List[torch.Tensor]
         self.runtime_halos_recv_lengths: List[int]
-    
 
     def forward(self, tensor: torch.Tensor) -> torch.Tensor:
         if self.easier_index_status != 'rewritten':
@@ -377,7 +378,6 @@ class Reducer(nn.Module):
         # backend device during JIT.
         self.runtime_halos_local_idxes: List[torch.Tensor]
         self.runtime_halos_recv_lengths: List[int]
-
 
     def set_is_full(self):
         """

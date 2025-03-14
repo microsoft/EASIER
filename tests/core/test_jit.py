@@ -17,6 +17,7 @@ from easier.core.runtime.dist_env import DummyDistEnv
 
 from ..utils import torchrun_singlenode, get_random_str
 
+
 class Model(esr.Module):
     def __init__(self, nf, device='cpu') -> None:
         super().__init__()
@@ -124,6 +125,7 @@ def test_jit_orphan_tensors():
     assert jitted.v2.easier_tensor_group is not None
     assert jitted.v2.easier_tensor_group.tensor_defs == OrderedSet([jitted.v2])
     assert jitted.v2.elempart.lengths[0] == 13  # type: ignore
+
 
 @pytest.mark.usefixtures('dummy_dist_env')
 def test_nested_easier_modules():
@@ -273,7 +275,8 @@ class TestJittedUsage:
         pytest.param('gpu', marks=when_ngpus_ge_2)
     ])
     def test_collect(self, dev_type: str, jit_backend: str):
-        torchrun_singlenode(2, worker__test_collect, (dev_type, jit_backend), init_type=dev_type)
+        torchrun_singlenode(2, worker__test_collect,
+                            (dev_type, jit_backend), init_type=dev_type)
 
     @pytest.mark.parametrize('dev_type', [
         'cpu',

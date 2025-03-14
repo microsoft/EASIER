@@ -458,7 +458,7 @@ class DummyDistEnv(DistEnv):
 
     def barrier(self):
         return None
-    
+
 
 def get_local_rank_for_backend(backend: Literal['gloo', 'nccl', 'mpi']):
     """
@@ -471,7 +471,7 @@ def get_local_rank_for_backend(backend: Literal['gloo', 'nccl', 'mpi']):
         local_rank = int(os.environ["OMPI_COMM_WORLD_LOCAL_RANK"])
     else:
         raise EasierJitException(f"Unknown backend {backend}")
-    
+
     return local_rank
 
 
@@ -480,11 +480,12 @@ class TorchDistEnv(DistEnv):
     Note:
     NCCL backend does not support CPU communication.
     We'd better reject backend=NCCL + device_type=CPU combination for JIT.
-    
+
     Also, GLOO backend (via TorchGlooDistEnv) does not support CUDA
     communication well.
     We'd better reject backend=GLOO + device_type=CUDA combination too.
     """
+
     def __init__(
         self, world_size: int, rank: int, local_rank: int, device: torch.device
     ) -> None:
@@ -631,13 +632,12 @@ class TorchDistEnv(DistEnv):
                     recv_buffers.append(send_tensor)
             for req in self.batch_isend_irecv(ops):
                 req.wait()
-            
+
             return recv_buffers
 
         else:
             self.send(send_tensor, dst, self.rank)
             return None
-
 
     def gather_object(self, dst: int, obj: _T) -> Optional[List[_T]]:
         if self.rank == dst:
@@ -669,9 +669,9 @@ class TorchDistEnv(DistEnv):
                     ops.append(isend)
             for req in self.batch_isend_irecv(ops):
                 req.wait()
-            
+
             return tensors[src]
-        
+
         else:
             shape, dtype = self.scatter_object(src)
             buffer = self.recv(torch.empty(
@@ -743,8 +743,8 @@ class TorchDistGlooDistEnv(TorchDistEnv):
                                       dtype=send_tensor.dtype)
                 recv_buffers.append(recv)
         return recv_buffers
-    
-    
+
+
 class TorchDistMpiDistEnv(TorchDistEnv):
     def all_gather_into_tensor(
         self,
@@ -770,7 +770,7 @@ class TorchDistMpiDistEnv(TorchDistEnv):
             return torch.concat(tensors)
         else:
             return torch.stack(tensors)
-    
+
     def def_isend(self, tensor: torch.Tensor, dst: int, tag: int) -> Any:
         return (dist.isend, tensor, dst, tag)
 
@@ -797,7 +797,7 @@ class TorchDistMpiDistEnv(TorchDistEnv):
             work = op(tensor, peer, tag=tag)
             works.append(work)
         return works
-    
+
 
 # Keys are (backend, devicetype) tuples
 _dist_envs: Dict[Tuple[str, str], DistEnv] = {}
@@ -807,6 +807,7 @@ _runtime_backend: Optional[Literal['gloo', 'nccl', 'mpi']] = None
 
 # whatever device type, may be other than 'cpu' and 'cuda'
 _runtime_device_type: Optional[str] = None
+
 
 def set_dist_env_runtime_backend(
     comm_backend: Literal['gloo', 'nccl', 'mpi']
@@ -848,12 +849,12 @@ def set_dist_env_runtime_device_type(
     if comm_device_type == 'cpu':
         if _runtime_backend == 'nccl':
             raise EasierJitException(
-                "Unsupported"
+                "Device CPU cannot be used with NCCL communication backend"
             )
     elif comm_device_type == 'cuda':
         if _runtime_backend == 'gloo':
             raise EasierJitException(
-                "Unsupported"
+                "Device CUDA cannot be used with GLOO communication backend"
             )
 
         """
@@ -878,18 +879,17 @@ def set_dist_env_runtime_device_type(
             f"The device type {comm_device_type} is not known by EASIER,"
             " please ensure the data are properly assigned to each device"
         )
-        
 
 
 def _get_or_init_dist_env(device_type: str) -> DistEnv:
     if _runtime_backend is None:
         raise EasierJitException("The backend for runtime isn't set")
-    
+
     world_size = dist.get_world_size()
     rank = dist.get_rank()
     local_rank = get_local_rank_for_backend(_runtime_backend)
     comm_device = torch.device(device_type, local_rank)
-    
+
     key = (_runtime_backend, device_type)
     if key not in _dist_envs:
         if _runtime_backend == 'gloo':
@@ -923,7 +923,7 @@ def get_default_dist_env() -> DistEnv:
         device_type = 'cpu'
 
     return _get_or_init_dist_env(device_type)
-    
+
 
 def get_runtime_dist_env() -> DistEnv:
     """

@@ -44,10 +44,10 @@ def _torchrun_spawn_target(
 
     # Fake torch.distributed.is_torchelastic_launched() to return True
     os.environ["TORCHELASTIC_RUN_ID"] = "EASIER_UNIT_TEST_RUN"
-    
+
     if init_type in ['cpu', 'cuda']:
         init(
-            'gloo',
+            'gloo' if init_type == 'cpu' else 'nccl',
             init_method='tcp://localhost:24689',
             world_size=world_size,
             rank=local_rank
@@ -61,15 +61,16 @@ def _torchrun_spawn_target(
             world_size=world_size,
             rank=local_rank
         )
-    
+
     else:
         assert init_type == 'none'
 
     func(local_rank, world_size, *args, **kwargs)
 
+
 def torchrun_singlenode(
     nprocs: int, func, args=(), kwargs={},
-    init_type: Literal['none', 'dist', 'cpu', 'cuda']='cpu'
+    init_type: Literal['none', 'dist', 'cpu', 'cuda'] = 'cpu'
 ):
     """
     To see exception details, run unit tests in the command line with
@@ -93,6 +94,7 @@ def torchrun_singlenode(
         nprocs=nprocs,
         join=True
     )
+
 
 def assert_tensor_list_equal(la: List[torch.Tensor],
                              lb: List[torch.Tensor]):

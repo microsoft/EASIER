@@ -15,7 +15,7 @@ from torch.fx.graph import Graph
 from torch.fx.node import Node, Argument, map_arg
 from easier.core.passes.tensor_group_partition import ElemPart
 
-from easier.core.runtime.dist_env import get_runtime_dist_env, get_runtime_dist_env
+from easier.core.runtime.dist_env import get_runtime_dist_env
 from easier.core.utils import \
     logger, EasierJitException
 import easier.core.module as esr
@@ -186,7 +186,7 @@ def calculate_halo_info(
                 shape=(input_elempart.lengths[u],),
                 dtype=input_elempart.idx.dtype
             )
-        
+
         input_elempart_u = input_elempart_u.cpu()
 
         halo_lidx_u_to_this = torch.isin(
@@ -618,9 +618,7 @@ def log_rewrite_statistics(
     nrecv_selector = 0
     nrecv_reducer = 0
 
-    for submod, rooti_path_oset in get_selectors_reducers(modules, graphs).items():
-        (rooti, path) = next(iter(rooti_path_oset))
-
+    for submod, _oset in get_selectors_reducers(modules, graphs).items():
         workers_recv_lengths = dist_env.gather_object(
             0, submod.runtime_halos_recv_lengths
         )

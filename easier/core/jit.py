@@ -155,7 +155,6 @@ def infer_and_enforce_unique_device_type(top_modules: List[esr.Module]) -> str:
     return device_type  # type: ignore
 
 
-
 def _validate_compile_args(
     top_modules,
     backend,
@@ -183,7 +182,7 @@ def _validate_compile_args(
             if isinstance(p, esr.Tensor):
                 if p.easier_data_ready:
                     _raise()
-    
+
     # validate compile backend
     if backend is None:
         # Python keyword `None` is different from string "none":
@@ -216,7 +215,7 @@ def _validate_compile_args(
         )
 
     return top_modules, backend, partition_mode  # type: ignore
-    
+
 
 def _fully_load_data_backend_none(
     top_modules: List[esr.Module], device_type: str
@@ -225,7 +224,7 @@ def _fully_load_data_backend_none(
     Fully load index and data onto the specified device.
     For backend=='none' only, and data loader `fully_load` method does not
     require the dist env to be set up.
-    
+
     On the other hand, processes that are not rank-0 will be corrupted.
     Users shouldn't have distributed environment for backend=='none' case.
     """
@@ -239,7 +238,7 @@ def _fully_load_data_backend_none(
             if obj.easier_index_status == 'placeholder':
                 obj.idx = obj.easier_data_loader.fully_load(device)
                 obj.easier_index_status = 'rewritten'
-        
+
         if isinstance(obj, esr.Module):
             obj.easier_jit_backend = 'none'
 
@@ -264,7 +263,7 @@ def init(
             - "nccl": NCCL backend provided by `torch.distributed`, GPU-only
             - "mpi": MPI backend provided by `torch.distributed`,
                 supporting CPU and GPU TODO CPU-only?
-            
+
             If None is provided, use the value specified by the
             environment variable EASIER_COMPILE_BACKEND.
             If EASIER_COMM_BACKEND is not defined, will use "gloo" for CPU
@@ -283,7 +282,7 @@ def init(
                 + env_comm_backend  # type: ignore
             )
         comm_backend = env_comm_backend  # type: ignore
-    
+
     if comm_backend is None:
         # TODO or fallback to GLOO?
         raise EasierJitException(
@@ -313,14 +312,14 @@ def init(
         local_rank = int(os.environ["OMPI_COMM_WORLD_LOCAL_RANK"])
     else:
         assert False, "unreachable"
-    
+
     # the `get_backend_config()` may return like "cpu:gloo,cuda:nccl"
     logger.info(
         f"torch.distributed"
         f" backend={dist.get_backend_config()} rank={dist.get_rank()}"
         f" local_rank={local_rank}"
     )
-    
+
 
 def compile(
     modules: List[esr.Module],
@@ -453,4 +452,3 @@ def compile(
     esr.logger.info("EASIER just-in-time compilation has completed")
 
     return top_modules
-

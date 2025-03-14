@@ -117,12 +117,12 @@ class TestDataLoader:
     def test_load_by_rank(self, data_loader_ctor, dtype: torch.dtype,
                           device_type: str):
         torchrun_singlenode(2, worker__test_load_by_rank,
-                          (data_loader_ctor, dtype, device_type))
+                            (data_loader_ctor, dtype, device_type))
 
     def test_load_by_index(self, data_loader_ctor, dtype: torch.dtype,
                            device_type: str):
         torchrun_singlenode(2, worker__test_load_by_index,
-                          (data_loader_ctor, dtype, device_type))
+                            (data_loader_ctor, dtype, device_type))
 
     @pytest.mark.usefixtures('dummy_dist_env')
     @pytest.mark.parametrize('target_device_type', [
@@ -211,11 +211,11 @@ class TestFulledLoader:
 
     def test_load_by_rank(self, dtype: torch.dtype, device_type: str):
         torchrun_singlenode(2, worker__test_load_full_by_rank,
-                          (dtype, device_type))
+                            (dtype, device_type))
 
     def test_load_by_index(self, dtype: torch.dtype, device_type: str):
         torchrun_singlenode(2, worker__test_load_full_by_index,
-                          (dtype, device_type))
+                            (dtype, device_type))
 
 
 def worker__test_load_arange_by_rank(local_rank: int, world_size: int,
@@ -263,7 +263,7 @@ def worker__test_load_arange_by_index(local_rank: int, world_size: int,
     pytest.param('cuda', marks=have_cuda)
 ])
 class TestArangeLoader:
-    
+
     @pytest.mark.usefixtures('dummy_dist_env')
     def test_load_chunk(self, dtype: torch.dtype, device_type: str):
         dl = ArangeTensorLoader(0, 34, 2,
@@ -285,8 +285,8 @@ class TestArangeLoader:
 
     def test_load_by_rank(self, dtype: torch.dtype, device_type: str):
         torchrun_singlenode(2, worker__test_load_arange_by_rank,
-                          (dtype, device_type))
+                            (dtype, device_type))
 
     def test_load_by_index(self, dtype: torch.dtype, device_type: str):
         torchrun_singlenode(2, worker__test_load_arange_by_index,
-                          (dtype, device_type))
+                            (dtype, device_type))

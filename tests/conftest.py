@@ -11,7 +11,7 @@ from easier.core.runtime.dist_env import DummyDistEnv
 def dummy_dist_env():
     def _get_dummy(device_type):
         return DummyDistEnv('cpu')
-    
+
     def _no_op(*args, **kwargs):
         pass
 

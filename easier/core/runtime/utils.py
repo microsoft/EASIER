@@ -9,10 +9,11 @@ from easier.core.utils import EasierJitException
 
 _T = TypeVar("_T")
 
+
 def check_collective_equality(
     category: str, obj: _T,
-    eq: Optional[Callable[[_T, _T], bool]]=None,
-    repr_str: Optional[str]=None
+    eq: Optional[Callable[[_T, _T], bool]] = None,
+    repr_str: Optional[str] = None
 ) -> None:
     """
     Collectively check `obj` on all workers are equal to that on rank-0.
@@ -31,7 +32,7 @@ def check_collective_equality(
         [obj0] = dist_env.broadcast_object_list(0, [obj])
     else:
         [obj0] = dist_env.broadcast_object_list(0)
-    
+
     eq = eq or object.__eq__
     if not eq(obj, obj0):
         if repr_str is None:

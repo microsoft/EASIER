@@ -345,7 +345,8 @@ def partition_tensor_groups_with_adjmat(
             # partitioned among columns.
             adjmat_colids = colgrp_idx_slice + colgrp_offset
 
-            subadjmat_rowids_to_send[w] = subadjmat_rowids.to(dist_env.comm_device)
+            subadjmat_rowids_to_send[w] = subadjmat_rowids.to(
+                dist_env.comm_device)
             adjmat_colids_to_send[w] = adjmat_colids.to(dist_env.comm_device)
 
         subadjmat_rowids_tensors = \

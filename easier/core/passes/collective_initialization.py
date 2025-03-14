@@ -10,16 +10,13 @@ from torch import nn
 from torch.fx.graph import Graph
 from torch.fx.node import Node
 from easier.core.passes.utils import \
-    EasierInterpreter, OrderedSet, fx_graph_to_serializable_ir, get_easier_objects, get_easier_tensors, \
-    get_selectors_reducers
+    EasierInterpreter, OrderedSet, fx_graph_to_serializable_ir, \
+    get_easier_objects, get_easier_tensors, get_selectors_reducers
 
-from easier.core.runtime.data_loader import DataLoaderBase
 from easier.core.utils import \
     logger, EasierJitException
 import easier.core.module as _EsrMod
 
-import easier.core.runtime.modules as _EsrRuntime
-from easier.core.runtime.dist_env import get_runtime_dist_env
 from easier.core.runtime.utils import check_collective_equality
 
 
@@ -78,6 +75,7 @@ class SyntaxChecker(EasierInterpreter):
                 "easier.Module.forward() cannot have return value"
             )
 
+
 def validate_idx_range(
     module: Union[_EsrMod.Selector, _EsrMod.Reducer]
 ):
@@ -90,7 +88,7 @@ def validate_idx_range(
         raise TypeError(
             f"{hint_name}.idx must be integer"
         )
-    
+
     idxmin, idxmax = cast(Tuple[int, int], dl.minmax())
 
     if not (0 <= idxmin):
@@ -109,6 +107,7 @@ def validate_idx_range(
                 f"The maximum of {hint_name}.idx {idxmax}"
                 f" must be smaller than {hint_name}.n {n}"
             )
+
 
 def collectively_initialize_and_validate(
     top_modules: List[_EsrMod.Module]
@@ -183,6 +182,8 @@ def collectively_initialize_and_validate(
 
     #
     # Collectively initialize and validate DataLoaders
+    # NOTE only H5DataLoader.__init__ is collective, other DataLoaders
+    # need collective_init().
     #
     for dl in OrderedSet(
         x.easier_data_loader for x in itertools.chain(submods, tensors)
@@ -191,7 +192,7 @@ def collectively_initialize_and_validate(
             f"The type of {dl.easier_hint_name}", dl.__class__.__name__
         )
         dl.collective_init()
-        
+
     #
     # Collectively initialize and validate Selectors/Reducers
     #
@@ -215,7 +216,6 @@ def collectively_initialize_and_validate(
             _validate_dl_shape_for_partition_data(
                 tensor, "Distributed easier.Tensor ", ".data"
             )
-
 
     #
     # Validate constant tensors

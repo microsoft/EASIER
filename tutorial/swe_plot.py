@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 import numpy as np
 import pyvista as pv
 import imageio.v2 as imageio
@@ -11,7 +14,8 @@ args = parser.parse_args()
 frames = []
 for i in range(100):
     data = np.load(f"{args.data_dir}/data{i:03d}.npz")
-    points = np.concatenate((data['x'], data['y'], data['z']*2), axis=0).transpose()
+    points = np.concatenate(
+        (data['x'], data['y'], data['z']*2), axis=0).transpose()
     point_cloud = pv.PolyData(points)
     surface = point_cloud.delaunay_2d().extract_geometry()
 

@@ -67,7 +67,7 @@ class DataLoaderBase:
         # e.g. "(Module).(a.b.c:Selector).idx"
         # Decided during `esr.compile()`
         self.easier_hint_name: str
-    
+
     def coll_check_dtype_shape_devicetype(self):
         check_collective_equality(
             f"Tensor properties of {self.easier_hint_name}",
@@ -82,16 +82,16 @@ class DataLoaderBase:
         actually referring to the same data set i.e. of the same type.
         """
         raise NotImplementedError()
-    
+
     def minmax(self) -> Tuple[Num, Num]:
         raise NotImplementedError()
-    
+
     def count_unique(self) -> int:
         """
         Used by Reducer.set_fullness()
         """
         raise NotImplementedError()
-    
+
     # TODO now we accept keyword parameters only, we may make it do
     # overloading resolution like Selector(idx=)
     def to(
@@ -216,7 +216,7 @@ class InMemoryTensorLoader(DataLoaderBase):
 
         # The data is always stored as CPU tensor
         self.tensor = tensor.cpu()
-    
+
     def collective_init(self) -> None:
         self.coll_check_dtype_shape_devicetype()
 
@@ -233,7 +233,7 @@ class InMemoryTensorLoader(DataLoaderBase):
     def minmax(self) -> Tuple[Num, Num]:
         amin, amax = self.tensor.aminmax()
         return amin.item(), amax.item()
-    
+
     @functools.cache
     def count_unique(self) -> int:
         return self.tensor.unique().shape[0]
@@ -301,6 +301,7 @@ class H5DataLoader(DataLoaderBase):
     Read the specified dataset from rank-0,
     broadcast or distribute to other ranks.
     """
+
     def __init__(self,
                  h5_file_path: str, h5_dataset_path: str,
                  *,
@@ -316,7 +317,7 @@ class H5DataLoader(DataLoaderBase):
         self._file_path = os.path.expanduser(h5_file_path)
         self._dataset_path = h5_dataset_path
         self._file_kwargs = h5_file_kwargs
-        
+
         self.device = torch.device(device)
 
         dist_env = get_default_dist_env()  # runtime dist env not decided yet
@@ -326,6 +327,7 @@ class H5DataLoader(DataLoaderBase):
                 if not isinstance(d, h5py.Dataset):
                     raise TypeError()
 
+                raw_np_dtype = cast(np.dtype, d.dtype)
                 self.shape = tuple(d.shape)
 
             if dtype is not None:
@@ -333,7 +335,6 @@ class H5DataLoader(DataLoaderBase):
                 self.dtype = dtype
             else:
                 self._target_np_dtype = None
-                raw_np_dtype = cast(np.dtype, d.dtype)
                 self.dtype = numpy_dtype_to_torch_dtype(raw_np_dtype)
 
             dist_env.broadcast_object_list(
@@ -371,7 +372,7 @@ class H5DataLoader(DataLoaderBase):
                 d = d.astype(self._target_np_dtype)  # type: ignore
 
             yield d
-    
+
     @functools.cache
     def minmax(self) -> Tuple[Num, Num]:
         if self.dtype.is_floating_point:
@@ -383,6 +384,7 @@ class H5DataLoader(DataLoaderBase):
             # but if we want this to be a universal component, we need to
             # ensure float.NaN etc. work as expected.
             amin, amax = None, None
+
             def _opt_cmp(a: Optional[torch.Tensor], c: torch.Tensor, op):
                 return c if a is None else op(a, c)
 
@@ -390,17 +392,16 @@ class H5DataLoader(DataLoaderBase):
                 chunk_min, chunk_max = torch.aminmax(chunk)
                 amin = _opt_cmp(amin, chunk_min, min)
                 amax = _opt_cmp(amax, chunk_max, max)
-            
+
             amin, amax = amin.item(), amax.item()  # type: ignore
 
             dist_env.broadcast_object_list(0, [amin, amax])
-        
+
         else:
             [amin, amax] = dist_env.broadcast_object_list(0)
-        
+
         return amin, amax
 
-    
     @functools.cache
     def count_unique(self) -> int:
         if self.dtype.is_floating_point:
@@ -447,7 +448,6 @@ class H5DataLoader(DataLoaderBase):
             [nunique] = dist_env.broadcast_object_list(0)
 
         return nunique
-
 
     def partially_load_by_chunk(self, chunk_size: int
                                 ) -> Iterator[torch.Tensor]:
@@ -624,7 +624,7 @@ class FulledTensorLoader(DataLoaderBase):
         self.shape = tuple(shape)
         self.dtype = dtype
         self.device = torch.device(device)
-    
+
     def collective_init(self) -> None:
         self.coll_check_dtype_shape_devicetype()
         check_collective_equality(
@@ -633,7 +633,7 @@ class FulledTensorLoader(DataLoaderBase):
 
     def minmax(self) -> Tuple[Num, Num]:
         return self.value, self.value
-    
+
     def count_unique(self) -> int:
         return 1
 
@@ -683,7 +683,6 @@ class FulledTensorLoader(DataLoaderBase):
                    ) -> torch.Tensor:
         return self._full(None, device)
 
-
     def __repr__(self) -> str:
         return ''.join([
             f'{self.__class__.__name__}(',
@@ -710,21 +709,20 @@ class ArangeTensorLoader(DataLoaderBase):
         self.dtype = dtype
         self.device = torch.device(device)
 
-
     def collective_init(self) -> None:
         self.coll_check_dtype_shape_devicetype()
         check_collective_equality(
             f"arange of {self.easier_hint_name}",
             [self._start, self._end, self._step]
         )
-    
+
     def minmax(self) -> Tuple[Num, Num]:
         r = range(self._start, self._end, self._step)
         if self._step > 0:
             return r[0], r[-1]
         else:
             return r[-1], r[0]
-    
+
     def count_unique(self) -> int:
         return self.shape[0]
 
@@ -781,7 +779,6 @@ class ArangeTensorLoader(DataLoaderBase):
             self._start, self._end, self._step,
             dtype=self.dtype, device=device
         )
-
 
     def __repr__(self) -> str:
         return ''.join([

@@ -228,7 +228,7 @@ def _coll_check(
     """
     dist_env = get_runtime_dist_env()
     all_checks = dist_env.all_gather_into_tensor(torch.tensor(
-        [1 if expect else 0],dtype=torch.int64, device=dist_env.comm_device
+        [1 if expect else 0], dtype=torch.int64, device=dist_env.comm_device
     )).sum().item() == dist_env.world_size
     if not all_checks:
         raise ex_ctor(ex_msg)
