@@ -190,10 +190,16 @@ class TestModuleDump:
     def test_jitted_dump(self, dev_type):
         dumpdir = os.path.join(tempfile.gettempdir(), "easier", "tests",
                                get_random_str())
-        torchrun_singlenode(2, worker__test_jitted_dump, (dev_type, dumpdir,))
+        torchrun_singlenode(
+            2, worker__test_jitted_dump, (dev_type, dumpdir,),
+            init_type=dev_type
+        )
 
     def test_jitted_shared(self, dev_type):
         dumpdir = os.path.join(tempfile.gettempdir(), "easier", "tests",
                                get_random_str())
-        torchrun_singlenode(2, worker__test_jitted_shared,
-                            (dev_type, dumpdir,))
+        torchrun_singlenode(
+            2, worker__test_jitted_shared,
+            (dev_type, dumpdir,),
+            init_type=dev_type
+        )

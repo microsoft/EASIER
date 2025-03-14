@@ -275,12 +275,26 @@ class TestJittedUsage:
         pytest.param('gpu', marks=when_ngpus_ge_2)
     ])
     def test_collect(self, dev_type: str, jit_backend: str):
-        torchrun_singlenode(2, worker__test_collect,
-                            (dev_type, jit_backend), init_type=dev_type)
+        if jit_backend == 'torch':
+            init_type = dev_type
+        elif jit_backend == 'cpu':
+            init_type = 'cpu'
+        elif jit_backend == 'gpu':
+            init_type = 'cuda'
+        else:
+            assert False
+        torchrun_singlenode(
+            2, worker__test_collect,
+            (dev_type, jit_backend),
+            init_type=init_type  # type: ignore
+        )
 
     @pytest.mark.parametrize('dev_type', [
         'cpu',
         pytest.param('cuda', marks=when_ngpus_ge_2)
     ])
     def test_save(self, dev_type: str):
-        torchrun_singlenode(2, worker__test_save, (dev_type,))
+        torchrun_singlenode(
+            2, worker__test_save, (dev_type,),
+            init_type=dev_type
+        )

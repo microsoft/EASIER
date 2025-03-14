@@ -1,14 +1,20 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+"""
+The file name `conftest.py` is pytest standard.
+
+By defining fixtures here the whole chain of depended fixtures are available.
+"""
+
 from unittest.mock import patch
 import pytest
 
 from easier.core.runtime.dist_env import DummyDistEnv
 
-
 @pytest.fixture
 def dummy_dist_env():
+
     def _get_dummy(device_type):
         return DummyDistEnv('cpu')
 

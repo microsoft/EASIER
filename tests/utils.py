@@ -33,7 +33,7 @@ when_ngpus_ge_2 = pytest.mark.skipif(
 
 def _torchrun_spawn_target(
     local_rank: int, world_size: int, func, args, kwargs,
-    init_type: Literal['none', 'dist', 'cpu', 'cuda']
+    init_type: Literal['none', 'cpu', 'cuda']
 ):
     os.environ["EASIER_LOG_LEVEL"] = "DEBUG"
 
@@ -54,14 +54,6 @@ def _torchrun_spawn_target(
         )
         _DM.set_dist_env_runtime_device_type(init_type)
 
-    elif init_type == 'dist':
-        init(
-            'gloo',
-            init_method='tcp://localhost:24689',
-            world_size=world_size,
-            rank=local_rank
-        )
-
     else:
         assert init_type == 'none'
 
@@ -70,7 +62,7 @@ def _torchrun_spawn_target(
 
 def torchrun_singlenode(
     nprocs: int, func, args=(), kwargs={},
-    init_type: Literal['none', 'dist', 'cpu', 'cuda'] = 'cpu'
+    init_type: Literal['none', 'cpu', 'cuda'] = 'cpu'
 ):
     """
     To see exception details, run unit tests in the command line with
