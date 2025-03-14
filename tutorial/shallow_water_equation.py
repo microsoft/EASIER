@@ -298,7 +298,7 @@ class ShallowWaterEquation(esr.Module):
 
 if __name__ == "__main__":
     """
-    easierrun --nnodes=1 --nproc_per_node=4 \
+    torchrun --nnodes=1 --nproc_per_node=4 \
         shallow_water_equation.py --backend=cpu --plot=true
     """
     parser = argparse.ArgumentParser()

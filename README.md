@@ -40,7 +40,8 @@ Simulating water waves in a square tub by solving shallow water equations with E
 # create folder to store simulation results
 mkdir res
 
-# launch the simulation using `torchrun`
+# launch the simulation using `torchrun`,
+# just add `--master_addr` argument to the launcher if there are multiple nodes.
 torchrun --nnodes=1 --nproc_per_node=4 tutorial/shallow_water_equation.py --backend=cpu --output=res
 
 # Visualize simulation results
@@ -52,9 +53,6 @@ python tutorial/swe_plot.py --data_dir res --filename swe.gif
   &nbsp &nbsp &nbsp &nbsp &nbsp &nbsp
   <img width="330px" src="tutorial/swe.gif"/>
 </div>
-
-EASIER launcher `easierrun` provides similar user experience to that of `torchrun`.
-Just add `--master_addr` argument to the launcher if there are multiple nodes.
 
 # Tutorial
 Detailed tutorial and more examples are coming soon.
