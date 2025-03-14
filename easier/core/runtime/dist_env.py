@@ -817,6 +817,20 @@ def set_dist_env_runtime_backend(
     assert _runtime_backend is None
     _runtime_backend = comm_backend
 
+    if comm_backend == 'nccl':
+        """
+        User-facing, pickle-based APIs like
+        torch.distributed.broadcast_object_list etc.
+        require properly CUDA device setup.
+
+        NOTE for MPI backend we don't strictly need this, it can use CPU bcast.
+        """
+        local_rank = get_local_rank_for_backend(_runtime_backend)
+        cuda_device = torch.device('cuda', local_rank)
+        logger.info(f"Set default CUDA device: {cuda_device}")
+        torch.cuda.set_device(cuda_device)
+
+
 def set_dist_env_runtime_device_type(
     comm_device_type: str
 ):
@@ -842,9 +856,18 @@ def set_dist_env_runtime_device_type(
                 "Unsupported"
             )
 
+        """
+        With device type CUDA, the backend may be MPI.
+        Here we get an extra chance to set the default CUDA devices
+        for pickle-based APIs.
+        Becasue except dist.bcast_object_lists, APIs like dist.gather_object
+        does not support explicitly specifying the pickling-to device.
+        TODO However, EASIER internals can avoid using pickling-based APIs.
+        """
         local_rank = get_local_rank_for_backend(_runtime_backend)
         cuda_device = torch.device('cuda', local_rank)
-        logger.info(f"Set default CUDA device: {cuda_device}")
+        if torch.cuda.current_device() != local_rank:  # cur_dev returns rank
+            logger.info(f"Set default CUDA device: {cuda_device}")
         torch.cuda.set_device(cuda_device)
     else:
         # TODO although torch.distributed supports custom added backends,
