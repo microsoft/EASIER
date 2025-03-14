@@ -783,10 +783,13 @@ class TorchDistMpiDistEnv(TorchDistEnv):
         CUDA cases in MPI, where torch.distributed.batch_isend_irecv
         tries to group all P2P requests.
         torch.distributed MPI backend does not support grouping.
-        However, it does not need grouping for both CPU/GPU communication.
 
         Now we simply keep the definition-only semantics of def_isend/irecv
-        and invoke all at once here. TODO unnecessary?
+        and invoke all at once here.
+
+        TODO However, MPI supports both CPU/GPU ops, including P2P,
+        (if it's CUDA-aware and all_gather_into_tensor fix is still needed)
+        unlike GLOO/NCCL doesn't support GPU/CPU P2P.
         """
         works = []
         for tp in p2p_ops:
@@ -796,6 +799,7 @@ class TorchDistMpiDistEnv(TorchDistEnv):
         return works
     
 
+# Keys are (backend, devicetype) tuples
 _dist_envs: Dict[Tuple[str, str], DistEnv] = {}
 
 # must be explicitly supported by EASIER
