@@ -10,7 +10,7 @@ import h5py
 import easier as esr
 from easier.numeric import Linsys
 
-from .mesh import get_triagular_mesh
+from .mesh import get_triangular_mesh
 
 
 def _reduce(tensor: torch.Tensor, idx: torch.Tensor, n: int):
@@ -131,7 +131,7 @@ class Poisson(esr.Module):
         super().__init__()
 
         if torch.distributed.get_rank() == 0:
-            mesh = get_triagular_mesh(mesh_size)
+            mesh = get_triangular_mesh(mesh_size)
             poisson = _assemble_poisson(mesh)
             torch.distributed.broadcast_object_list([mesh, poisson], 0)
         else:

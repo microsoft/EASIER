@@ -42,6 +42,8 @@ def hdf5(
     **h5_file_kwargs
 ):
     """
+    The call to this function must be collectively.
+
     Create a handle to a HDF5 dataset.
 
     The specified dataset must be accessible from rank-0.

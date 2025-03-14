@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 import os
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union, cast
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from typing_extensions import Literal, TypeAlias, TypeVar
 import typing
 import threading
@@ -16,7 +16,7 @@ import copy
 import torch
 import torch.distributed as dist
 
-from easier.core.utils import logger, EasierJitException, LOGGING_TRACE
+from easier.core.utils import logger, EasierJitException
 
 _T = TypeVar("_T")
 
@@ -29,13 +29,6 @@ def _wrap_commapi_pre_filter(prefilter, api):
     """
     @functools.wraps(api)
     def wrapper(*args, **kwargs):
-        if logger.level <= LOGGING_TRACE:
-            this = args[0].__class__.__name__
-            logger.log(
-                LOGGING_TRACE,
-                f'{this}.{api.__name__}(*{args[1:]}, **{kwargs})'
-            )
-
         args, kwargs = prefilter(*args, **kwargs)
         return api(*args, **kwargs)
     return wrapper

@@ -9,7 +9,7 @@ import torch
 import easier.cpp_extension as ext
 
 
-def get_triagular_mesh(mesh_size=100) -> str:
+def get_triangular_mesh(mesh_size=100) -> str:
     data_dir = os.path.expanduser('~/.easier')
     os.makedirs(data_dir, exist_ok=True)
     path = os.path.join(data_dir, f'triangular_{mesh_size}.hdf5')

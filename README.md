@@ -40,8 +40,8 @@ Simulating water waves in a square tub by solving shallow water equations with E
 # create folder to store simulation results
 mkdir res
 
-# launch the simulation in a `torchrun` style
-easierrun --nnodes=1 --nproc_per_node=4 tutorial/shallow_water_equation.py --backend=cpu --output=res
+# launch the simulation using `torchrun`
+torchrun --nnodes=1 --nproc_per_node=4 tutorial/shallow_water_equation.py --backend=cpu --output=res
 
 # Visualize simulation results
 python tutorial/swe_plot.py --data_dir res --filename swe.gif

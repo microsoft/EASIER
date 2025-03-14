@@ -308,6 +308,9 @@ class H5DataLoader(DataLoaderBase):
                  # Optional reading configs for users to load the dataset.
                  dtype: Optional[torch.dtype],
                  **h5_file_kwargs) -> None:
+        """
+        The constructor only is collective.
+        """
         super().__init__()
 
         self._file_path = os.path.expanduser(h5_file_path)

@@ -24,9 +24,9 @@ from easier.core import module as _EsrMod
 from easier.core.dump import load_dumps
 from easier.core.passes.utils import \
     get_easier_objects
-from easier.core.utils import EasierJitException, logger
+from easier.core.utils import EasierJitException, logger, init_logger
 from easier.core.runtime.dist_env import \
-    set_dist_env_runtime_backend, set_dist_env_runtime_device_type, get_runtime_dist_env
+    set_dist_env_runtime_backend, set_dist_env_runtime_device_type
 
 
 class EasierProxy(Proxy):
@@ -301,6 +301,8 @@ def init(
 
     import torch.distributed as dist
     dist.init_process_group(comm_backend, **kwargs)
+
+    init_logger(dist.get_rank())
 
     if comm_backend in ['gloo', 'nccl']:
         local_rank = int(os.environ['LOCAL_RANK'])
