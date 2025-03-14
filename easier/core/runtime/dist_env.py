@@ -476,6 +476,15 @@ def get_local_rank_for_backend(backend: Literal['gloo', 'nccl', 'mpi']):
 
 
 class TorchDistEnv(DistEnv):
+    """
+    Note:
+    NCCL backend does not support CPU communication.
+    We'd better reject backend=NCCL + device_type=CPU combination for JIT.
+    
+    Also, GLOO backend (via TorchGlooDistEnv) does not support CUDA
+    communication well.
+    We'd better reject backend=GLOO + device_type=CUDA combination too.
+    """
     def __init__(
         self, world_size: int, rank: int, local_rank: int, device: torch.device
     ) -> None:
@@ -735,26 +744,6 @@ class TorchDistGlooDistEnv(TorchDistEnv):
                 recv_buffers.append(recv)
         return recv_buffers
     
-    def def_isend(self, tensor: torch.Tensor, dst: int, tag: int) -> Any:
-        return (dist.isend, tensor, dst, tag)
-
-    def def_irecv(self, buffer: torch.Tensor, src: int, tag: int) -> Any:
-        return (dist.irecv, buffer, src, tag)
-
-    def batch_isend_irecv(self, p2p_ops: List[tuple]) -> List[dist.Work]:
-        """
-        MPI backend invokes send and recv immediately,
-        and will raise if dist.batch_isend_irecv is called.
-
-        We keep the definition-only semantics of def_isend/irecv and
-        invoke all at once here.
-        """
-        works = []
-        for tp in p2p_ops:
-            op, tensor, peer, tag = tp
-            work = op(tensor, peer, tag=tag)
-            works.append(work)
-        return works
     
 class TorchDistMpiDistEnv(TorchDistEnv):
     def all_gather_into_tensor(
@@ -790,11 +779,14 @@ class TorchDistMpiDistEnv(TorchDistEnv):
 
     def batch_isend_irecv(self, p2p_ops: List[tuple]) -> List[dist.Work]:
         """
-        MPI backend invokes send and recv immediately,
-        and will raise if dist.batch_isend_irecv is called.
+        We override def_isend/def_irecv/batch_isend_irecv mainly for
+        CUDA cases in MPI, where torch.distributed.batch_isend_irecv
+        tries to group all P2P requests.
+        torch.distributed MPI backend does not support grouping.
+        However, it does not need grouping for both CPU/GPU communication.
 
-        We keep the definition-only semantics of def_isend/irecv and
-        invoke all at once here.
+        Now we simply keep the definition-only semantics of def_isend/irecv
+        and invoke all at once here. TODO unnecessary?
         """
         works = []
         for tp in p2p_ops:
@@ -836,8 +828,16 @@ def set_dist_env_runtime_device_type(
     _runtime_device_type = comm_device_type
 
     if comm_device_type == 'cpu':
-        pass
+        if _runtime_backend == 'nccl':
+            raise EasierJitException(
+                "Unsupported"
+            )
     elif comm_device_type == 'cuda':
+        if _runtime_backend == 'gloo':
+            raise EasierJitException(
+                "Unsupported"
+            )
+
         local_rank = get_local_rank_for_backend(_runtime_backend)
         cuda_device = torch.device('cuda', local_rank)
         logger.info(f"Set default CUDA device: {cuda_device}")

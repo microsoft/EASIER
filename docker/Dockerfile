@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     vim
 
 # Required by pyvista PIP package
+# TODO must also enable xserver
 RUN apt-get install -y libglfw3-dev libgles2-mesa-dev
 
 WORKDIR /app/
