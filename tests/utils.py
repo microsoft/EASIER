@@ -26,10 +26,6 @@ when_ngpus_ge_2 = pytest.mark.skipif(
     reason="no enough CUDA GPU (ngpus >= 2) to test distribution"
 )
 
-# have_mpi_backend = pytest.mark.skipif(
-
-# )
-
 
 def _torchrun_spawn_target(
     local_rank: int, world_size: int, func, args, kwargs,

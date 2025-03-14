@@ -12,6 +12,7 @@ import pytest
 
 from easier.core.runtime.dist_env import DummyDistEnv
 
+
 @pytest.fixture
 def dummy_dist_env():
 
