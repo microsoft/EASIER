@@ -152,7 +152,7 @@ def infer_and_enforce_unique_device_type(top_modules: List[esr.Module]) -> str:
         )
 
     device_type = more_itertools.first(device_type_grouped.keys())
-    return device_type  # type: ignore
+    return device_type
 
 
 def _validate_compile_args(

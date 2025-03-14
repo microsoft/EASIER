@@ -68,13 +68,10 @@ def torchrun_singlenode(
     - init_type:
         'none': no special initialization is done, a worker process is just
             like a brand new torchrun subprocess, with only env vars set.
-        'dist': `easier.init('gloo')` is called, which does:
-            - torch.distributed.init_process_group('gloo');
-            - dist_env.set_runtime_backend('gloo');
-            - get_default_dist_env() is callable and returns GLOO+CPU DistEnv;
-        'cpu'/'cuda': additional to the 'dist' case:
-            - dist_env.set_runtime_device_type('cpu' or 'cuda') is called;
-            - get_runtime_dist_env() is callable.
+        'cpu'/'cuda': prepare the global distributed settings:
+            - torch.distributed.init_process_group('gloo/nccl');
+            - dist_env.set_runtime_backend('gloo/nccl');
+            - dist_env.set_runtime_device_type('cpu/cuda');
     """
     spawn(
         _torchrun_spawn_target,

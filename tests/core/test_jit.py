@@ -175,9 +175,9 @@ def worker__test_collect(local_rank: int, world_size: int,
         [Model(3, model_dev)], backend='none')
     m()
 
-    orig_vertex = m.vertex_tensor.clone()
-    orig_edge = m.edge_tensor.clone()
-    orig_replica = m.tensor.clone()
+    orig_vertex = m.vertex_tensor.clone().cpu()
+    orig_edge = m.edge_tensor.clone().cpu()
+    orig_replica = m.tensor.clone().cpu()
 
     torch.manual_seed(2345)
     jitted, = esr.compile(
@@ -194,9 +194,9 @@ def worker__test_collect(local_rank: int, world_size: int,
     assert collected_vertex.device == model_dev
     assert collected_edge.device == model_dev
     assert collected_vertex.device == model_dev
-    torch.testing.assert_close(collected_vertex, orig_vertex)
-    torch.testing.assert_close(collected_edge, orig_edge)
-    torch.testing.assert_close(collected_replica, orig_replica)
+    torch.testing.assert_close(collected_vertex.cpu(), orig_vertex)
+    torch.testing.assert_close(collected_edge.cpu(), orig_edge)
+    torch.testing.assert_close(collected_replica.cpu(), orig_replica)
 
     if jit_backend == 'torch':
         comm_dev_type = model_dev.type
@@ -296,5 +296,5 @@ class TestJittedUsage:
     def test_save(self, dev_type: str):
         torchrun_singlenode(
             2, worker__test_save, (dev_type,),
-            init_type=dev_type
+            init_type=dev_type  # type: ignore
         )

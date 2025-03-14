@@ -33,7 +33,7 @@ def check_collective_equality(
     else:
         [obj0] = dist_env.broadcast_object_list(0)
 
-    eq = eq or object.__eq__
+    eq = eq or (lambda _, other: obj == other)
     if not eq(obj, obj0):
         if repr_str is None:
             repr_str = " = " + repr(obj)
