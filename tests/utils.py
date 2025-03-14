@@ -54,7 +54,7 @@ def _torchrun_spawn_target(
         )
         _DM.set_dist_env_runtime_device_type(init_type)
 
-    if init_type == 'dist':
+    elif init_type == 'dist':
         init(
             'gloo',
             init_method='tcp://localhost:24689',
