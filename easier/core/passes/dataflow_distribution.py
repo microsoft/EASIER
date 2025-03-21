@@ -215,7 +215,7 @@ class AllReducePrimitivesRewriter(EasierInterpreter):
     ```
     %worker_local = esr.reduce(%x, *worker_local_args)
     ~~~~~~~~~~~~~
-    %allgather = all_gather(%worker_local)
+    %allgather = all_gather_into_tensor(%worker_local)
     %replica = esr.reduce(%allgather, *replica_args)
 
     %b = continuation1(%replica)

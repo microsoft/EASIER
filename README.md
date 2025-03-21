@@ -23,7 +23,7 @@ Prepare the virtual environment, install dependencies and install EASIER:
 
 ```shell
 # for conda
-conda create -n ENV_NAME python=3.13
+conda create -n ENV_NAME python
 conda activate ENV_NAME
 
 # for conda, run this only when you see compile/link errors with following `pip` commands

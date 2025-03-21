@@ -13,7 +13,7 @@ from easier.examples.models import Poisson, Circuit, Poisson1D
 @pytest.mark.usefixtures('dummy_dist_env')
 class TestLinearSolver:
 
-    backend_list = ['torch', 'cpu', 'gpu'] if torch.cuda.is_available() \
+    backend_list = ['torch', 'cpu', 'cuda'] if torch.cuda.is_available() \
         else ['torch', 'cpu']
 
     def test_cg(self):

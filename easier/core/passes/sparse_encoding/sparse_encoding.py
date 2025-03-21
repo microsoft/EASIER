@@ -619,7 +619,7 @@ def log_rewrite_statistics(
     nrecv_reducer = 0
 
     for submod, _oset in get_selectors_reducers(modules, graphs).items():
-        workers_recv_lengths = dist_env.gather_object(
+        workers_recv_lengths = dist_env.gather_object_list(
             0, submod.runtime_halos_recv_lengths
         )
         if dist_env.rank == 0:

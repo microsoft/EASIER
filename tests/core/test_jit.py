@@ -15,7 +15,9 @@ from easier.core.passes.utils import OrderedSet
 from easier.examples import Poisson
 from easier.core.runtime.dist_env import DummyDistEnv
 
-from ..utils import torchrun_singlenode, get_random_str
+from ..utils import \
+    torchrun_singlenode, get_random_str, \
+    mpi_e2e, mpirun_singlenode
 
 
 class Model(esr.Module):
@@ -109,7 +111,7 @@ def test_jit_orphan_tensors():
             self.v[:] = self.v + 3
 
     m = M()
-    jitted, = esr.compile([m])  # type: ignore
+    jitted, = esr.compile([m], 'torch')  # type: ignore
     jitted: M
     jitted()
     v = jitted.v.collect()
@@ -152,7 +154,7 @@ def test_nested_easier_modules():
             self.inner.v[:] = self.r(k)
 
     outer = Outer()
-    j_outer, = esr.compile([outer])
+    j_outer, = esr.compile([outer], 'torch')
 
     g: Graph = j_outer.forward.__self__.graph  # type: ignore
     for n in g.nodes:
@@ -200,10 +202,8 @@ def worker__test_collect(local_rank: int, world_size: int,
 
     if jit_backend == 'torch':
         comm_dev_type = model_dev.type
-    elif jit_backend == 'cpu':
-        comm_dev_type = 'cpu'
-    elif jit_backend == 'gpu':
-        comm_dev_type = 'cuda'
+    else:
+        comm_dev_type = jit_backend
 
     from easier.core.runtime.dist_env import get_runtime_dist_env
     if comm_dev_type == 'cpu':
@@ -263,6 +263,10 @@ when_ngpus_ge_2 = pytest.mark.skipif(
     reason="no enough CUDA GPU (ngpus >= 2) to test distribution")
 
 
+@pytest.mark.parametrize('xrun_singlenode', [
+    torchrun_singlenode,
+    pytest.param(mpirun_singlenode, marks=mpi_e2e)
+])
 class TestJittedUsage:
 
     @pytest.mark.parametrize('dev_type', [
@@ -272,18 +276,16 @@ class TestJittedUsage:
     @pytest.mark.parametrize('jit_backend', [
         'torch',
         'cpu',
-        pytest.param('gpu', marks=when_ngpus_ge_2)
+        pytest.param('cuda', marks=when_ngpus_ge_2)
     ])
-    def test_collect(self, dev_type: str, jit_backend: str):
+    def test_collect(
+        self, xrun_singlenode, dev_type: str, jit_backend: str
+    ):
         if jit_backend == 'torch':
             init_type = dev_type
-        elif jit_backend == 'cpu':
-            init_type = 'cpu'
-        elif jit_backend == 'gpu':
-            init_type = 'cuda'
         else:
-            assert False
-        torchrun_singlenode(
+            init_type = jit_backend
+        xrun_singlenode(
             2, worker__test_collect,
             (dev_type, jit_backend),
             init_type=init_type  # type: ignore
@@ -293,8 +295,8 @@ class TestJittedUsage:
         'cpu',
         pytest.param('cuda', marks=when_ngpus_ge_2)
     ])
-    def test_save(self, dev_type: str):
-        torchrun_singlenode(
+    def test_save(self, xrun_singlenode, dev_type: str):
+        xrun_singlenode(
             2, worker__test_save, (dev_type,),
             init_type=dev_type  # type: ignore
         )

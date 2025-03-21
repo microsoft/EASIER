@@ -621,9 +621,9 @@ def worker__test_preserve_symmetry(local_rank, world_size):
     else:
         rs, cs, ws = None, None, None
 
-    rowptr = dist_env.scatter_object(0, rs)  # type: ignore
-    colidx = dist_env.scatter_object(0, cs)  # type: ignore
-    adjw = dist_env.scatter_object(0, ws)  # type: ignore
+    rowptr = dist_env.scatter_object_list(0, rs)  # type: ignore
+    colidx = dist_env.scatter_object_list(0, cs)  # type: ignore
+    adjw = dist_env.scatter_object_list(0, ws)  # type: ignore
 
     def _hook_metis(nparts, rowptr, colidx, vwgt, adjwgt):
         cnv = int(rowptr.shape[0]) - 1

@@ -629,10 +629,10 @@ class Module(nn.Module):
         self.easier_hint_name: str
 
         self.easier_jit_backend: Literal[
-            'torch', 'cpu', 'gpu', 'none', None
+            'torch', 'cpu', 'cuda', 'none', None
         ] = None
 
-        # Only has value when jit_backend in ['torch','cpu','gpu']
+        # Only has value when jit_backend in ['torch','cpu','cuda']
         self.partition_mode: Literal['metis', 'evenly']
 
         # Each Module shares the ElemPart dict of all Modules in JIT session.

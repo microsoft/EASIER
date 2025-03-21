@@ -370,7 +370,7 @@ def dump(
     else:
         m1 = Model1(x=easier.zeros(...))  # x data is uninitialized
 
-        [m1, m2, minit] = easier.compile([m1, m2, minit])
+        [m1, m2, minit] = easier.compile([m1, m2, minit], 'torch')
 
         # OK to dump after easier.compile(), and dump a subset of modules
         easier.dump([m1, m2], dump_dir='/mnt/checkpoint')
@@ -410,10 +410,10 @@ def dump(
             modules.append(obj)
 
     for root in modules:
-        if root.easier_jit_backend not in ['torch', 'cpu', 'gpu']:
+        if root.easier_jit_backend not in ['torch', 'cpu', 'cuda']:
             raise RuntimeError(
                 "Only easier.Module compiled with backend"
-                " 'torch', 'cpu', 'gpu' can be dumped"
+                " 'torch', 'cpu', 'cuda' can be dumped"
             )
 
     dist_env = get_runtime_dist_env()

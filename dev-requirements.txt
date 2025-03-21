@@ -1,14 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-pytest==8.3.4
-more-itertools==10.6.0
-numpy==2.2.3
-scipy==1.15.2
-matplotlib==3.10.0
-torch==2.6.0
-pymetis==2023.1.1
-h5py==3.13.0
-tqdm==4.67.1
-pyvista==0.44.1
-imageio==2.37.0
+pytest
+more-itertools
+numpy
+scipy
+torch
+pymetis
+h5py
