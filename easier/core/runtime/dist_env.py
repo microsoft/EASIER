@@ -23,7 +23,7 @@ from easier.core.utils import logger, EasierJitException
 _T = TypeVar("_T")
 
 
-def _wrap_commapi_pre_filter(prefilter, api):
+def _wrap_comm_api(prefilter, api):
     """
     Both `api` and `pre_filter` function objects are not 
     bound to some DistEnv instance yet, the `self` argument
@@ -83,8 +83,7 @@ class DistEnv:
                 pre_filter = getattr(DistEnv, '_pre_' + member_name, None)
                 if pre_filter is not None:
                     setattr(
-                        cls, member_name,
-                        _wrap_commapi_pre_filter(pre_filter, member)
+                        cls, member_name, _wrap_comm_api(pre_filter, member)
                     )
 
     @typing.overload

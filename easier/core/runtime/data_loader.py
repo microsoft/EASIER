@@ -42,7 +42,7 @@ def _get_offset_exactly_nparts(orig_len: int, nparts: int, part: int
     return start, end
 
 
-def _wrap_data_loader_filters(prefilter, postfilter, api):
+def _wrap_data_loader_api(prefilter, postfilter, api):
     if prefilter is None and postfilter is None:
         return api
 
@@ -104,7 +104,7 @@ class DataLoaderBase:
                 )
                 setattr(
                     cls, member_name,
-                    _wrap_data_loader_filters(pre_filter, post_filter, member)
+                    _wrap_data_loader_api(pre_filter, post_filter, member)
                 )
 
     def coll_check_dtype_shape_devicetype(self):
