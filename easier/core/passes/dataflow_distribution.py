@@ -202,6 +202,9 @@ class ReorderingSelectorInserter(EasierInterpreter):
 
 class AllReducePrimitivesRewriter(EasierInterpreter):
     """
+    TODO we shouldn't just simply choose to rewrite aggregators to all_gather,
+    we should carefully choose all_reduce and AllReduceOp.SUM etc.
+
     To achieve the transformation:
     ```
     %a = esr.reduce(%x)

@@ -36,6 +36,19 @@ def _wrap_commapi_pre_filter(prefilter, api):
     return wrapper
 
 
+"""
+The current hierarchy of DistEnv subclasses:
+
+-DistEnv: the abstract base
+|-DummyDistEnv: uses deepcopy to simulate communication,
+|               mainly for one-process test cases
+|-TorchDistEnv: directly wraps torch.distributed APIs, reimplements some APIs
+ |              to fit it with EASIER use cases
+ |-TorchGlooDistEnv: reimplements some methods specifically for 'gloo' backend
+ |-TorchMpiDistEnv:  reimplements some methods specifically for 'mpi' backend
+"""
+
+
 class DistEnv:
     def __init__(
         self,
@@ -232,6 +245,8 @@ class DistEnv:
     def _pre_all_to_all(self, tensors):
         assert len(tensors) == self.world_size
         for i, tensor in enumerate(tensors):
+            # all-to-all only used in sparse encoding pass to exchange indexes
+            # where the ndim is always 1.
             assert tensor.ndim == 1
         dtypes = set(t.dtype for t in tensors)
         assert len(dtypes) == 1
@@ -551,6 +566,8 @@ class TorchDistEnv(DistEnv):
                                     dtype=torch.int64, device=self.comm_device)
         recv_lengths = self.all_to_all_single(send_lengths)
 
+        # used in sparse encoding to exchange indexes, also has been asserted
+        # in _pre_all_to_all filter.
         buffers = [
             torch.empty((recv_length,), dtype=dtype, device=self.comm_device)
             for recv_length in recv_lengths.tolist()
@@ -742,6 +759,8 @@ class TorchDistGlooDistEnv(TorchDistEnv):
     def all_to_all(self, tensors: Sequence[torch.Tensor]) -> List[torch.Tensor]:
         """
         GLOO doesn't support all to all.
+
+        Use P2P to implement the all-to-all data exchange.
         """
         dtype = tensors[0].dtype
         send_lengths = torch.tensor([t.shape[0] for t in tensors],
@@ -760,6 +779,8 @@ class TorchDistGlooDistEnv(TorchDistEnv):
         for w in range(self.world_size):
             if w != self.rank:
                 recv_length = int(recv_lengths[w])
+                # ndim is always 1, for sparse encoding to exchange indexes,
+                # has been asserted in _pre_all_to_all filter.
                 buffer = torch.empty(
                     (recv_length,), dtype=dtype, device=self.comm_device)
                 buffers.append(buffer)
@@ -788,6 +809,9 @@ class TorchDistMpiDistEnv(TorchDistEnv):
         split and concat).
         Currently we only use all_gather_into_tensor for runtime aggregators,
         we explicitly exclude cases of different sizes.
+
+        TODO all_gather_into_tensor only serves for EASIER aggregators,
+        we should change it to use all_reduce primitive when possible.
         """
         shape = list(send_tensor.shape)
 
@@ -826,6 +850,12 @@ class TorchDistMpiDistEnv(TorchDistEnv):
 
         Now we simply keep the definition-only semantics of def_isend/irecv
         and invoke all at once here.
+
+        TODO mpi (including mpi-cuda) and gloo backends do not require
+        a batch sends/recvs, then we can take advantage of asynchronous
+        tensor slicing and sending (p.s. tensor slicing is in HaloExchangers).
+        Specifically, this is used in runtime HaloExchangers, we need to
+        implement it with best possible performance.
 
         TODO However, MPI supports both CPU/GPU ops, including P2P,
         (if it's CUDA-aware and all_gather_into_tensor fix is still needed)
@@ -1035,7 +1065,11 @@ def set_dist_env_runtime_backend_config(
     # TODO will data-to-send still be too big for CUDA memory, even though
     # we move AOT-compilation data back to CPU each time after comm?
     global _comm_backend_config
-    assert _comm_backend_config is None
+    if _comm_backend_config is not None:
+        raise EasierJitException(
+            "`easier.init()` should be called only once"
+        )
+
     _comm_backend_config = CommBackendConfig(comm_backend_config_str)
 
     _comm_backend_config.backend_specific_setup()

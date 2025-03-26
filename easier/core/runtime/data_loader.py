@@ -42,6 +42,21 @@ def _get_offset_exactly_nparts(orig_len: int, nparts: int, part: int
     return start, end
 
 
+def _wrap_data_loader_filters(prefilter, postfilter, api):
+    if prefilter is None and postfilter is None:
+        return api
+
+    @functools.wraps(api)
+    def wrapper(this, *args, **kwargs):
+        if prefilter is not None:
+            prefilter(this, *args, **kwargs)
+        res = api(this, *args, **kwargs)
+        if postfilter is not None:
+            res = postfilter(this, res, *args, **kwargs)
+        return res
+    return wrapper
+
+
 class DataLoaderBase:
     """
     The data loader for one specified data source, e.g. a HDF5 dataset.
@@ -67,6 +82,30 @@ class DataLoaderBase:
         # e.g. "(Module).(a.b.c:Selector).idx"
         # Decided during `esr.compile()`
         self.easier_hint_name: str
+
+    def __init_subclass__(cls) -> None:
+        """
+        Before a data loader API provided by a subclass runs,
+        any _prefilter_ and _postfilter_ defined in this DataLoaderBase will
+        run to check the environment and ensure critical requirements are
+        satisfied.
+        """
+        for member_name, member in list(cls.__dict__.items()):
+            # cls.__dict__ doesn't contain inherited methods from DistEnv
+            if callable(member):
+                # both `member` and `pre/post_filter` function objects are not
+                # bound to some DataLoader instance yet, the `self` argument
+                # will be included at the head in `args` in the wrapper.
+                pre_filter = getattr(
+                    DataLoaderBase, '_pre_' + member_name, None
+                )
+                post_filter = getattr(
+                    DataLoaderBase, '_post_' + member_name, None
+                )
+                setattr(
+                    cls, member_name,
+                    _wrap_data_loader_filters(pre_filter, post_filter, member)
+                )
 
     def coll_check_dtype_shape_devicetype(self):
         check_collective_equality(
@@ -114,6 +153,22 @@ class DataLoaderBase:
         """
         raise NotImplementedError()
 
+    def _pre_partially_load_by_chunk(self, chunk_size):
+        dist_env = get_runtime_dist_env()
+        assert dist_env.rank == 0, \
+            "Loading-by-chunk is only available on rank-0"
+
+    def _post_partially_load_by_chunk(
+        self, res: Iterator[torch.Tensor], chunk_size
+    ) -> Iterator[torch.Tensor]:
+        def _check_item(chunk):
+            assert chunk.device.type == 'cpu'
+            return chunk
+
+        # `map()` make a new iterator, the `_check_item` is run when the
+        # iterator get actually iterated.
+        return map(_check_item, res)
+
     def partially_load_by_rank(self) -> Tuple[torch.Tensor, int, int]:
         """
         Collectively load an evenly distributed part of the target dataset
@@ -125,6 +180,11 @@ class DataLoaderBase:
         - int: the end offset of the part (exclusive)
         """
         raise NotImplementedError()
+
+    def _post_partially_load_by_rank(self, res):
+        (tensor, begin, end) = res
+        assert tensor.device.type == 'cpu'
+        return res
 
     def partially_load_by_index(self, index: torch.Tensor, **kwargs
                                 ) -> torch.Tensor:
@@ -141,6 +201,13 @@ class DataLoaderBase:
         - torch.Tensor: the loaded part, always on CPU
         """
         raise NotImplementedError()
+
+    def _pre_partially_load_by_index(self, index, **kwargs):
+        assert index.device.type == 'cpu'
+
+    def _post_partially_load_by_index(self, res, index, **kwargs):
+        assert res.device.type == 'cpu'
+        return res
 
     def fully_load(self, device: Union[torch.device, str]) -> torch.Tensor:
         """
@@ -238,12 +305,9 @@ class InMemoryTensorLoader(DataLoaderBase):
     def count_unique(self) -> int:
         return self.tensor.unique().shape[0]
 
-    def partially_load_by_chunk(self, chunk_size: int
-                                ) -> Iterator[torch.Tensor]:
-        dist_env = get_runtime_dist_env()
-        assert dist_env.rank == 0, \
-            "Loading-by-chunk is only available on rank-0"
-
+    def partially_load_by_chunk(
+        self, chunk_size: int
+    ) -> Iterator[torch.Tensor]:
         orig_len = self.tensor.shape[0]
 
         # Put tailing elements in an individual chunk whose size is smaller.
@@ -272,9 +336,9 @@ class InMemoryTensorLoader(DataLoaderBase):
 
         return self.tensor[start:end].clone(), start, end
 
-    def partially_load_by_index(self, index: torch.Tensor,
-                                **kwargs) -> torch.Tensor:
-        assert index.device == torch.device('cpu')
+    def partially_load_by_index(
+        self, index: torch.Tensor, **kwargs
+    ) -> torch.Tensor:
         return self.tensor[index]
 
     def fully_load(self, device: Union[torch.device, str]) -> torch.Tensor:
@@ -408,7 +472,8 @@ class H5DataLoader(DataLoaderBase):
             raise NotImplementedError("Not supporting floats yet")
 
         amin, amax = self.minmax()
-        assert amin >= 0, "simplify for Reducer.fullness cases"
+        if not (amin >= 0):
+            raise NotImplementedError("simplify for Reducer.fullness cases")
         assert isinstance(amax, int)
 
         dist_env = get_runtime_dist_env()
@@ -449,12 +514,9 @@ class H5DataLoader(DataLoaderBase):
 
         return nunique
 
-    def partially_load_by_chunk(self, chunk_size: int
-                                ) -> Iterator[torch.Tensor]:
-        dist_env = get_runtime_dist_env()
-        assert dist_env.rank == 0, \
-            "Loading-by-chunk is only available on rank-0"
-
+    def partially_load_by_chunk(
+        self, chunk_size: int
+    ) -> Iterator[torch.Tensor]:
         orig_len = self.shape[0]
 
         # Put tailing elements in an individual chunk whose size is smaller.
@@ -529,8 +591,6 @@ class H5DataLoader(DataLoaderBase):
         Args:
         - index: element index in the global index space, may be not ordered.
         """
-        assert index.device == torch.device('cpu')
-
         sorted_index, sort_pos = torch.sort(index, stable=True)
 
         dist_env = get_runtime_dist_env()
@@ -649,10 +709,6 @@ class FulledTensorLoader(DataLoaderBase):
 
     def partially_load_by_chunk(self, chunk_size: int
                                 ) -> Iterator[torch.Tensor]:
-        dist_env = get_runtime_dist_env()
-        assert dist_env.rank == 0, \
-            "Loading-by-chunk is only available on rank-0"
-
         orig_len = self.shape[0]
 
         # Put tailing elements in an individual chunk whose size is smaller.
@@ -726,12 +782,9 @@ class ArangeTensorLoader(DataLoaderBase):
     def count_unique(self) -> int:
         return self.shape[0]
 
-    def partially_load_by_chunk(self, chunk_size: int
-                                ) -> Iterator[torch.Tensor]:
-        dist_env = get_runtime_dist_env()
-        assert dist_env.rank == 0, \
-            "Loading-by-chunk is only available on rank-0"
-
+    def partially_load_by_chunk(
+        self, chunk_size: int
+    ) -> Iterator[torch.Tensor]:
         orig_len = self.shape[0]
 
         # Put tailing elements in an individual chunk whose size is smaller.
