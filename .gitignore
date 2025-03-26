@@ -7,6 +7,7 @@
 *.pth
 *.msh
 *.mtx
+!tutorial/*.png
 !docs/images/*.png
 .vs/
 TestResults/
