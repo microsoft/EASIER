@@ -86,8 +86,6 @@ jobs:
 
     - name: Install EASIER
       run: |
-        sudo apt-get install libopenmpi-dev
-        pip install Cython==3.0.11 mpi4py==3.1.5
         pip install -r dev-requirements.txt
         pip install -e .
 
