@@ -23,16 +23,19 @@ from easier.core.utils import logger, EasierJitException
 _T = TypeVar("_T")
 
 
-def _wrap_comm_api(prefilter, api):
+def _wrap_function(pre_hook, func):
     """
-    Both `api` and `pre_filter` function objects are not 
+    Both `api` and `pre_hook` function objects are not 
     bound to some DistEnv instance yet, the `self` argument
     will be included at the head in `args` in the wrapper.
+
+    NOTE Python captures capsule by stackframe, a dedicated function like
+    this is required, in case this is called wihtin a loop.
     """
-    @functools.wraps(api)
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        args, kwargs = prefilter(*args, **kwargs)
-        return api(*args, **kwargs)
+        args, kwargs = pre_hook(*args, **kwargs)
+        return func(*args, **kwargs)
     return wrapper
 
 
@@ -77,13 +80,13 @@ class DistEnv:
         for member_name, member in list(cls.__dict__.items()):
             # cls.__dict__ doesn't contain inherited methods from DistEnv
             if callable(member):
-                # both `member` and `pre_filter` function objects are not
+                # both `member` and `pre_hook` function objects are not
                 # bound to some DistEnv instance yet, the `self` argument
                 # will be included at the head in `args` in the wrapper.
-                pre_filter = getattr(DistEnv, '_pre_' + member_name, None)
-                if pre_filter is not None:
+                pre_hook = getattr(DistEnv, '_pre_' + member_name, None)
+                if pre_hook is not None:
                     setattr(
-                        cls, member_name, _wrap_comm_api(pre_filter, member)
+                        cls, member_name, _wrap_function(pre_hook, member)
                     )
 
     @typing.overload

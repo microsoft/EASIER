@@ -42,17 +42,16 @@ def _get_offset_exactly_nparts(orig_len: int, nparts: int, part: int
     return start, end
 
 
-def _wrap_data_loader_api(prefilter, postfilter, api):
-    if prefilter is None and postfilter is None:
-        return api
-
-    @functools.wraps(api)
+def _wrap_function(pre_hook, post_hook, func):
+    # NOTE Python captures capsule by stackframe, a dedicated function like
+    # this is required, in case this is called wihtin a loop.
+    @functools.wraps(func)
     def wrapper(this, *args, **kwargs):
-        if prefilter is not None:
-            prefilter(this, *args, **kwargs)
-        res = api(this, *args, **kwargs)
-        if postfilter is not None:
-            res = postfilter(this, res, *args, **kwargs)
+        if pre_hook is not None:
+            pre_hook(this, *args, **kwargs)
+        res = func(this, *args, **kwargs)
+        if post_hook is not None:
+            res = post_hook(this, res, *args, **kwargs)
         return res
     return wrapper
 
@@ -93,18 +92,18 @@ class DataLoaderBase:
         for member_name, member in list(cls.__dict__.items()):
             # cls.__dict__ doesn't contain inherited methods from DistEnv
             if callable(member):
-                # both `member` and `pre/post_filter` function objects are not
+                # both `member` and `pre/post_hook` function objects are not
                 # bound to some DataLoader instance yet, the `self` argument
                 # will be included at the head in `args` in the wrapper.
-                pre_filter = getattr(
+                pre_hook = getattr(
                     DataLoaderBase, '_pre_' + member_name, None
                 )
-                post_filter = getattr(
+                post_hook = getattr(
                     DataLoaderBase, '_post_' + member_name, None
                 )
                 setattr(
                     cls, member_name,
-                    _wrap_data_loader_api(pre_filter, post_filter, member)
+                    _wrap_function(pre_hook, post_hook, member)
                 )
 
     def coll_check_dtype_shape_devicetype(self):
