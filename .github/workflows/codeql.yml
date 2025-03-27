@@ -28,18 +28,11 @@ jobs:
     #   - https://gh.io/using-larger-runners (GitHub.com only)
     # Consider using larger runners or machines with greater resources for possible analysis time improvements.
 
-    # The image 'ubuntu-22.04' has Python 3.10 by default,
-    # compatible with EASIER development minimum requirements, namely numpy==1.24 for Python 3.8.
-    #
     # The image 'ubuntu-latest' is `ubuntu-24.04', see:
     #   - https://github.com/actions/runner-images/issues/10636
-    # it has Python 3.12 by default,
-    # and there is no numpy version compatible with Python 3.12
-    # and Python 3.8 which we use for EASIER development.
-    #
-    # (P.S. please see `actions/setup-python@v5` comment for more about fixing ubuntu version)
-    #
-    runs-on: 'ubuntu-22.04'
+    # it has Python 3.12 by default, see:
+    #  - https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md
+    runs-on: 'ubuntu-latest'
 
     permissions:
       # required for all workflows
@@ -59,7 +52,7 @@ jobs:
         - language: python
           build-mode: none
         - language: c-cpp
-          build-mode: autobuild
+          build-mode: manual
 
         # CodeQL supports the following values keywords for 'language': 'c-cpp', 'csharp', 'go', 'java-kotlin', 'javascript-typescript', 'python', 'ruby', 'swift'
         # Use `c-cpp` to analyze code written in C, C++ or both
@@ -74,8 +67,8 @@ jobs:
       uses: actions/checkout@v4
 
     # NOTE
-    # We rely on `runs-on: 'ubuntu-22.04'` to offer the proper Python
-    # installation, i.e. Python 3.10.
+    # We rely on `runs-on: 'ubuntu-latest'` to offer the proper Python
+    # installation, i.e. Python 3.12.
     # Setting up Python using `actions/setup-python` will cause mgmetis
     # unable to be installed.
     #
@@ -84,10 +77,9 @@ jobs:
     #  with:
     #    python-version: '3.8'
 
-    - name: Install EASIER
+    - name: Install EASIER dependencies
       run: |
         pip install -r dev-requirements.txt
-        pip install -e .
 
     # Initializes the CodeQL tools for scanning.
     - name: Initialize CodeQL
@@ -102,21 +94,27 @@ jobs:
         # For more details on CodeQL's query packs, refer to: https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/configuring-code-scanning#using-queries-in-ql-packs
         # queries: security-extended,security-and-quality
 
+    # cpp extension gets built here, unconditionally,
+    # aligning with 'build-mode: manual'
+    - name: Install EASIER
+      run: |
+        pip install -v -e .
+
     # If the analyze step fails for one of the languages you are analyzing with
     # "We were unable to automatically build your code", modify the matrix above
     # to set the build mode to "manual" for that language. Then modify this step
     # to build your code.
     # ℹ️ Command-line programs to run using the OS shell.
     # 📚 See https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsrun
-    - if: matrix.build-mode == 'manual'
-      shell: bash
-      run: |
-        echo 'If you are using a "manual" build mode for one or more of the' \
-          'languages you are analyzing, replace this with the commands to build' \
-          'your code, for example:'
-        echo '  make bootstrap'
-        echo '  make release'
-        exit 1
+    # - if: matrix.build-mode == 'manual'
+    #   shell: bash
+    #   run: |
+    #     echo 'If you are using a "manual" build mode for one or more of the' \
+    #       'languages you are analyzing, replace this with the commands to build' \
+    #       'your code, for example:'
+    #     echo '  make bootstrap'
+    #     echo '  make release'
+    #     exit 1
 
     - name: Perform CodeQL Analysis
       uses: github/codeql-action/analyze@v3
