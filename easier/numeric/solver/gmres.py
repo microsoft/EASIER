@@ -57,11 +57,11 @@ class InitW(esr.Module):
         self.V = V
         self.w = w
         self.j = esr.Tensor(
-            torch.tensor(0, dtype=torch.int32, device=V.device),
+            torch.tensor([0], dtype=torch.int32, device=V.device),
             mode='replicate')
 
     def forward(self):
-        self.w[:] = self.A(self.M(self.V[:, ..., self.j]))
+        self.w[:] = self.A(self.M(self.V[:, ..., self.j].squeeze(-1)))
 
 
 class SumW(esr.Module):
@@ -72,11 +72,11 @@ class SumW(esr.Module):
         self.w = w
         self.h = h
         self.i = esr.Tensor(
-            torch.tensor(0, dtype=torch.int32, device=V.device),
+            torch.tensor([0], dtype=torch.int32, device=V.device),
             mode='replicate')
 
     def forward(self):
-        self.h[:] = esr.sum(self.V[:, ..., self.i] * self.w).sum()
+        self.h[:] = esr.sum(self.V[:, ..., self.i].squeeze(-1) * self.w).sum()
 
 
 class NormW(esr.Module):
@@ -98,11 +98,11 @@ class UpdateW(esr.Module):
         self.w = w
         self.h = h
         self.i = esr.Tensor(
-            torch.tensor(0, dtype=torch.int32, device=V.device),
+            torch.tensor([0], dtype=torch.int32, device=V.device),
             mode='replicate')
 
     def forward(self):
-        self.w.sub_(self.h * self.V[:, ..., self.i])
+        self.w.sub_(self.h * self.V[:, ..., self.i].squeeze(-1))
 
 
 class UpdateV(esr.Module):
@@ -113,11 +113,11 @@ class UpdateV(esr.Module):
         self.w = w
         self.h = h
         self.i = esr.Tensor(
-            torch.tensor(0, dtype=torch.int32, device=V.device),
+            torch.tensor([0], dtype=torch.int32, device=V.device),
             mode='replicate')
 
     def forward(self):
-        self.V[:, ..., self.i] = self.w / self.h
+        self.V[:, ..., self.i] = (self.w / self.h)[:, ..., None]
 
 
 class UpdateX(esr.Module):
