@@ -66,15 +66,15 @@ class PoissonMeshComponentsCollector(esr.Module):
 
         for i in range(3):
             # (ne,)
-            self.src_p[i].set_(src_p[:, i])
-            self.dst_p[i].set_(dst_p[:, i])
+            self.src_p[i].copy_(src_p[:, i])
+            self.dst_p[i].copy_(dst_p[:, i])
 
             # (nc,)
-            self.cells_p[i].set_(self.cells[:, i])
+            self.cells_p[i].copy_(self.cells[:, i])
 
         for i in range(2):
             # (nbc,)
-            self.bp[i].set_(self.bpoints[:, i])
+            self.bp[i].copy_(self.bpoints[:, i])
 
 
 class PoissonInitializer(esr.Module):

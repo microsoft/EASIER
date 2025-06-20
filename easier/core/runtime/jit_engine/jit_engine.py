@@ -253,6 +253,16 @@ class ViewSrcTrackerBase(NodeHandlerBase):
         self.addr2refcount: Dict[int, int] = {}
         self.addr2viewsrc: Dict[int, ViewSrc] = {}
 
+        # TODO record (within storage lifetime) the address of a tensor,
+        # we need the invariant that tensor storage never changes
+        # because they are allocated by EASIER AOT.
+        # E.g. Tensor.set_ resets the storage, but Tensor.copy_ does not.
+        # self.tensor2addr: Dict[torch.Tensor, int] = {}
+        #
+        # NOTE but if it's not an esr.Tensor, but an immediate tensors, can
+        # their storage be changed? We can detect the change and decr refcount
+        # before resetting and incr refcount of the shared storage.
+
     def _get_indexed_addr(
         self, iaddr_node: Node, val: RuntimeValue,
         *,
