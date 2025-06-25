@@ -1198,7 +1198,7 @@ def unbalanced_compute_heartbeat(compute_hint: str = ""):
                 task_duration = task_duration_list[0]
 
             all_durations = dist_env.all_gather_into_tensor(
-                torch.tensor([task_duration], device=dist_env.comm_device)
+                torch.tensor([task_duration], dtype=torch.float64, device=dist_env.comm_device)
             )
             if torch.all(all_durations >= 0):
 
