@@ -9,7 +9,7 @@ import torch
 from torch.fx.graph import Graph
 from easier.core.passes.tensor_group_partition import ElemPart
 
-from easier.core.runtime.dist_env import get_runtime_dist_env
+from easier.core.runtime.dist_env import get_runtime_dist_env, unbalanced_compute_heartbeat
 from easier.core.utils import logger
 import easier.core.module as esr
 
@@ -28,7 +28,7 @@ from easier.core.passes.utils import \
 def calculate_paired_in_out_idx(
     input_gidx_part: torch.Tensor,
     output_gidx_part: torch.Tensor,
-    output_elempart: 'ElemPart',
+    output_elempart: 'ElemPart'
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Calculate the data relations a Selector or Reducer specifies, regarding
@@ -83,9 +83,13 @@ def calculate_paired_in_out_idx(
     # and collects output_elempart from all other workers.
     for t in range(dist_env.world_size):
         output_elempart_t = broadcast_elempart(t, output_elempart)
-        gidx_part_this_to_t_mask = isin_elempart(
-            output_gidx_part, output_elempart_t
-        )
+
+        with unbalanced_compute_heartbeat(
+            f"calculate_paired_in_out_idx / {t}"
+        ):
+            gidx_part_this_to_t_mask = isin_elempart(
+                output_gidx_part, output_elempart_t
+            )
 
         # TODO if we really "zip" or `torch.stack` the in/out gidx tensors,
         # we see some similarity in both functions of two calculation phases,
@@ -95,8 +99,8 @@ def calculate_paired_in_out_idx(
 
         # The gidx data itself are stored on this worker, but the specified
         # elements may be not on this worker.
-        input_gidx_to_t = input_gidx_part[gidx_part_this_to_t_mask]
-        output_gidx_on_t = output_gidx_part[gidx_part_this_to_t_mask]
+            input_gidx_to_t = input_gidx_part[gidx_part_this_to_t_mask]
+            output_gidx_on_t = output_gidx_part[gidx_part_this_to_t_mask]
 
         input_gidxes_to_others.append(
             input_gidx_to_t.to(dist_env.comm_device)
@@ -161,22 +165,28 @@ def calculate_halo_info(
     # for all input_elemparts among workers, so we can simplify gidx first.
     # TODO if elemparts are also well-ordered e.g. ArangeIdx, we don't really
     # need to simplify gidx -- doing unique() is slower in such cases.
-    sorted_input_gidx = input_gidx_to_this.unique(sorted=True)
+    with unbalanced_compute_heartbeat(
+        "calculate_halo_info / unique"
+    ):
+        sorted_input_gidx = input_gidx_to_this.unique(sorted=True)
 
     for u in range(dist_env.world_size):
         input_elempart_u = broadcast_elempart(u, input_elempart)
 
-        halo_lidx_u_to_this = elempart_isin(
-            input_elempart_u, sorted_input_gidx, gidx_sorted=True
-        ).argwhere().ravel()
-        halo_lidxes_to_this.append(
-            halo_lidx_u_to_this.to(dist_env.comm_device)
-        )
+        with unbalanced_compute_heartbeat(
+            f"calculate_halo_info / {u}"
+        ):
+            halo_lidx_u_to_this = elempart_isin(
+                input_elempart_u, sorted_input_gidx, gidx_sorted=True
+            ).argwhere().ravel()
+            halo_lidxes_to_this.append(
+                halo_lidx_u_to_this.to(dist_env.comm_device)
+            )
 
-        halo_gidx_u_to_this = input_elempart_u.idx[halo_lidx_u_to_this]
-        halo_gidxes_to_this.append(
-            halo_gidx_u_to_this
-        )
+            halo_gidx_u_to_this = input_elempart_u.idx[halo_lidx_u_to_this]
+            halo_gidxes_to_this.append(
+                halo_gidx_u_to_this
+            )
 
     halo_lidxes_to_others: List[torch.Tensor] = [
         t.cpu() for t in
@@ -201,7 +211,10 @@ def reorder_output_by_selector(
     # NOTE We are NOT reorder the target ElemPart.idx to be sorted,
     # it's just for simplifying the examination of the raw output ElemPart,
     # and `calculate_paired_in_out_idx()` doesn't care of the order at all.
-    _sorted_output_elempart = sort_elempart(output_elempart_to_reorder)
+    with unbalanced_compute_heartbeat(
+        "reorder_selector / sort"
+    ):
+        _sorted_output_elempart = sort_elempart(output_elempart_to_reorder)
 
     input_gidx_to_this, output_gidx_on_this = calculate_paired_in_out_idx(
         input_idx_part,
@@ -211,9 +224,12 @@ def reorder_output_by_selector(
 
     # When output_elempart is loaded, it's already reordered.
     # As Selectors, all output_elempart elements are covered.
-    assert torch.equal(
-        output_gidx_on_this.sort()[0], _sorted_output_elempart.idx
-    )
+    with unbalanced_compute_heartbeat(
+        "reorder_selector / assert / sort"
+    ):
+        assert torch.equal(
+            output_gidx_on_this.sort()[0], _sorted_output_elempart.idx
+        )
 
     halo_gidxes_to_this, _halo_lidxes_to_others = \
         calculate_halo_info(
@@ -223,12 +239,15 @@ def reorder_output_by_selector(
 
     chunk_gidx_space = torch.concat(halo_gidxes_to_this)
 
-    _reordered_input_gidx_to_this, reordered_output_gidx_on_this, _pos = \
-        zipsort_using_order(
-            order=chunk_gidx_space,
-            to_sort=input_gidx_to_this,
-            to_follow=output_gidx_on_this
-        )
+    with unbalanced_compute_heartbeat(
+        f"reorder_selector / zipsort"
+    ):
+        _reordered_input_gidx_to_this, reordered_output_gidx_on_this, _pos = \
+            zipsort_using_order(
+                order=chunk_gidx_space,
+                to_sort=input_gidx_to_this,
+                to_follow=output_gidx_on_this
+            )
 
     # For both Selector and Reducer, on the side of the elempart to reorder,
     # the gidx tensor always has unique element global IDs, e.g.
@@ -285,22 +304,28 @@ def reorder_input_by_reducer(
     # will be related to output elements, on this or other workers.
     # If within the slices, discrete input elements can be reordered, it will
     # finally result in the halo being reordered by `output_elempart`.
-    assert sum(
-        halo_in.shape[0] for halo_in in unordered_halo_gidxes_to_this
-    ) == input_gidx_to_this.unique().shape[0] \
-      == input_gidx_to_this.shape[0], \
-        "each input element of the local Reducer has been prepared as the halo"
-    assert sum(
-        halo_out.shape[0] for halo_out in unordered_halo_lidxes_to_others
-    ) == input_elempart_to_reorder.idx.shape[0], \
-        "each input_elempart element is used once as the halo"
+    with unbalanced_compute_heartbeat(
+        "reorder_reducer / assert / sort"
+    ):
+        assert sum(
+            halo_in.shape[0] for halo_in in unordered_halo_gidxes_to_this
+        ) == input_gidx_to_this.unique().shape[0] \
+        == input_gidx_to_this.shape[0], \
+            "each input element of the local Reducer has been prepared as the halo"
+        assert sum(
+            halo_out.shape[0] for halo_out in unordered_halo_lidxes_to_others
+        ) == input_elempart_to_reorder.idx.shape[0], \
+            "each input_elempart element is used once as the halo"
 
-    _reordered_output_gidx_on_this, reordered_input_gidx_to_this, _pos = \
-        zipsort_using_order(
-            order=output_elempart.idx,
-            to_sort=output_gidx_on_this,
-            to_follow=input_gidx_to_this
-        )
+    with unbalanced_compute_heartbeat(
+        "reorder_reducer / zipsort"
+    ):
+        _reordered_output_gidx_on_this, reordered_input_gidx_to_this, _pos = \
+            zipsort_using_order(
+                order=output_elempart.idx,
+                to_sort=output_gidx_on_this,
+                to_follow=input_gidx_to_this
+            )
 
     # We try to reorder each halo at our best.
     # Intuitively, this will make the reordering Selector pattern less chaotic.
@@ -308,12 +333,15 @@ def reorder_input_by_reducer(
     for u in range(dist_env.world_size):
         unordered_gidx_from_u = unordered_halo_gidxes_to_this[u]
 
-        reordered_gidx_from_u = reordered_input_gidx_to_this[
-            torch.isin(reordered_input_gidx_to_this, unordered_gidx_from_u)
-        ]
-        reordered_halo_gidxes_to_this.append(
-            reordered_gidx_from_u.to(dist_env.comm_device)
-        )
+        with unbalanced_compute_heartbeat(
+            f"reorder_reducer / isin / {u}"
+        ):
+            reordered_gidx_from_u = reordered_input_gidx_to_this[
+                torch.isin(reordered_input_gidx_to_this, unordered_gidx_from_u)
+            ]
+            reordered_halo_gidxes_to_this.append(
+                reordered_gidx_from_u.to(dist_env.comm_device)
+            )
 
     reordered_halo_gidxes_to_others = \
         dist_env.all_to_all(reordered_halo_gidxes_to_this)
@@ -330,10 +358,13 @@ def reorder_input_by_reducer(
     ).cpu()
 
     # input_elempart may be loaded from a previous session
-    assert torch.equal(
-        reordered_input_elempart.sort()[0],
-        input_elempart_to_reorder.idx.sort()[0]
-    )
+    with unbalanced_compute_heartbeat(
+        "reorder_reducer / assert / equal sorted"
+    ):
+        assert torch.equal(
+            reordered_input_elempart.sort()[0],
+            input_elempart_to_reorder.idx.sort()[0]
+        )
 
     return (input_gidx_to_this, output_gidx_on_this), reordered_input_elempart
 
@@ -352,11 +383,14 @@ def rewrite_selector_instance(
     dist_env = get_runtime_dist_env()
     rank = dist_env.rank
 
-    _reordered_output_gidx, reordered_input_gidx, _pos = zipsort_using_order(
-        order=output_elempart.idx,
-        to_sort=output_gidx_on_this,
-        to_follow=input_gidx_to_this
-    )
+    with unbalanced_compute_heartbeat(
+        "rewrite_selector / zipsort"
+    ):
+        _reordered_output_gidx, reordered_input_gidx, _pos = zipsort_using_order(
+            order=output_elempart.idx,
+            to_sort=output_gidx_on_this,
+            to_follow=input_gidx_to_this
+        )
 
     # At runtime, and required by HaloExchanger implementation,
     # the this-to-this halo is not sliced out from tensors of input_elempart,
@@ -368,8 +402,11 @@ def rewrite_selector_instance(
     # The space is concated by many idx pieces,
     # because of sparse encoding and TensorGroup reordering,
     # both intra- and inter-pieces, elements are not monotonically increasing.
-    chunk_gidx_space = torch.concat(halo_gidxes_to_this)
-    rewritten_idx = vector_index_of(reordered_input_gidx, chunk_gidx_space)
+    with unbalanced_compute_heartbeat(
+        "rewrite_selector / index_of"
+    ):
+        chunk_gidx_space = torch.concat(halo_gidxes_to_this)
+        rewritten_idx = vector_index_of(reordered_input_gidx, chunk_gidx_space)
 
     selector.idx = rewritten_idx
     selector.easier_index_status = 'rewritten'
@@ -391,11 +428,14 @@ def rewrite_reducer_instance(
         input_gidx_to_this, input_elempart
     )
 
-    reordered_output_gidx, reordered_input_gidx, _pos = zipsort_using_order(
-        order=output_elempart.idx,
-        to_sort=output_gidx_on_this,
-        to_follow=input_gidx_to_this
-    )
+    with unbalanced_compute_heartbeat(
+        "rewrite_reducer / zipsort"
+    ):
+        reordered_output_gidx, reordered_input_gidx, _pos = zipsort_using_order(
+            order=output_elempart.idx,
+            to_sort=output_gidx_on_this,
+            to_follow=input_gidx_to_this
+        )
 
     # We immediately finding indexes against `reordered_output_gidx`.
     # If the Reducer itself doesn't have such sequentialness, we will insert
@@ -404,10 +444,13 @@ def rewrite_reducer_instance(
     #  chunk --reorderingSelector--> reorderedInputGidx ~~1-1dataRelation~~
     #  reorderedOutputGidx --localReducer--> outputTensor
     #
-    rewritten_idx = vector_index_of(reordered_output_gidx, output_elempart.idx)
+    with unbalanced_compute_heartbeat(
+        "rewrite_selector / index_of"
+    ):
+        rewritten_idx = vector_index_of(reordered_output_gidx, output_elempart.idx)
 
-    chunk_gidx_space = torch.concat(halo_gidxes_to_this)
-    selector_idx = vector_index_of(reordered_input_gidx, chunk_gidx_space)
+        chunk_gidx_space = torch.concat(halo_gidxes_to_this)
+        selector_idx = vector_index_of(reordered_input_gidx, chunk_gidx_space)
 
     # if Selector happens to have idx strictly ==arange(len(idx)), it means:
     # - previously in TensorGroup reordering, this local Reducer

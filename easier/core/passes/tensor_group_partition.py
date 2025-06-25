@@ -21,7 +21,7 @@ from easier.core.passes.utils import \
     get_selector_reducer_idx_partition_pair, \
     normalize_reducer_call_into_args, normalize_selector_call_into_args, \
     get_easier_tensors
-from easier.core.runtime.dist_env import get_runtime_dist_env
+from easier.core.runtime.dist_env import get_runtime_dist_env, unbalanced_compute_heartbeat
 from easier.core.distpart import distpart_kway, DistConfig
 from easier.core.utils import EasierJitException, logger
 
@@ -49,59 +49,52 @@ def parallel_partition_graph(
             must form a symmetric sparse matrix.
             (No matter how previous subpasses remap the IDs)
     """
+    with unbalanced_compute_heartbeat("assemble sparse adjmat"):
 
-    # NOTE
-    # - `csr_matrix` sums up duplicated matrix cells during construction
-    # - `csr_matrix` automatically choose int32/int64 for its `indptr` and
-    #   `indices` ndarrays regarding upperbounds of the height and the weight.
-    selector_graph = scipy.sparse.csr_matrix(
-        (subadjmat_height, adjmat_width), dtype=np.int32)
-    reducer_graph = scipy.sparse.csr_matrix(
-        (subadjmat_height, adjmat_width), dtype=np.int32)
+        # NOTE
+        # - `csr_matrix` sums up duplicated matrix cells during construction
+        # - `csr_matrix` automatically choose int32/int64 for its `indptr` and
+        #   `indices` ndarrays regarding upperbounds of the height and the weight.
+        selector_graph = scipy.sparse.csr_matrix(
+            (subadjmat_height, adjmat_width), dtype=np.int32)
+        reducer_graph = scipy.sparse.csr_matrix(
+            (subadjmat_height, adjmat_width), dtype=np.int32)
 
-    # Edge weights in the adjmat are:
-    # - if involved in Selectors, no matter how many times, weights are 1
-    # - each time involved in Reducers, those weights are increased by 10,
-    #   no matter how many edges there are.
-    for (commpair_rowids, commpair_colids, comm_pair) in rowcolids_and_causes:
-        assert commpair_rowids.ndim == commpair_colids.ndim == 1
-        assert commpair_rowids.shape == commpair_rowids.shape
+        # Edge weights in the adjmat are:
+        # - if involved in Selectors, no matter how many times, weights are 1
+        # - each time involved in Reducers, those weights are increased by 10,
+        #   no matter how many edges there are.
+        for (commpair_rowids, commpair_colids, comm_pair) in rowcolids_and_causes:
+            assert commpair_rowids.ndim == commpair_colids.ndim == 1
+            assert commpair_rowids.shape == commpair_rowids.shape
 
-        commpair_rowids = commpair_rowids.detach().cpu().numpy()
-        commpair_colids = commpair_colids.detach().cpu().numpy()
+            commpair_rowids = commpair_rowids.detach().cpu().numpy()
+            commpair_colids = commpair_colids.detach().cpu().numpy()
 
-        csr_ones = np.ones((commpair_rowids.shape[0],), dtype=np.int32)
-        commpair_graph = scipy.sparse.csr_matrix(
-            (csr_ones, (commpair_rowids, commpair_colids)),  # sum up dups
-            shape=(subadjmat_height, adjmat_width)
-        )
+            csr_ones = np.ones((commpair_rowids.shape[0],), dtype=np.int32)
+            commpair_graph = scipy.sparse.csr_matrix(
+                (csr_ones, (commpair_rowids, commpair_colids)),  # sum up dups
+                shape=(subadjmat_height, adjmat_width)
+            )
 
-        if comm_pair.caused_by_reducer:
-            # Clamp potentially summed up elements,
-            # so that this adjmat for some reducer, as a whole,
-            # has a single non-1 weight value.
-            commpair_graph = commpair_graph.minimum(1)
-            commpair_graph = commpair_graph * METIS_ADJWGT_REDUCER
+            if comm_pair.caused_by_reducer:
+                # Clamp potentially summed up elements,
+                # so that this adjmat for some reducer, as a whole,
+                # has a single non-1 weight value.
+                commpair_graph = commpair_graph.minimum(1)
+                commpair_graph = commpair_graph * METIS_ADJWGT_REDUCER
 
-            # It's efficient to add if both are in CSR format.
-            reducer_graph = reducer_graph + commpair_graph
+                # It's efficient to add if both are in CSR format.
+                reducer_graph = reducer_graph + commpair_graph
 
-        else:
-            selector_graph = selector_graph + commpair_graph
+            else:
+                selector_graph = selector_graph + commpair_graph
 
-        # Before processing there is always a collective call, so we can
-        # just record the processed event.
-        logger.debug(f"Sub adjmat for {comm_pair} processed")
-        # Add barriers between processing CommPairs, otherwise the difference
-        # in processing time will be accumulated and cause the next collective
-        # call (broadcast in distpart.coarsen_level) to timeout on ranks
-        # that have few nonzeros adjmat entries.
-        # TODO however, under a larger and extreme unbalanced setting
-        # it may still timeout, we may need to partition the processing into
-        # synchronized pieces.
-        get_runtime_dist_env().barrier()
+            # Before processing there is always a collective call, so we can
+            # just record the processed event.
+            logger.debug(f"Sub adjmat for {comm_pair} processed")
 
-    graph = selector_graph.minimum(1) + reducer_graph
+        graph = selector_graph.minimum(1) + reducer_graph
 
     local_membership = distpart_kway(
         DistConfig(
