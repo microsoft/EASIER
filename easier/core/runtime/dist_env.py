@@ -1226,7 +1226,7 @@ def unbalanced_compute_heartbeat(compute_hint: str = ""):
     min_duration = min(task_duration_list)
     wait_max = max_duration - min_duration
 
-    if wait_max > 0  :# * 60:
+    if wait_max > 1  :# * 60:
         duration_strs = [f'{d:.2f}' for d in task_duration_list]
         logger.debug(
             f"Unbalanced compute '{compute_hint}' waits {wait_max:.2f}s."
