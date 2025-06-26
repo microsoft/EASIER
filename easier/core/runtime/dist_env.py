@@ -1189,10 +1189,10 @@ def unbalanced_compute_heartbeat(compute_hint: str = ""):
     def _poll_thread_fn():
 
         dist_env = get_default_dist_env()
-        sleep = 1
+        sleep = 0.1
         while True:
             time.sleep(sleep)  # sleep up to 5s
-            sleep = min(5, sleep + 1)
+            sleep = min(5, sleep * 2)
 
             with lock:
                 task_duration = task_duration_list[0]
