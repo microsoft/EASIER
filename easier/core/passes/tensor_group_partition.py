@@ -398,7 +398,7 @@ def partition_tensor_groups_with_adjmat(
             idx_is_before_last_rank = \
                 colgrp_idx_part_w_cluster_ids < (world_size - 1)
 
-            colgrp_ids_w = torch.empty_like(colgrp_idx_part_w)
+            colgrp_ids_w = torch.full_like(colgrp_idx_part_w, fill_value=-1)
 
             def _for_column_clustersbefore_or_lastcluster(
                 clusters_kind_mask: torch.Tensor,
@@ -422,6 +422,8 @@ def partition_tensor_groups_with_adjmat(
                     clusters_offsets + colgrp_offset_in_cluster \
                     + remainders_in_cluster
 
+                assert torch.all(colgrp_ids_w[clusters_kind_mask] == -1), \
+                    "cluster ids should not be set twice"
                 colgrp_ids_w[clusters_kind_mask] = colgrp_ids_kind
 
             # for all ranks before the last: equal offsets and cluster sizes
@@ -431,6 +433,8 @@ def partition_tensor_groups_with_adjmat(
             _for_column_clustersbefore_or_lastcluster(
                 ~idx_is_before_last_rank, grps_offsets_in_cluster_lastrank
             )
+
+            assert torch.all(colgrp_ids_w != -1), "cluster ids all assigned"
 
             rowgrp_ids_to_send.append(rowgrp_ids_w.to(dist_env.comm_device))
             colgrp_ids_to_send.append(colgrp_ids_w.to(dist_env.comm_device))
