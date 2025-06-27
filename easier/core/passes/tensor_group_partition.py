@@ -21,7 +21,8 @@ from easier.core.passes.utils import \
     get_selector_reducer_idx_partition_pair, \
     normalize_reducer_call_into_args, normalize_selector_call_into_args, \
     get_easier_tensors
-from easier.core.runtime.dist_env import get_runtime_dist_env, unbalanced_compute_heartbeat
+from easier.core.runtime.dist_env import \
+    get_runtime_dist_env, unbalanced_compute_heartbeat
 from easier.core.distpart import distpart_kway, DistConfig
 from easier.core.utils import EasierJitException, logger
 
@@ -32,7 +33,7 @@ METIS_ADJWGT_REDUCER: int = 10
 def parallel_partition_graph(
     world_size: int, rank: int,
     subadjmat_height: int, adjmat_width: int, vtxdist: torch.Tensor,
-    rowcolids_and_causes: List[Tuple[torch.Tensor, torch.Tensor, 'CommPair']]
+    rowcolids_and_cps: List[Tuple[torch.Tensor, torch.Tensor, 'CommPair']]
 ):
     """
     Args:
@@ -49,12 +50,12 @@ def parallel_partition_graph(
             must form a symmetric sparse matrix.
             (No matter how previous subpasses remap the IDs)
     """
+    # NOTE
+    # - `csr_matrix` sums up duplicated matrix cells during construction
+    # - `csr_matrix` automatically choose int32/int64 for its `indptr` and
+    #   `indices` ndarrays regarding upperbounds of the height and the weight.
     with unbalanced_compute_heartbeat("assemble sparse adjmat"):
 
-        # NOTE
-        # - `csr_matrix` sums up duplicated matrix cells during construction
-        # - `csr_matrix` automatically choose int32/int64 for its `indptr` and
-        #   `indices` ndarrays regarding upperbounds of the height and the weight.
         selector_graph = scipy.sparse.csr_matrix(
             (subadjmat_height, adjmat_width), dtype=np.int32)
         reducer_graph = scipy.sparse.csr_matrix(
@@ -64,7 +65,7 @@ def parallel_partition_graph(
         # - if involved in Selectors, no matter how many times, weights are 1
         # - each time involved in Reducers, those weights are increased by 10,
         #   no matter how many edges there are.
-        for (commpair_rowids, commpair_colids, comm_pair) in rowcolids_and_causes:
+        for (commpair_rowids, commpair_colids, comm_pair) in rowcolids_and_cps:
             assert commpair_rowids.ndim == commpair_colids.ndim == 1
             assert commpair_rowids.shape == commpair_rowids.shape
 
@@ -469,7 +470,7 @@ def partition_tensor_groups_with_adjmat(
         world_size, rank,
         subadjmat_height=subadjmat_height, adjmat_width=int(vtxdist[-1]),
         vtxdist=vtxdist,
-        rowcolids_and_causes=rowcolids_for_commpairs)
+        rowcolids_and_cps=rowcolids_for_commpairs)
 
     return local_membership
 

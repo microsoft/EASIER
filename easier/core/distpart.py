@@ -9,7 +9,8 @@ import torch
 
 import scipy.sparse
 
-from easier.core.runtime.dist_env import get_runtime_dist_env, unbalanced_compute_heartbeat
+from easier.core.runtime.dist_env import \
+    get_runtime_dist_env, unbalanced_compute_heartbeat
 from easier.core.utils import logger
 import easier.cpp_extension as _C
 
@@ -615,9 +616,10 @@ def coarsen_level(
                 cnv_allocated += this_colocated_n
 
                 # NOTE Remaining `matched` elements are local vertexes
-                # that are matching with remote vertexes (on subsequent workers),
-                # they are processed in the `if rank < w:` part beblow in previous
-                # iterations of those subsequent workers.
+                # that are matching with remote vertexes
+                # (on subsequent workers),
+                # they are processed in the `if rank < w:` part beblow
+                # in previous iterations of those subsequent workers.
                 assert torch.all(cvids != -1), \
                     "All local vertexes should be assigned with coarser IDs"
 

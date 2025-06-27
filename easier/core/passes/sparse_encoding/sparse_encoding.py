@@ -9,7 +9,8 @@ import torch
 from torch.fx.graph import Graph
 from easier.core.passes.tensor_group_partition import ElemPart
 
-from easier.core.runtime.dist_env import get_runtime_dist_env, unbalanced_compute_heartbeat
+from easier.core.runtime.dist_env import \
+    get_runtime_dist_env, unbalanced_compute_heartbeat
 from easier.core.utils import logger
 import easier.core.module as esr
 
@@ -310,8 +311,9 @@ def reorder_input_by_reducer(
         assert sum(
             halo_in.shape[0] for halo_in in unordered_halo_gidxes_to_this
         ) == input_gidx_to_this.unique().shape[0] \
-        == input_gidx_to_this.shape[0], \
-            "each input element of the local Reducer has been prepared as the halo"
+          == input_gidx_to_this.shape[0], \
+            "each input element of the local Reducer has been prepared" \
+            " as the halo"
         assert sum(
             halo_out.shape[0] for halo_out in unordered_halo_lidxes_to_others
         ) == input_elempart_to_reorder.idx.shape[0], \
@@ -386,11 +388,12 @@ def rewrite_selector_instance(
     with unbalanced_compute_heartbeat(
         "rewrite_selector / zipsort"
     ):
-        _reordered_output_gidx, reordered_input_gidx, _pos = zipsort_using_order(
-            order=output_elempart.idx,
-            to_sort=output_gidx_on_this,
-            to_follow=input_gidx_to_this
-        )
+        _reordered_output_gidx, reordered_input_gidx, _pos = \
+            zipsort_using_order(
+                order=output_elempart.idx,
+                to_sort=output_gidx_on_this,
+                to_follow=input_gidx_to_this
+            )
 
     # At runtime, and required by HaloExchanger implementation,
     # the this-to-this halo is not sliced out from tensors of input_elempart,
@@ -431,11 +434,12 @@ def rewrite_reducer_instance(
     with unbalanced_compute_heartbeat(
         "rewrite_reducer / zipsort"
     ):
-        reordered_output_gidx, reordered_input_gidx, _pos = zipsort_using_order(
-            order=output_elempart.idx,
-            to_sort=output_gidx_on_this,
-            to_follow=input_gidx_to_this
-        )
+        reordered_output_gidx, reordered_input_gidx, _pos = \
+            zipsort_using_order(
+                order=output_elempart.idx,
+                to_sort=output_gidx_on_this,
+                to_follow=input_gidx_to_this
+            )
 
     # We immediately finding indexes against `reordered_output_gidx`.
     # If the Reducer itself doesn't have such sequentialness, we will insert
@@ -447,7 +451,8 @@ def rewrite_reducer_instance(
     with unbalanced_compute_heartbeat(
         "rewrite_selector / index_of"
     ):
-        rewritten_idx = vector_index_of(reordered_output_gidx, output_elempart.idx)
+        rewritten_idx = vector_index_of(
+            reordered_output_gidx, output_elempart.idx)
 
         chunk_gidx_space = torch.concat(halo_gidxes_to_this)
         selector_idx = vector_index_of(reordered_input_gidx, chunk_gidx_space)

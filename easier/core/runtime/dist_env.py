@@ -1159,7 +1159,7 @@ def unbalanced_compute_heartbeat(compute_hint: str = ""):
     NOTE:
     -   Communication primitives CAN NOT be used in this code section.
         Otherwise the error of mismatched communication calls will happen.
-    
+
     -   Both the `torch.dist` layer and the communication backend itself
         must be able to be accessed multi-threaded. E.g.:
         -   (we may need `dist.new_group()` for a dedicated comm group to poll)
@@ -1197,9 +1197,11 @@ def unbalanced_compute_heartbeat(compute_hint: str = ""):
             with lock:
                 task_duration = task_duration_list[0]
 
-            all_durations = dist_env.all_gather_into_tensor(
-                torch.tensor([task_duration], dtype=torch.float64, device=dist_env.comm_device)
-            )
+            all_durations = dist_env.all_gather_into_tensor(torch.tensor(
+                [task_duration],
+                dtype=torch.float64,
+                device=dist_env.comm_device
+            ))
             if torch.all(all_durations >= 0):
 
                 # no need to lock
@@ -1226,7 +1228,7 @@ def unbalanced_compute_heartbeat(compute_hint: str = ""):
     min_duration = min(task_duration_list)
     wait_max = max_duration - min_duration
 
-    if wait_max > 1  :# * 60:
+    if wait_max > 5 * 60:
         duration_strs = [f'{d:.2f}' for d in task_duration_list]
         logger.debug(
             f"Unbalanced compute '{compute_hint}' waits {wait_max:.2f}s."
