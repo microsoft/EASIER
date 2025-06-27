@@ -204,7 +204,7 @@ class CommPairCollector(EasierInterpreter):
         ))
 
 
-def calculate_group_offsets(tensor_groups: OrderedSet[EasierTensorGroup]):
+def _calculate_group_offsets(tensor_groups: OrderedSet[EasierTensorGroup]):
     dist_env = get_runtime_dist_env()
     world_size = dist_env.world_size
 
@@ -314,7 +314,7 @@ def partition_tensor_groups_with_adjmat(
 
     zero_leading_grp_sizes, grp_cluster_size_beforelast, \
         grps_offsets_in_clusters_beforelast, \
-        grps_offsets_in_cluster_lastrank = calculate_group_offsets(
+        grps_offsets_in_cluster_lastrank = _calculate_group_offsets(
             tensor_groups
         )
 
@@ -324,17 +324,28 @@ def partition_tensor_groups_with_adjmat(
         torch.Tensor, torch.Tensor, CommPair
     ]] = []
 
+    def _consider_not_partitioning_if_too_small(grp: EasierTensorGroup):
+        perworker_n = grp.n // world_size
+        if grp.n == 0 or perworker_n == 0:
+            raise EasierJitException(
+                f"Consider not partitioning {grp.hint} with only"
+                f" {grp.n} elements"
+            )
+
     for comm_pair in comm_pairs:
         row_tensor_group = comm_pair.src_tensor_group
         rowgrp_idx_part = comm_pair.src_idx_partition
         col_tensor_group = comm_pair.dst_tensor_group
         colgrp_idx_part = comm_pair.dst_idx_partition
 
+        # xxxgrp_per_worker_n can be 0, where (a small set of) all elements
+        # are put on the last worker.
+        # P.S. Even group.n can be 0.
         rowgrp_per_worker_n = row_tensor_group.n // world_size
-        assert rowgrp_per_worker_n > 0, "consider not distributing this group"
-
         colgrp_per_worker_n = col_tensor_group.n // world_size
-        assert colgrp_per_worker_n > 0, "consider not distributing this group"
+
+        _consider_not_partitioning_if_too_small(row_tensor_group)
+        _consider_not_partitioning_if_too_small(col_tensor_group)
 
         # zip(rowgrp_ids_w, colgrp_ids_w) are for worker-w
         # - rowgrp IDs are subadjmat-local row IDs
@@ -557,7 +568,7 @@ def synchronize_partition_result(
 
     zero_leading_grp_sizes, grp_cluster_size_beforelast, \
         _grps_offsets_in_clusters_beforelast, \
-        _grps_offsets_in_cluster_lastrank = calculate_group_offsets(
+        _grps_offsets_in_cluster_lastrank = _calculate_group_offsets(
             tensor_groups
         )
 
