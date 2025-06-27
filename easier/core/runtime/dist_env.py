@@ -1189,6 +1189,9 @@ def unbalanced_compute_heartbeat(compute_hint: str = ""):
     def _poll_thread_fn():
 
         dist_env = get_default_dist_env()
+
+        # Start with a very small interval, to prevent small-scale workloads
+        # waiting too long.
         sleep = 0.1
         while True:
             time.sleep(sleep)  # sleep up to 5s
