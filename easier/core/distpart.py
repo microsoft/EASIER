@@ -9,7 +9,8 @@ import torch
 
 import scipy.sparse
 
-from easier.core.runtime.dist_env import get_runtime_dist_env
+from easier.core.runtime.dist_env import \
+    get_runtime_dist_env, unbalanced_compute_heartbeat
 from easier.core.utils import logger
 import easier.cpp_extension as _C
 
@@ -70,22 +71,24 @@ class CoarseningLevel:
         start = sum(self.dist_config.local_nvs[:dist_env.rank])
         local_nv = self.dist_config.local_nvs[dist_env.rank]
 
-        csr = scipy.sparse.csr_matrix(
-            (self.adjwgt, self.colidx, self.rowptr),
-            shape=(local_nv, self.dist_config.nv)
-        )
+        with unbalanced_compute_heartbeat("remove self edges"):
 
-        # csr.setdiag() explicitly stores zero entries,
-        # we need eliminate_zeros() to adjust the CSR sparsity structure.
-        csr.setdiag(0, start)
-        csr.eliminate_zeros()
+            csr = scipy.sparse.csr_matrix(
+                (self.adjwgt, self.colidx, self.rowptr),
+                shape=(local_nv, self.dist_config.nv)
+            )
 
-        rowptr = torch.from_numpy(csr.indptr).to(torch.int64)
-        colidx = torch.from_numpy(csr.indices).to(torch.int64)
-        adjwgt = torch.from_numpy(csr.data).to(torch.int64)
-        return CoarseningLevel(
-            self.dist_config, self.vertex_weights, rowptr, colidx, adjwgt
-        )
+            # csr.setdiag() explicitly stores zero entries,
+            # we need eliminate_zeros() to adjust the CSR sparsity structure.
+            csr.setdiag(0, start)
+            csr.eliminate_zeros()
+
+            rowptr = torch.from_numpy(csr.indptr).to(torch.int64)
+            colidx = torch.from_numpy(csr.indices).to(torch.int64)
+            adjwgt = torch.from_numpy(csr.data).to(torch.int64)
+            return CoarseningLevel(
+                self.dist_config, self.vertex_weights, rowptr, colidx, adjwgt
+            )
 
 
 def _assert_local_map_no_overlap(local_map, new_range):
@@ -338,20 +341,23 @@ def merge_cadj_adjw(
     # these two vertexes may be on same workers,
     # we need to concat their adj lists, unique, and accumulate
     # edge weights accordingly.
-    unmerged_rows = (
-        row_xchg.cvids_unmerged_on_this - row_xchg.c_start
-    ).repeat_interleave(
-        unmerged_row_sizes
-    )
 
-    coarser_graph = scipy.sparse.csr_matrix(
-        (adjwgt_unmerged, (unmerged_rows, cadj_unmerged)),  # sum up dups
-        shape=(row_xchg.local_cnv, row_xchg.c_dist_config.nv)
-    )
+    with unbalanced_compute_heartbeat("merge cadj"):
 
-    return torch.from_numpy(coarser_graph.indptr).to(torch.int64), \
-        torch.from_numpy(coarser_graph.indices).to(torch.int64), \
-        torch.from_numpy(coarser_graph.data).to(torch.int64)
+        unmerged_rows = (
+            row_xchg.cvids_unmerged_on_this - row_xchg.c_start
+        ).repeat_interleave(
+            unmerged_row_sizes
+        )
+
+        coarser_graph = scipy.sparse.csr_matrix(
+            (adjwgt_unmerged, (unmerged_rows, cadj_unmerged)),  # sum up dups
+            shape=(row_xchg.local_cnv, row_xchg.c_dist_config.nv)
+        )
+
+        return torch.from_numpy(coarser_graph.indptr).to(torch.int64), \
+            torch.from_numpy(coarser_graph.indices).to(torch.int64), \
+            torch.from_numpy(coarser_graph.data).to(torch.int64)
 
 
 def map_adj_by_cvids(
@@ -565,18 +571,20 @@ def coarsen_level(
     start, end = prev_lv.dist_config.get_start_end()
     assert prev_lv.rowptr.shape[0] - 1 == end - start
 
-    # Each worker independently calculates heavy-edge matching.
-    # Local vids to global vids
-    matched = torch.full((end - start,), fill_value=-1, dtype=torch.int64)
-    # NOTE `matched` vector is updated within this C call.
-    _C.locally_match_heavy_edge(
-        start,
-        end,
-        matched,
-        prev_lv.rowptr,
-        prev_lv.colidx,
-        prev_lv.adjwgt,
-    )
+    with unbalanced_compute_heartbeat("locally_match_heavy_edge"):
+
+        # Each worker independently calculates heavy-edge matching.
+        # Local vids to global vids
+        matched = torch.full((end - start,), fill_value=-1, dtype=torch.int64)
+        # NOTE `matched` vector is updated within this C call.
+        _C.locally_match_heavy_edge(
+            start,
+            end,
+            matched,
+            prev_lv.rowptr,
+            prev_lv.colidx,
+            prev_lv.adjwgt,
+        )
     # Possible value of matched[x]:
     # -1
     #   unmatched
@@ -595,24 +603,27 @@ def coarsen_level(
     for w in range(dist_env.world_size - 1, -1, -1):
         w_start, w_end = prev_lv.dist_config.get_start_end(w)
 
+        with unbalanced_compute_heartbeat(f"assign cvids rank={w}"):
+            if w == dist_env.rank:
+                this_unmatched_n = assign_cvids_unmatched(
+                    matched, cvids, cnv_allocated
+                )
+                cnv_allocated += this_unmatched_n
+
+                this_colocated_n = assign_cvids_colocated(
+                    start, end, matched, cvids, cnv_allocated
+                )
+                cnv_allocated += this_colocated_n
+
+                # NOTE Remaining `matched` elements are local vertexes
+                # that are matching with remote vertexes
+                # (on subsequent workers),
+                # they are processed in the `if rank < w:` part beblow
+                # in previous iterations of those subsequent workers.
+                assert torch.all(cvids != -1), \
+                    "All local vertexes should be assigned with coarser IDs"
+
         if w == dist_env.rank:
-            this_unmatched_n = assign_cvids_unmatched(
-                matched, cvids, cnv_allocated
-            )
-            cnv_allocated += this_unmatched_n
-
-            this_colocated_n = assign_cvids_colocated(
-                start, end, matched, cvids, cnv_allocated
-            )
-            cnv_allocated += this_colocated_n
-
-            # NOTE Remaining `matched` elements are local vertexes
-            # that are matching with remote vertexes (on subsequent workers),
-            # they are processed in the `if rank < w:` part beblow in previous
-            # iterations of those subsequent workers.
-            assert torch.all(cvids != -1), \
-                "All local vertexes should be assigned with coarser IDs"
-
             # TODO make a masked broadcast for only (rank < w) workers.
             w_cvids = dist_env.broadcast(
                 w, cvids.to(dist_env.comm_device)
@@ -631,8 +642,9 @@ def coarsen_level(
 
         w_cvids = w_cvids.cpu()
 
-        if dist_env.rank < w:
-            align_coarser_vids(w_start, w_end, w_cvids, matched, cvids)
+        with unbalanced_compute_heartbeat(f"align cvids rank={w}"):
+            if dist_env.rank < w:
+                align_coarser_vids(w_start, w_end, w_cvids, matched, cvids)
 
     # end for w in range(world_size)
 

@@ -99,8 +99,7 @@ def multi_stage_zero_length_partition(
         return local_membership
 
     def _sync_elempart_0len(
-        tensor_group_to_matedge_offsets,
-        accum_n: int,
+        tensor_groups,
         local_membership: torch.Tensor  # many 0s, polluted by prev patches
     ):
         # grp1 selected to grp2, grp2 reduced to grp1
@@ -110,9 +109,7 @@ def multi_stage_zero_length_partition(
         assert isinstance(grp1, EasierTensorGroup)
         assert isinstance(grp2, EasierTensorGroup)
 
-        elemparts = _sync_elempart(
-            tensor_group_to_matedge_offsets, accum_n, local_membership
-        )
+        elemparts = _sync_elempart(tensor_groups, local_membership)
         for grp, ep in list(elemparts.items()):
             #       grp1    grp2
             # rank0  X       X  # removed, aligns with kway deselects rank-0

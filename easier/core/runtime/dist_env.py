@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+from contextlib import contextmanager
 import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 import numpy
@@ -1146,3 +1147,93 @@ def get_runtime_dist_env() -> DistEnv:
     if _runtime_device_type is None:
         raise EasierJitException("The device type for runtime isn't set")
     return _get_or_init_dist_env(_runtime_device_type)
+
+
+@contextmanager
+def unbalanced_compute_heartbeat(compute_hint: str = ""):
+    """
+    Run a code section WITHOUT communication on each worker,
+    do periodic heartbeat collective calls to avoid some workers timeout
+    because they finish faster and enter the next collective call ealier.
+
+    NOTE:
+    -   Communication primitives CAN NOT be used in this code section.
+        Otherwise the error of mismatched communication calls will happen.
+
+    -   Both the `torch.dist` layer and the communication backend itself
+        must be able to be accessed multi-threaded. E.g.:
+        -   (we may need `dist.new_group()` for a dedicated comm group to poll)
+        -   NCCL 2.x allows multithreading after ncclInit, and requires
+            manual serialization of calls;
+        -   MPI must be initialized with thread level higher than
+            MPI_THREAD_SERIALIZED.
+
+    Usage:
+    ```
+    with keep_alive("get_result"):
+        if dist_env.rank == 0:
+            result = lengthy_task() # do task on rank 0
+        elif dist_env.rank == 1:
+            result = 42             # do task on rank 1
+        else:
+            result = None
+    print(result)   # use result that's different on each worker
+    ```
+    """
+    import threading
+    import time
+
+    lock = threading.Lock()
+    task_duration_list: List[float] = [-1]
+
+    def _poll_thread_fn():
+
+        dist_env = get_default_dist_env()
+
+        # Start with a very small interval, to prevent small-scale workloads
+        # waiting too long.
+        sleep = 0.1
+        while True:
+            time.sleep(sleep)  # sleep up to 5s
+            sleep = min(5, sleep * 2)
+
+            with lock:
+                task_duration = task_duration_list[0]
+
+            all_durations = dist_env.all_gather_into_tensor(torch.tensor(
+                [task_duration],
+                dtype=torch.float64,
+                device=dist_env.comm_device
+            ))
+            if torch.all(all_durations >= 0):
+
+                # no need to lock
+                task_duration_list.clear()
+                task_duration_list.extend(all_durations.tolist())
+
+                return
+
+    poll_thread = threading.Thread(target=_poll_thread_fn)
+    poll_thread.start()
+
+    start_time = time.time()
+
+    yield
+
+    end_time = time.time()
+
+    with lock:
+        task_duration_list[0] = end_time - start_time  # in sec
+
+    poll_thread.join()
+
+    max_duration = max(task_duration_list)
+    min_duration = min(task_duration_list)
+    wait_max = max_duration - min_duration
+
+    if wait_max > 5 * 60:
+        duration_strs = [f'{d:.2f}' for d in task_duration_list]
+        logger.debug(
+            f"Unbalanced compute '{compute_hint}' waits {wait_max:.2f}s."
+            f" All ranks spend: {duration_strs}"
+        )

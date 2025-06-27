@@ -3,8 +3,7 @@
 
 from typing import Dict, List, Sequence, Tuple, Union
 from dataclasses import dataclass
-from typing_extensions import Literal, OrderedDict
-import functools
+from typing_extensions import Literal
 
 import torch
 from torch.fx.graph import Graph
@@ -22,9 +21,10 @@ from easier.core.passes.utils import \
     get_selector_reducer_idx_partition_pair, \
     normalize_reducer_call_into_args, normalize_selector_call_into_args, \
     get_easier_tensors
-from easier.core.runtime.dist_env import get_runtime_dist_env
+from easier.core.runtime.dist_env import \
+    get_runtime_dist_env, unbalanced_compute_heartbeat
 from easier.core.distpart import distpart_kway, DistConfig
-from easier.core.utils import EasierJitException
+from easier.core.utils import EasierJitException, logger
 
 # METIS adj weights are ints
 METIS_ADJWGT_REDUCER: int = 10
@@ -33,7 +33,7 @@ METIS_ADJWGT_REDUCER: int = 10
 def parallel_partition_graph(
     world_size: int, rank: int,
     subadjmat_height: int, adjmat_width: int, vtxdist: torch.Tensor,
-    rowcolids_and_causes: List[Tuple[torch.Tensor, torch.Tensor, bool]]
+    rowcolids_and_cps: List[Tuple[torch.Tensor, torch.Tensor, 'CommPair']]
 ):
     """
     Args:
@@ -42,48 +42,60 @@ def parallel_partition_graph(
             its values are the offsets to `indptr` vector, e.g. [0, N, 2N, ...]
             where N stands for the length of a slice in `indptr`,
             i.e. the adjmat_height.
-    """
+    -   rowcolids_and_causes:
+            Row IDs are local row indexes to the sub adj mat,
+            i.e. the upperbound is subadjmat_height ~= adjmat_width/world_size.
 
+            Both global row IDs and col IDs (col IDs are always global)
+            must form a symmetric sparse matrix.
+            (No matter how previous subpasses remap the IDs)
+    """
     # NOTE
     # - `csr_matrix` sums up duplicated matrix cells during construction
     # - `csr_matrix` automatically choose int32/int64 for its `indptr` and
     #   `indices` ndarrays regarding upperbounds of the height and the weight.
-    selector_graph = scipy.sparse.csr_matrix(
-        (subadjmat_height, adjmat_width), dtype=np.int32)
-    reducer_graph = scipy.sparse.csr_matrix(
-        (subadjmat_height, adjmat_width), dtype=np.int32)
+    with unbalanced_compute_heartbeat("assemble sparse adjmat"):
 
-    # Edge weights in the adjmat are:
-    # - if involved in Selectors, no matter how many times, weights are 1
-    # - each time involved in Reducers, those weights are increased by 10,
-    #   no matter how many edges there are.
-    for (commpair_rowids, commpair_colids, by_reducer) in rowcolids_and_causes:
-        assert commpair_rowids.ndim == commpair_colids.ndim == 1
-        assert commpair_rowids.shape == commpair_rowids.shape
+        selector_graph = scipy.sparse.csr_matrix(
+            (subadjmat_height, adjmat_width), dtype=np.int32)
+        reducer_graph = scipy.sparse.csr_matrix(
+            (subadjmat_height, adjmat_width), dtype=np.int32)
 
-        commpair_rowids = commpair_rowids.detach().cpu().numpy()
-        commpair_colids = commpair_colids.detach().cpu().numpy()
+        # Edge weights in the adjmat are:
+        # - if involved in Selectors, no matter how many times, weights are 1
+        # - each time involved in Reducers, those weights are increased by 10,
+        #   no matter how many edges there are.
+        for (commpair_rowids, commpair_colids, comm_pair) in rowcolids_and_cps:
+            assert commpair_rowids.ndim == commpair_colids.ndim == 1
+            assert commpair_rowids.shape == commpair_rowids.shape
 
-        csr_ones = np.ones((commpair_rowids.shape[0],), dtype=np.int32)
-        commpair_graph = scipy.sparse.csr_matrix(
-            (csr_ones, (commpair_rowids, commpair_colids)),  # sum up dups
-            shape=(subadjmat_height, adjmat_width)
-        )
+            commpair_rowids = commpair_rowids.detach().cpu().numpy()
+            commpair_colids = commpair_colids.detach().cpu().numpy()
 
-        if by_reducer:
-            # Clamp potentially summed up elements,
-            # so that this adjmat for some reducer, as a whole,
-            # has a single non-1 weight value.
-            commpair_graph = commpair_graph.minimum(1)
-            commpair_graph = commpair_graph * METIS_ADJWGT_REDUCER
+            csr_ones = np.ones((commpair_rowids.shape[0],), dtype=np.int32)
+            commpair_graph = scipy.sparse.csr_matrix(
+                (csr_ones, (commpair_rowids, commpair_colids)),  # sum up dups
+                shape=(subadjmat_height, adjmat_width)
+            )
 
-            # It's efficient to add if both are in CSR format.
-            reducer_graph = reducer_graph + commpair_graph
+            if comm_pair.caused_by_reducer:
+                # Clamp potentially summed up elements,
+                # so that this adjmat for some reducer, as a whole,
+                # has a single non-1 weight value.
+                commpair_graph = commpair_graph.minimum(1)
+                commpair_graph = commpair_graph * METIS_ADJWGT_REDUCER
 
-        else:
-            selector_graph = selector_graph + commpair_graph
+                # It's efficient to add if both are in CSR format.
+                reducer_graph = reducer_graph + commpair_graph
 
-    graph = selector_graph.minimum(1) + reducer_graph
+            else:
+                selector_graph = selector_graph + commpair_graph
+
+            # Before processing there is always a collective call, so we can
+            # just record the processed event.
+            logger.debug(f"Sub adjmat for {comm_pair} processed")
+
+        graph = selector_graph.minimum(1) + reducer_graph
 
     local_membership = distpart_kway(
         DistConfig(
@@ -107,6 +119,7 @@ class CommPair:
     dst_idx_partition: torch.Tensor
 
     caused_by_reducer: bool
+    cause_hint: str = ""
 
     def get_symmetric_pair(self):
         return CommPair(
@@ -116,8 +129,14 @@ class CommPair:
             dst_idx_partition=self.src_idx_partition,
 
             # The original source, communication direction is irrelevant.
-            caused_by_reducer=self.caused_by_reducer
+            caused_by_reducer=self.caused_by_reducer,
+            cause_hint=self.cause_hint
         )
+
+    def __repr__(self) -> str:
+        src = self.src_tensor_group
+        dst = self.dst_tensor_group
+        return f"CommPair({src.hint} -{self.cause_hint}-> {dst.hint})"
 
 
 class CommPairCollector(EasierInterpreter):
@@ -131,18 +150,10 @@ class CommPairCollector(EasierInterpreter):
 
         # Only Select-ed and Reduce-ed TensorGroups are involved in these:
         # (i.e. TensorGroups only referenced by "get_attr" are not included)
-        self.tensor_group_to_matedge_offsets: \
-            OrderedDict[EasierTensorGroup, int] = OrderedDict()
-        self.accum_n = 0
+        self.tensor_groups: OrderedSet[EasierTensorGroup] = OrderedSet()
 
         # Does not include the symmetric part for the communication operations.
         self.comm_pairs: List[CommPair] = []
-
-    def _init_tensor_group_offset(self, tensor_group: EasierTensorGroup):
-        if tensor_group not in self.tensor_group_to_matedge_offsets:
-            offset = self.accum_n
-            self.tensor_group_to_matedge_offsets[tensor_group] = offset
-            self.accum_n += tensor_group.n
 
     def if_call_module(self, submod: Module):
         if isinstance(submod, esr.Module):  # nested esr.Module calls
@@ -182,23 +193,60 @@ class CommPairCollector(EasierInterpreter):
         assert src_tensor_group is not None
         assert dst_tensor_group is not None
 
-        self._init_tensor_group_offset(src_tensor_group)
-        self._init_tensor_group_offset(dst_tensor_group)
+        self.tensor_groups.add(src_tensor_group)
+        self.tensor_groups.add(dst_tensor_group)
 
         src_idx, dst_idx = get_selector_reducer_idx_partition_pair(submod)
-        self.comm_pairs.append(CommPair(src_tensor_group, src_idx,
-                                        dst_tensor_group, dst_idx,
-                                        caused_by_reducer))
+        self.comm_pairs.append(CommPair(
+            src_tensor_group, src_idx,
+            dst_tensor_group, dst_idx,
+            caused_by_reducer,
+            submod.easier_hint_name
+        ))
+
+
+def _calculate_group_offsets(tensor_groups: OrderedSet[EasierTensorGroup]):
+    dist_env = get_runtime_dist_env()
+    world_size = dist_env.world_size
+
+    zero_leading_grp_sizes = torch.tensor(
+        [0] + [g.n for g in tensor_groups], dtype=torch.int64
+    )
+    grp_cluster_size_beforelast = int(
+        (zero_leading_grp_sizes // world_size).sum()
+    )
+
+    grps_offsets_in_clusters_beforelast: Dict[EasierTensorGroup, int] = dict(
+        zip(
+            tensor_groups,
+            torch.cumsum(  # the first 0 keeps unchanged
+                zero_leading_grp_sizes // world_size, dim=0
+            )[:-1].tolist()
+        )
+    )
+    grps_offsets_in_cluster_lastrank: Dict[EasierTensorGroup, int] = dict(
+        zip(
+            tensor_groups,
+            torch.cumsum(  # the first 0 keeps unchanged
+                zero_leading_grp_sizes - (
+                    zero_leading_grp_sizes // world_size * (world_size - 1)
+                ),  # cumsum with accumulated remainders
+                dim=0
+            )[:-1].tolist()
+        )
+    )
+
+    return zero_leading_grp_sizes, grp_cluster_size_beforelast, \
+        grps_offsets_in_clusters_beforelast, grps_offsets_in_cluster_lastrank
 
 
 def partition_tensor_groups_with_adjmat(
-    tensor_group_to_matedge_offsets: OrderedDict[EasierTensorGroup, int],
-    accum_n: int,
+    tensor_groups: OrderedSet[EasierTensorGroup],
     comm_pairs: List[CommPair]
 ):
     """
     Args:
-    -   tensor_group_to_matedge_offsets:
+    -   tensor_groups:
             In the order of how related Selector/Reducer appears in the IR.
     -   comm_pairs:
             Communication patterns appearing in the program.
@@ -207,40 +255,44 @@ def partition_tensor_groups_with_adjmat(
             should be passed in, this function will add its symmetric part
             to the adjmat.
 
-    This worker is responsible to fill in adjmat entities in
-    rows within `[grp_row_lb, grp_row_ub)`. But the indexes specifying adjmat
-    entities may locate in other workers.
+    Intuitively, we need to concat all elements from all TensorGroups:
+    into a list, and construct adjmat between elements on this list.
 
-    ```
-                  |         |
-        x x x x-----------D----------    --SubAdjMatSpanLB[y]=0
-        x     x E                    )
-        x     x   |     F   |        ) worker0
-        x x x x     G                )
-        | e     y y y y y y y y   B  )   --GroupOffset[y]=4  --GrpRowLB[y,0]=0
-    - - | -  -  y  -  -  -  - y -  - ) - --GrpRowLB[y,1]=1   ~~GrpRowUB[y,0]=1
-        |     g y |         | y      )
-        |       y             y      ) worker1
-        |   f   y |         | y     C)
-        d       y             y A    )
-    - - | -  -  y |-  -  -  | y -  - ) - ~~GrpRowUB[y,1]=6
-        |       y y y y y y y y      )
-        |                 a     z z z) worker2  ~~GroupOffset[y]+N[y]=12
-        |       b |         |   z   z)
-        |               c       z z z)
-         ~~~~~~~~~|~~~~~~~~~|~~~~~~~~    ~~SubAdjMatSpanUB[y]=3
-    ```
-    The horizontal and vertical lines in the figure stand for both
-    the upper bounds of the previous regions (i.e. exclusive) as well as
-    the lower bounds of the next regions (i.e. inclusive).
+    E.g. world_size==3
+        TensorGroup A has elements [A0, ..., A10]
+        TensorGroup B has elements [B0, ..., B15]
+        TensorGroup C has elements [C0, ..., C20]
 
-    For example, `Select([5,0,4], Y)` from Group-y into Group-z will fill in
-    matrix entities pointed by `A B C`, across two workers;
-    and symmetrically, entities `a b c` will also be filled in.
+    Instead of directly concat into [A0,...,A10, B0,...,B15, C0,...,C20]
+    we first split each TensorGroup into `world_size` segments:
+        TensorGroup A becomes { [A0, ..., A2], [A3, ..., A5], [A6, ..., A10] }
+        ...
+    The mapping is `A_n` is put into the `min(n//world_size, world_size-1)`-th
+    segment, and div remainders are simply put on the last segment.
 
-    While `Reduce([5,0,4,2], X)` from Group-x into Group-y will fill in entities
-    `D E F G` and symmetrically `d e f g`.
+    Then, segments for the same rank are concat-ed to form a _cluster_:
+        [A0,...,A2, B0,...,A4, C0,...,C6]  # length = 3 + 5 + 7
+
+    and the last cluster will have different lengths because of remainders:
+        [A6,...,A10, B10,...,B15, C14,...,C20]  # length = 5 + 6 + 7
+
+    The final list of the 3 clusters will be:
+        [
+            A0,...,A2,  B0,...,A4,   C0,...,C6,    # subadjmat for rank-0
+            A3,...,A5,  B5,...,A9,   C7,...,C13,   # subadjmat for rank-1
+            A6,...,A10, B10,...,B15, C14,...,C20,  # subadjmat for rank-2
+        ]
+    and the adjmat between list elements can naturally be divided into
+    `world_size` subadjmats.
+    (note, both rows and columns of the adjmat must be reordered,
+    as the adjmat is symmetric.)
+
+    Such split and reorganization would balance non-zero entities among
+    the workers.
     """
+    # TODO tensor_group_partition didn't handle the cases well
+    # where the number of vertexes is less than the world size.
+    # (although such lightweight cases do not need distribution at all)
 
     comm_pairs = [
         pair
@@ -251,9 +303,6 @@ def partition_tensor_groups_with_adjmat(
     dist_env = get_runtime_dist_env()
     world_size = dist_env.world_size
     rank = dist_env.rank
-    per_worker_n = (accum_n + world_size - 1) // world_size
-    empty_buffer = torch.empty((0,), dtype=torch.int64,
-                               device=dist_env.comm_device)
 
     #
     # Construct local sub adjmat
@@ -264,65 +313,147 @@ def partition_tensor_groups_with_adjmat(
     # therefore there is expected to be a memory peak. We may need to
     # send and free data in stream to decrease the memory peak.
 
-    # [(concat_rowidx, concat_colidx, caused_by_reducer)]
-    rowcolids_for_commpairs: List[Tuple[torch.Tensor, torch.Tensor, bool]] = []
+    zero_leading_grp_sizes, grp_cluster_size_beforelast, \
+        grps_offsets_in_clusters_beforelast, \
+        grps_offsets_in_cluster_lastrank = _calculate_group_offsets(
+            tensor_groups
+        )
+
+    # rowids are subadjmat-local, i.e. with upperbound (sum(n)//world_size).
+    # [(concat_rowids, concat_colids, caused_by_reducer)]
+    rowcolids_for_commpairs: List[Tuple[
+        torch.Tensor, torch.Tensor, CommPair
+    ]] = []
+
+    def _consider_not_partitioning_if_too_small(grp: EasierTensorGroup):
+        perworker_n = grp.n // world_size
+        if grp.n == 0 or perworker_n == 0:
+            raise EasierJitException(
+                f"Consider not partitioning {grp.hint} with only"
+                f" {grp.n} elements"
+            )
 
     for comm_pair in comm_pairs:
         row_tensor_group = comm_pair.src_tensor_group
-        rowgrp_idx = comm_pair.src_idx_partition
+        rowgrp_idx_part = comm_pair.src_idx_partition
         col_tensor_group = comm_pair.dst_tensor_group
-        colgrp_idx = comm_pair.dst_idx_partition
+        colgrp_idx_part = comm_pair.dst_idx_partition
 
-        rowgrp_offset = tensor_group_to_matedge_offsets[row_tensor_group]
-        next_rowgrp_offset = rowgrp_offset + row_tensor_group.n
-        colgrp_offset = tensor_group_to_matedge_offsets[col_tensor_group]
+        # xxxgrp_per_worker_n can be 0, where (a small set of) all elements
+        # are put on the last worker.
+        # P.S. Even group.n can be 0.
+        rowgrp_per_worker_n = row_tensor_group.n // world_size
+        colgrp_per_worker_n = col_tensor_group.n // world_size
 
-        # Limit the region to search
-        sub_adjmat_span_lb = rowgrp_offset // per_worker_n
-        sub_adjmat_span_ub = (next_rowgrp_offset - 1) // per_worker_n + 1
+        _consider_not_partitioning_if_too_small(row_tensor_group)
+        _consider_not_partitioning_if_too_small(col_tensor_group)
 
-        subadjmat_rowids_to_send: List[torch.Tensor] = \
-            [empty_buffer] * world_size
-        adjmat_colids_to_send: List[torch.Tensor] = [empty_buffer] * world_size
+        # zip(rowgrp_ids_w, colgrp_ids_w) are for worker-w
+        # - rowgrp IDs are subadjmat-local row IDs
+        # - colgrp IDs are adjmat col IDs
+        rowgrp_ids_to_send: List[torch.Tensor] = []
+        colgrp_ids_to_send: List[torch.Tensor] = []
 
-        for w in range(sub_adjmat_span_lb, sub_adjmat_span_ub):
-            # Region of rows of adjmat on worker-w
-            rowgrp_rowid_lb = max(per_worker_n * w, rowgrp_offset)
-            rowgrp_rowid_ub = min(per_worker_n * (w + 1), next_rowgrp_offset)
+        for w in range(dist_env.world_size):
+            rowgrp_idx_lb_w = rowgrp_per_worker_n * w
+            if w == world_size - 1:
+                rowgrp_offset_in_cluster: int = \
+                    grps_offsets_in_cluster_lastrank[row_tensor_group]
 
-            # The range of indexes for that region on worker-w
-            rowgrp_idx_lb: int = rowgrp_rowid_lb - rowgrp_offset
-            rowgrp_idx_ub: int = rowgrp_rowid_ub - rowgrp_offset
+                rowgrp_idx_ub_w: int = row_tensor_group.n
+            else:
+                rowgrp_offset_in_cluster: int = \
+                    grps_offsets_in_clusters_beforelast[row_tensor_group]
 
-            # `idx_pos.dtype == torch.bool`: this is bool-slicing
-            idx_pos = torch.logical_and(rowgrp_idx_lb <= rowgrp_idx,
-                                        rowgrp_idx < rowgrp_idx_ub)
-            rowgrp_idx_slice = rowgrp_idx[idx_pos]
-            colgrp_idx_slice = colgrp_idx[idx_pos]
+                rowgrp_idx_ub_w: int = rowgrp_per_worker_n * (w + 1)
 
-            # Adjust row_grp_idx (of domain `[0,row_group.n)`)
-            # into row ids of sub adjmat on worker-w
-            subadjmat_rowids = (rowgrp_idx_slice +
-                                rowgrp_offset) % per_worker_n
-            # But `colgrp_idx` does not need adjustment since adjmat is not
-            # partitioned among columns.
-            adjmat_colids = colgrp_idx_slice + colgrp_offset
+            idx_part_pos_w = torch.logical_and(
+                rowgrp_idx_lb_w <= rowgrp_idx_part,
+                rowgrp_idx_part < rowgrp_idx_ub_w
+            )
 
-            subadjmat_rowids_to_send[w] = subadjmat_rowids.to(
-                dist_env.comm_device)
-            adjmat_colids_to_send[w] = adjmat_colids.to(dist_env.comm_device)
+            #
+            # map (split only) row idxes into adjmat col IDs
+            #
+            rowgrp_idx_part_w = rowgrp_idx_part[idx_part_pos_w]
+            rowgrp_ids_w = \
+                rowgrp_idx_part_w - rowgrp_idx_lb_w + rowgrp_offset_in_cluster
 
-        subadjmat_rowids_tensors = \
-            dist_env.all_to_all(subadjmat_rowids_to_send)
-        adjmat_colids_tensors = \
-            dist_env.all_to_all(adjmat_colids_to_send)
+            #
+            # map (split + scatter segments) col idxes into adjmat col IDs
+            #
+            colgrp_idx_part_w = colgrp_idx_part[idx_part_pos_w]
 
-        # concat all recieved row/col ids
-        # and the result is not ordered or uniqued.
+            colgrp_idx_part_w_cluster_ids = (
+                colgrp_idx_part_w // colgrp_per_worker_n
+                # last cluster has more than colgrp_perw_n
+            ).clamp(max=world_size - 1)
+
+            # remainders are in [0, colgrp_per_worker_n) if before last, or
+            # [0, colgrp.n - colgrp_per_worker_n * (world_size-1))
+            colgrp_idx_part_w_cluster_remainders = \
+                colgrp_idx_part_w - \
+                colgrp_idx_part_w_cluster_ids * colgrp_per_worker_n
+
+            idx_is_before_last_rank = \
+                colgrp_idx_part_w_cluster_ids < (world_size - 1)
+
+            colgrp_ids_w = torch.full_like(colgrp_idx_part_w, fill_value=-1)
+
+            def _for_column_clustersbefore_or_lastcluster(
+                clusters_kind_mask: torch.Tensor,
+                colgrps_offsets_in_cluster: Dict[EasierTensorGroup, int]
+            ) -> None:
+                # We have two kinds of clusters:
+                # - clusters before the last;
+                # - the last cluster itself.
+                colgrp_offset_in_cluster: int = colgrps_offsets_in_cluster[
+                    col_tensor_group
+                ]
+
+                clusters_offsets = \
+                    colgrp_idx_part_w_cluster_ids[clusters_kind_mask] \
+                    * grp_cluster_size_beforelast
+
+                remainders_in_cluster = \
+                    colgrp_idx_part_w_cluster_remainders[clusters_kind_mask]
+
+                colgrp_ids_kind = \
+                    clusters_offsets + colgrp_offset_in_cluster \
+                    + remainders_in_cluster
+
+                assert torch.all(colgrp_ids_w[clusters_kind_mask] == -1), \
+                    "cluster ids should not be set twice"
+                colgrp_ids_w[clusters_kind_mask] = colgrp_ids_kind
+
+            # for all ranks before the last: equal offsets and cluster sizes
+            _for_column_clustersbefore_or_lastcluster(
+                idx_is_before_last_rank, grps_offsets_in_clusters_beforelast
+            )
+            _for_column_clustersbefore_or_lastcluster(
+                ~idx_is_before_last_rank, grps_offsets_in_cluster_lastrank
+            )
+
+            assert torch.all(colgrp_ids_w != -1), "cluster ids all assigned"
+
+            rowgrp_ids_to_send.append(rowgrp_ids_w.to(dist_env.comm_device))
+            colgrp_ids_to_send.append(colgrp_ids_w.to(dist_env.comm_device))
+
+        # Both kinds of ids are 0-based, relative to the row/col TensorGroups
+        # need to be added with Groups' offset before being filled into adjmat.
+        rowgrp_ids = [
+            t.cpu() for t in dist_env.all_to_all(rowgrp_ids_to_send)
+        ]
+        colgrp_ids = [
+            t.cpu() for t in dist_env.all_to_all(colgrp_ids_to_send)
+        ]
+
+        # rowgrp IDs are subadjmat-local row IDs
+        # colgrp IDs are adjmat col IDs
         rowcolids_for_commpairs.append((
-            torch.concat(subadjmat_rowids_tensors).cpu(),
-            torch.concat(adjmat_colids_tensors).cpu(),
-            comm_pair.caused_by_reducer
+            torch.concat(rowgrp_ids),
+            torch.concat(colgrp_ids),
+            comm_pair
         ))
     # endfor comm_pairs
 
@@ -330,21 +461,20 @@ def partition_tensor_groups_with_adjmat(
     # Invoke partition
     #
 
-    # TODO tensor_group_partition didn't handle the cases well
-    # where the number of vertexes is less than the world size.
-    # (although such lightweight cases do not need distribution at all)
-
-    # e.g. [0, N, 2N, ..., min(accum_n, wN)]
-    vtxdist = torch.arange(world_size + 1) * per_worker_n
-    vtxdist[-1].clamp_(max=accum_n)
+    # Each worker owns a length-(gro.n/world_size) part,
+    # all parts are considered to be concat-ed to form a subadjmat.
+    vtxdist = torch.arange(world_size + 1) * int(
+        (zero_leading_grp_sizes // world_size).sum()
+    )
+    vtxdist[-1] = zero_leading_grp_sizes.sum()
 
     subadjmat_height = int(vtxdist[rank + 1] - vtxdist[rank])
 
     local_membership = parallel_partition_graph(
         world_size, rank,
-        subadjmat_height=subadjmat_height, adjmat_width=accum_n,
+        subadjmat_height=subadjmat_height, adjmat_width=int(vtxdist[-1]),
         vtxdist=vtxdist,
-        rowcolids_and_causes=rowcolids_for_commpairs)
+        rowcolids_and_cps=rowcolids_for_commpairs)
 
     return local_membership
 
@@ -421,8 +551,7 @@ class ElemPart:
 
 
 def synchronize_partition_result(
-    tensor_group_to_matedge_offsets: OrderedDict[EasierTensorGroup, int],
-    accum_n: int,
+    tensor_groups: OrderedSet[EasierTensorGroup],
     local_membership: torch.Tensor
 ) -> Dict[EasierTensorGroup, ElemPart]:
     """
@@ -442,72 +571,67 @@ def synchronize_partition_result(
     world_size = dist_env.world_size
     rank = dist_env.rank
 
-    empty_buffer = torch.empty((0,), dtype=torch.int64,
-                               device=dist_env.comm_device)
+    zero_leading_grp_sizes, grp_cluster_size_beforelast, \
+        _grps_offsets_in_clusters_beforelast, \
+        _grps_offsets_in_cluster_lastrank = _calculate_group_offsets(
+            tensor_groups
+        )
 
-    per_worker_n = (accum_n + world_size - 1) // world_size
-    subadjmat_rowid_lb = per_worker_n * rank
-    subadjmat_rowid_ub = min(per_worker_n * (rank + 1), accum_n)
+    if rank == world_size - 1:
+        grps_offsets = _grps_offsets_in_cluster_lastrank
+    else:
+        grps_offsets = _grps_offsets_in_clusters_beforelast
 
     synced_elemparts: Dict[EasierTensorGroup, ElemPart] = {}
 
-    # `local_membership` is the partition result for this local sub adjmat,
-    # which represents rows within `[rowid_lb, rowid_ub)` of adjmat
-    # and might (partially) cover multiple TensorGroups.
-    # We need to communicate and gather TensorGroup elements assigned to
-    # this worker.
-    for tensor_group, offset in tensor_group_to_matedge_offsets.items():
-        elempart_to_send: List[torch.Tensor] = [empty_buffer] * world_size
-        tensor_group_batch_size = tensor_group.n
+    # local_membership is for "interleavedly concated" subadjmat whose rows are
+    # [perw_nrow_sum * rank, max(perw_nrow_sum * (rank + 1), accum_n)
 
-        if offset >= subadjmat_rowid_ub \
-                or offset + tensor_group_batch_size < subadjmat_rowid_lb:
-            # This local sub adjmat doesn't cover this TensorGroup.
-            pass  # do nothing
+    for grp_i, tensor_group in enumerate(tensor_groups):
+        grp_perworker_n = tensor_group.n // world_size
+        grp_last_n = tensor_group.n - grp_perworker_n * (world_size - 1)
 
+        if rank == world_size - 1:
+            grp_this_n = grp_last_n
         else:
-            # `tensor_group` is (partially) covered by `local_membership`
-            # and the overlapped part of `local_membership` is:
-            local_membership_begin = \
-                max(offset, subadjmat_rowid_lb) - subadjmat_rowid_lb
-            local_membership_end = \
-                min(offset + tensor_group_batch_size, subadjmat_rowid_ub) \
-                - subadjmat_rowid_lb
+            grp_this_n = grp_perworker_n
 
-            # .. and this overlapped part specifies membership
-            # for TensorGroup elements within:
-            tensor_group_begin = max(0, subadjmat_rowid_lb - offset)
-            tensor_group_end = min(tensor_group_batch_size,
-                                   subadjmat_rowid_ub - offset)
+        grp_local_membership_begin = grps_offsets[tensor_group]
+        grp_local_membership_end = grp_local_membership_begin + grp_this_n
 
-            assert local_membership_end - local_membership_begin \
-                == tensor_group_end - tensor_group_begin
+        grp_membership = local_membership[
+            grp_local_membership_begin:grp_local_membership_end
+        ]
+        grp_epidx_offset = grp_perworker_n * rank
 
-            grp_membership = local_membership[
-                local_membership_begin:local_membership_end]
+        elempart_idxes_by_rank = []
 
-            for w in range(world_size):
-                elempart = tensor_group_begin \
-                    + torch.argwhere(grp_membership == w).ravel()
-                elempart_to_send[w] = elempart.to(dist_env.comm_device)
+        for w in range(world_size):
+            elempart_idx_w = \
+                grp_epidx_offset + torch.argwhere(grp_membership == w).ravel()
+            elempart_idxes_by_rank.append(
+                elempart_idx_w.to(dist_env.comm_device)
+            )
 
-        elempart_recv = dist_env.all_to_all(elempart_to_send)
+        elempart_idxes = [
+            t.cpu() for t in dist_env.all_to_all(elempart_idxes_by_rank)
+        ]
+        elempart_idx = torch.concat(elempart_idxes)
 
-        elempart = torch.concat(elempart_recv).cpu()
         elempart_lengths = dist_env.all_gather_into_tensor(
-            torch.tensor([elempart.shape[0]], device=dist_env.comm_device)
+            torch.tensor([elempart_idx.shape[0]], device=dist_env.comm_device)
         ).tolist()
-
-        assert torch.equal(elempart.unique(sorted=True), elempart.sort()[0])
 
         elempart_i = len(synced_elemparts)
         elempart_hint = get_elempart_hint(elempart_i, tensor_group)
 
+        # TODO regardless how to partition TensorGroup and then concat segments
+        # into adjmat, the "element identities" in the Group are still
+        # incrementally ordered, so the resultant ElemPart can be made
+        # SortedIdx initially.
         synced_elemparts[tensor_group] = ElemPart(
-            None, elempart, elempart_lengths, hint=elempart_hint
+            None, elempart_idx, elempart_lengths, hint=elempart_hint
         )
-
-    # endfor tensor_groups
 
     return synced_elemparts
 
@@ -616,10 +740,12 @@ def partition_tensor_groups(modules: List[esr.Module], graphs: List[Graph]):
     assert len(modes) == 1
     partition_mode: Literal['metis', 'evenly'] = modes.pop()  # type: ignore
 
+    world_size = get_runtime_dist_env().world_size
+
     elemparts = get_even_elemparts(modules, graphs)
 
     # Overwrite with better partitions for some TensorGroups
-    if partition_mode == 'metis':
+    if partition_mode == 'metis' and world_size > 1:
         comm_pairs_collector = CommPairCollector(modules, graphs)
         comm_pairs_collector.run()
 
@@ -631,13 +757,11 @@ def partition_tensor_groups(modules: List[esr.Module], graphs: List[Graph]):
             # always check comm_pairs > 0 to exclude the real cases where
             # there is really no communication.
             local_membership = partition_tensor_groups_with_adjmat(
-                comm_pairs_collector.tensor_group_to_matedge_offsets,
-                comm_pairs_collector.accum_n,
+                comm_pairs_collector.tensor_groups,
                 comm_pairs_collector.comm_pairs)
 
             comm_elemparts = synchronize_partition_result(
-                comm_pairs_collector.tensor_group_to_matedge_offsets,
-                comm_pairs_collector.accum_n,
+                comm_pairs_collector.tensor_groups,
                 local_membership
             )
             assert set(comm_elemparts.keys()).issubset(elemparts.keys())

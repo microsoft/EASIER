@@ -582,10 +582,10 @@ class NotFullModel(esr.Module):
             torch.arange(2, 38).reshape(-1, 2).double(), mode='partition'
         )
         self.edge = esr.Tensor(
-            torch.arange(2, 8).reshape(-1, 2).double(), mode='partition'
+            torch.arange(2, 12).reshape(-1, 2).double(), mode='partition'
         )
-        self.selector = esr.Selector(torch.arange(3) // 2)
-        self.reducer = esr.Reducer(torch.ones(3, dtype=torch.int64), n=18)
+        self.selector = esr.Selector(torch.arange(5) // 2)
+        self.reducer = esr.Reducer(torch.ones(5, dtype=torch.int64), n=18)
         self.replica = esr.Tensor(
             torch.zeros([1, 2]).double(), mode='replicate'
         )
