@@ -242,11 +242,22 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             # of esr.Tensors:
             # intersect(tensors, union(read_write_tensors for nested_mod))
 
+            #
             # For the sake of simplicity,
             # add read/write dependencies on ALL esr.Tensors in current_module.
-            param_srcs: OrderedSet[ViewSrc] = OrderedSet()
+            #
+            param_srcs_to_write: OrderedSet[ViewSrc] = OrderedSet()
+            # However, get_attr Nodes may appear after the esr.Module call,
+            # in such cases the initial writer for the ViewSrc hasn't
+            # been decided yet -- the esr.Module call is the initial
+            # writer.
+            param_srcs_to_read: OrderedSet[ViewSrc] = OrderedSet()
 
+            before_call_node = True
             for getattr in self.current_graph.nodes:
+                if getattr is self.current_node:
+                    before_call_node = False
+
                 if getattr.op == FX.GET_ATTR:
                     if self.is_skipped(getattr):
                         # Even it's get_attr of an esr.Tensor, if it's skipped
@@ -255,10 +266,15 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
 
                     attr_view_src = get_node_view_src(getattr)
                     assert isinstance(attr_view_src, ViewSrc)
-                    param_srcs.add(attr_view_src)
+                    param_srcs_to_write.add(attr_view_src)
 
-            for param_src in param_srcs:
+                    if before_call_node:
+                        param_srcs_to_read.add(attr_view_src)
+
+            for param_src in param_srcs_to_read:
                 self.add_reader_dependency(param_src)
+
+            for param_src in param_srcs_to_write:
                 self.add_writer_dependency(param_src)
 
 

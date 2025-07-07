@@ -196,6 +196,7 @@ def test_data_dependency_nested_call():
         def __init__(self):
             super().__init__()
             self.r = esr.Tensor(torch.zeros(3, 3), mode='replicate')
+            self.r2 = esr.Tensor(torch.ones(1), mode='replicate')
             self.inner = Inner()
 
         def forward(self):
@@ -212,7 +213,9 @@ def test_data_dependency_nested_call():
             a = self.v[:]
             a[:] += 1
             self.intermediate()
-            a[:] *= 1
+            # we treated intermediate() as writer of r2.
+            r2 = self.intermediate.r2
+            a[:] *= r2
 
     m = Outer()
     from easier.core.jit import compile
@@ -223,7 +226,7 @@ def test_data_dependency_nested_call():
     get_attr, a, \
         a_view, add, set_a, \
         call_intermediate, \
-        a_view2, mul, set_a2, output \
+        get_attr_r2, a_view2, mul, set_a2, output \
         = graph.nodes
 
     assert _get_viewsrc_node(get_attr) == get_attr
@@ -232,6 +235,7 @@ def test_data_dependency_nested_call():
     assert _get_viewsrc_node(add) == add  # view=a[:]; add=view+1; set(a,add)
     assert _get_viewsrc_node(set_a) == get_attr
     assert _get_viewsrc_node(call_intermediate) == None
+    assert _get_viewsrc_node(get_attr_r2) == get_attr_r2
     assert _get_viewsrc_node(a_view2) == get_attr
     assert _get_viewsrc_node(mul) == mul
     assert _get_viewsrc_node(set_a2) == get_attr
@@ -239,7 +243,8 @@ def test_data_dependency_nested_call():
     _assert_deps({
         set_a: [a_view],
         call_intermediate: [set_a],
-        a_view2: [call_intermediate],
+        get_attr_r2: [call_intermediate],  # cuz intermediate() writes r2
+        a_view2: [call_intermediate],  # cuz intermediate() writes self.v
         set_a2: [a_view2]
     }, graph.nodes)
 
