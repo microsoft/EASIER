@@ -234,3 +234,15 @@ def collect_meta(  # type: ignore
     _ = tree_map(meta, _collect)
 
     return ys
+
+
+# A special TensorMeta definition for Nodes skipped by JitEngine.
+# A skipped Node has this to be its single TensorMeta i.e. never nested.
+jit_skipped_meta = RuntimeTensorMeta(
+    # It's a convention that Role.DIST and shape=(0,) are used for
+    # skipped Nodes/values,
+    # no matter what shape[1:] will be in the runtime.
+    #
+    # The '0' here should be interpreted as the batch size.
+    Role.DISTRIBUTED, (0,), torch.int32
+)

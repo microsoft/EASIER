@@ -22,27 +22,13 @@ from easier.core.runtime.metadata import \
     RuntimeTensorMeta, StructuredTensorMeta, Role, ViewSrc, \
     get_node_meta, set_node_meta, get_runtime_metadata_from_scalar, \
     StructuredViewSrc, set_node_view_src, get_node_view_src, \
-    IndexedAddr, StructuredIndexedAddr, collect_meta
+    IndexedAddr, StructuredIndexedAddr, collect_meta, jit_skipped_meta
 from easier.core.runtime.jit_engine.handlers import \
     NodeHandlerBase, PreprocessDecision
 from easier.core.runtime.jit_engine.values import \
     JitSkipped, jit_skipped, jit_released, evaluate_node, RuntimeValue, \
     allgather_meta_for_collective_input, exchange_meta_for_halo_exchanger, \
     get_aggregator_neutral_value
-
-
-replica_none_meta = RuntimeTensorMeta(
-    Role.REPLICATED, (), torch.int32
-)
-
-jit_skipped_meta = RuntimeTensorMeta(
-    # It's a convention that Role.DIST and shape=(0,) are used for
-    # skipped Nodes/values,
-    # no matter what shape[1:] will be in the runtime.
-    #
-    # The '0' here should be interpreted as the batch size.
-    Role.DISTRIBUTED, (0,), torch.int32
-)
 
 
 def get_value_runtime_metadata(
@@ -75,7 +61,7 @@ def get_value_runtime_metadata(
         # TODO assert _rec_depth == 0  # possible?
 
         # nested esr.Module calls may return None
-        return replica_none_meta
+        return RuntimeTensorMeta(Role.REPLICATED, (), torch.int32)
 
     elif val is jit_skipped:
         assert _rec_depth == 0, "jit_skipped is always not nested"
