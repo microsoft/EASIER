@@ -222,6 +222,10 @@ def test_data_dependency_nested_call():
     [jm] = compile([m], 'torch')
     jm.forward()
 
+    je_outer = cast(JitEngine, jm.forward.__self__)
+    assert list(je_outer.read_tensors) == [jm.v, jm.inter]
+    assert list(je_outer.write_tensors) == [v, ]
+
     graph = cast(JitEngine, jm.forward.__self__).graph
     get_attr, a, \
         a_view, add, set_a, \

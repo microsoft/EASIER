@@ -234,3 +234,10 @@ def collect_meta(  # type: ignore
     _ = tree_map(meta, _collect)
 
     return ys
+
+
+def is_node_skipped(node: Node):
+    meta = get_node_meta(node)
+    if isinstance(meta, RuntimeTensorMeta):
+        return meta.role == Role.DISTRIBUTED and meta.shape[0] == 0
+    return False

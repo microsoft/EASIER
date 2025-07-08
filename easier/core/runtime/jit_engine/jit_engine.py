@@ -13,7 +13,7 @@ from easier.core import passes
 from easier.core import module as _EsrMod
 from easier.core.passes.life_range_analysis import get_nodes_end_at
 from easier.core.passes.utils import \
-    FX, tree_map, normalize_reducer_call_into_args, \
+    FX, OrderedSet, tree_map, normalize_reducer_call_into_args, \
     get_called_module, get_attr_value, get_easier_tensors
 from easier.core.utils import EasierJitException
 from easier.core.runtime.dist_env import \
@@ -451,56 +451,6 @@ class ViewSrcValidation(ViewSrcTrackerBase):
                 f" {prev_view_src} => {view_src}"
             )
 
-
-class TensorReadsWritesRecorder(NodeHandlerBase):
-    def __init__(
-        self, module: esr.Module, stackframe: Dict[Node, RuntimeValue],
-        jit_engine: 'JitEngine'
-    ):
-        super().__init__(module, stackframe)
-
-        self.jit_engine = jit_engine
-
-        self.tensors: Dict[int, esr.Tensor] = {}
-    
-    def postprocess(
-        self, current_node: Node, res: RuntimeValue, args, kwargs
-    ) -> RuntimeValue:
-        # Inspect result tensors -- writes
-        res_siaddr: StructuredIndexedAddr = get_indexed_addr(res)
-        res_item_iaddrs: List[IndexedAddr] = collect_meta(res_siaddr, leaf_type=IndexedAddr)
-
-        # # First appear of an esr.Tensor by GET_ATTR -- a write
-        # if current_node.op == FX.GET_ATTR:
-        #     assert isinstance(res_iaddr, IndexedAddr)
-        #     assert res_iaddr.index is None
-        #     assert isinstance(res, esr.Tensor)
-        #     assert res_iaddr.addr not in self.tensors
-
-        #     self.tensors[res_iaddr.addr] = res
-
-        # Traverse all arguments of possible esr.Tensor -- reads
-        for ir_arg, arg_val in itertools.chain(
-            zip(current_node.args, args),
-            ((current_node.kwargs[k], kwargs[k]) for k in kwargs)
-        ):
-            # NOTE ir_arg itself may not be a single Node, but a structure
-            # of many Nodes, e.g. torch.stack([a,b,c], dim=1)
-            # get_indexed_addr() can handle such cases where the depth of
-            # the structure is 1.
-            # But it requies we handle `arg_val` one by one, instead of
-            # handling the whole `args` tuple.
-
-            arg_siaddr: StructuredIndexedAddr = get_indexed_addr(arg_val)
-            arg_item_iaddrs: List[IndexedAddr] = collect_meta(
-                arg_siaddr, leaf_type=IndexedAddr
-            )
-        
-
-
-
-
-        return res
 
 
 class MetadataValidation(NodeHandlerBase):
@@ -1073,12 +1023,87 @@ class NotFullReducerOutputAllocation(NodeHandlerBase):
         return out
 
 
+class AttrTensorAccessRecorder(NodeHandlerBase):
+    """
+    Given the fact esr.Module calls can be nested, we must inspect through the
+    call stack to check which esr.Tensors are really read/written.
+
+    In the first run and in the postprocess(), we can easily ensure
+    JitEngine/esr.Module in the whole call stack have been inspected.
+
+    NOTE
+    -   esr.Tensors will not share storage.
+
+    -   Except the syntactic GET_ATTR, we cannot tell if the esr.Tensor is
+        really written (e.g. getitem, reshape etc. returns the same address).
+        We have to treat all ops returning the address as writers.
+
+    -   Skipped esr.Tensors (shape[0] == 0) are not recorded.
+    """
+    def __init__(
+        self, module: esr.Module, stackframe: Dict[Node, RuntimeValue],
+        jit_engine: 'JitEngine'
+    ):
+        super().__init__(module, stackframe)
+
+        self.jit_engine = jit_engine
+
+        self.addr2tensor: Dict[int, esr.Tensor] = {}
+
+    def postprocess(
+        self, current_node: Node, res: RuntimeValue, args, kwargs
+    ) -> RuntimeValue:
+        res_siaddr: StructuredIndexedAddr = get_indexed_addr(res)
+
+        if current_node.op == FX.GET_ATTR:
+            # the same Tensor may be GET_ATTR multi times i.e. aliases
+            assert isinstance(res, esr.Tensor)
+            assert isinstance(res_siaddr, IndexedAddr)
+            self.addr2tensor[res_siaddr.addr] = res
+        
+        else:  # OK for CALL_MODULE to appear again, since it has no returns.
+            arg_item_iaddrs = collect_meta(
+                list(map(
+                    get_indexed_addr, itertools.chain(args, kwargs.values())
+                )),
+                leaf_type=IndexedAddr
+            )
+            for arg_item_iaddr in arg_item_iaddrs:
+                t = self.addr2tensor.get(arg_item_iaddr.addr, None)
+                if t is not None:
+                    self.jit_engine.read_tensors.add(t)
+
+            res_item_iaddrs = collect_meta(res_siaddr, leaf_type=IndexedAddr)
+            for res_item_iaddr in res_item_iaddrs:
+                t = self.addr2tensor.get(res_item_iaddr.addr, None)
+                if t is not None:
+                    self.jit_engine.write_tensors.add(t)
+
+        if current_node.op == FX.CALL_MODULE:
+            submod = get_called_module(self.current_module, current_node)
+            if isinstance(submod, esr.Module):
+                # nested_jit_engine has been run
+                # (and probably been run for multi times),
+                # its `accessed_tensors` has been calculated.
+                nested_jit_engine = cast(JitEngine, submod.forward.__self__)
+
+                for nested_read in nested_jit_engine.read_tensors:
+                    self.jit_engine.read_tensors.add(nested_read)
+                for nested_write in nested_jit_engine.write_tensors:
+                    self.jit_engine.read_tensors.add(nested_write)
+
+        return res
+
+
 class JitEngine:
     def __init__(self, module: esr.Module, graph: Graph) -> None:
         self.module = module
         self.graph = graph
 
         self.run_count = 0
+
+        self.read_tensors: OrderedSet[esr.Tensor] = OrderedSet()
+        self.write_tensors: OrderedSet[esr.Tensor] = OrderedSet()
 
     def create_first_run_handlers(self, stackframe: Dict[Node, RuntimeValue]):
         first_run_handlers: List[NodeHandlerBase] = [
@@ -1115,6 +1140,11 @@ class JitEngine:
             # <---- Allocates zero-ed output _________/
             # <--else --------------------------------------------------
             NotFullReducerOutputAllocation(self.module, stackframe),
+
+            # ->
+            # <- if GET_ATTR, record the esr.Tensor;
+            #    if nested esr.Module calls, merge the records ---------
+            AttrTensorAccessRecorder(self.module, stackframe, self),
         ]
         return first_run_handlers
 
