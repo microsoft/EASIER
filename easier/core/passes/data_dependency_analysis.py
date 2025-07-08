@@ -120,6 +120,17 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         readers = self.src2readers.setdefault(arg_src, OrderedSet())
         readers.add(reader)
 
+        if arg_src.node.op == FX.GET_ATTR:
+
+            # `self.p = (p1, p2)` using Python-builtin tuples are not recorded
+            # recursively as torch.nn.Parameters by torch.nn.Module.
+            # Similar structure, if using torch.nn.ParameterList, will result
+            # in many GET_ATTR Nodes to individual tensors.
+            assert arg_src.index is None
+
+            
+
+
     def add_writer_dependency(self, res_src: ViewSrc):
         """
         Add the current node as a writer on the memory at `res_src`.
@@ -232,6 +243,15 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
     # As long as we ensure `a[:] and b` are kept in order,
     # it's actually safe to move `a2 a3` around.
     # We might omit adding data dependency edges on them if needed.
+
+    def if_get_attr(self, submod_path: str, attr_name: str, attr_val):
+        """
+        For all ViewSrcs an esr.Module references, we need to record which
+        ViewSrcs are read and which are written.
+        When that esr.Module is called in another esr.Module, we need to
+        build dependency edges regarding these ViewSrcs, in the outer Graph.
+        """
+
 
     def if_call_module(self, submod: nn.Module):
         if isinstance(submod, esr.Module):

@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import itertools
 from typing import Dict, Final, List, Tuple, cast, Optional
 
 import torch
@@ -147,6 +148,71 @@ def get_meta_role_size(meta: StructuredTensorMeta) -> Tuple[Role, int]:
         return replica
 
 
+def get_indexed_addr(
+    val: RuntimeValue,
+    *,
+    _rec_depth=0  # debug-only
+) -> StructuredIndexedAddr:
+    """
+    Each resultant item tuple is:
+    an addr int with either a) None, b) an index within multi-result.
+
+    A typical use case is:
+    When the ref count is increased 0 -> 1, we know the addr is allocated
+    by current_node, and we map
+    IndexedAddr(addr:int, index:int|None) |-> ViewSrc(current_node, index)
+
+    Otherwise, although we have an index, it's irrelevant, because the addr
+    with refcount > 0 indicates the memory was allocated earlier.
+
+    Args:
+    -   val: The RuntimeValue bound to `node`,
+            not necessary to be `res` arg of `postprocess()`
+    """
+    if isinstance(val, torch.Tensor):
+        item_iaddr = val.untyped_storage().data_ptr()
+        return IndexedAddr(item_iaddr, None)
+
+    elif isinstance(val, (tuple, list)):
+        if _rec_depth > 0:
+            raise EasierJitException(
+                "Unexpected nested result with nested depth > 1"
+            )
+
+        indexed_addrs = []
+        for i, item in enumerate(val):
+            item_iaddr = get_indexed_addr(
+                item, _rec_depth=_rec_depth+1
+            )
+
+            if isinstance(item_iaddr, IndexedAddr):
+                # So far, if the recursive item is IndexedAddr,
+                # it must have a single addr int.
+                assert item_iaddr.index is None
+                indexed_addr = IndexedAddr(item_iaddr.addr, i)
+            else:
+                assert item_iaddr is None
+                indexed_addr = None
+
+            indexed_addrs.append(indexed_addr)
+
+        return indexed_addrs
+
+    elif val is None:
+        # TODO assert _rec_depth == 0  # possible?
+        return None
+
+    elif val is jit_skipped or isinstance(val, (int, float, bool)):
+        assert _rec_depth == 0, \
+            "Scalars and jit_skipped are always not nested"
+        return None
+
+    else:
+        raise EasierJitException(
+            f"Unexpected runtime value {val} or nested structure"
+        )
+
+
 class StackframeManager(NodeHandlerBase):
     """
     StackframeManager essentially plays the role like how Python interpreter,
@@ -263,71 +329,6 @@ class ViewSrcTrackerBase(NodeHandlerBase):
         # their storage be changed? We can detect the change and decr refcount
         # before resetting and incr refcount of the shared storage.
 
-    def _get_indexed_addr(
-        self, iaddr_node: Node, val: RuntimeValue,
-        *,
-        _rec_depth=0  # debug-only
-    ) -> StructuredIndexedAddr:
-        """
-        Each resultant item tuple is:
-        an addr int with either a) None, b) an index within multi-result.
-
-        When the ref count is increased 0 -> 1, we know the addr is allocated
-        by current_node, and we map
-        IndexedAddr(addr:int, index:int|None) |-> ViewSrc(current_node, index)
-
-        Otherwise, although we have an index, it's irrelevant, because the addr
-        with refcount > 0 indicates the memory was allocated earlier.
-
-        Args:
-        -   iaddr_node: The Node whose items' addresses will be checked,
-                not necessary to be `current_node`
-        -   val: The RuntimeValue bound to `iaddr_node`,
-                not necessary to be `res` arg of `postprocess()`
-        """
-        if isinstance(val, torch.Tensor):
-            item_iaddr = val.untyped_storage().data_ptr()
-            return IndexedAddr(item_iaddr, None)
-
-        elif isinstance(val, (tuple, list)):
-            if _rec_depth > 0:
-                raise EasierJitException(
-                    "Unexpected nested result with nested depth > 1 from"
-                    f" {iaddr_node.format_node()}"
-                )
-
-            indexed_addrs = []
-            for i, item in enumerate(val):
-                item_iaddr = self._get_indexed_addr(
-                    iaddr_node, item,
-                    _rec_depth=_rec_depth+1
-                )
-
-                if isinstance(item_iaddr, IndexedAddr):
-                    # So far, if the recursive item is IndexedAddr,
-                    # it must have a single addr int.
-                    assert item_iaddr.index is None
-                    indexed_addr = IndexedAddr(item_iaddr.addr, i)
-                else:
-                    indexed_addr = None
-
-                indexed_addrs.append(indexed_addr)
-
-            return indexed_addrs
-
-        elif val is None:
-            # TODO assert _rec_depth == 0  # possible?
-            return None
-
-        elif val is jit_skipped or isinstance(val, (int, float, bool)):
-            assert _rec_depth == 0, \
-                "Scalars and jit_skipped are always not nested"
-            return None
-
-        else:
-            raise EasierJitException(
-                f"Unexpected runtime value {val} or nested structure"
-            )
 
     def postprocess(
         self, current_node: Node, res: RuntimeValue, args, kwargs
@@ -336,9 +337,7 @@ class ViewSrcTrackerBase(NodeHandlerBase):
         # Increase ref count;
         # If previous ref count is 0, set current_node as ViewSrc.
         #
-        res_siaddr: StructuredIndexedAddr = self._get_indexed_addr(
-            current_node, res
-        )
+        res_siaddr: StructuredIndexedAddr = get_indexed_addr(res)
 
         def _to_view_src(
             res_item_iaddr: Optional[IndexedAddr]
@@ -413,9 +412,7 @@ class ViewSrcTrackerBase(NodeHandlerBase):
             # NOTE currently for the sake of simplicity _get_indexed_addr()
             # cannot handle nester layer > 1, so we cannot concat `env_val`s
             # into a list first.
-            end_siaddr: StructuredIndexedAddr = self._get_indexed_addr(
-                node_ends_here, end_val
-            )
+            end_siaddr: StructuredIndexedAddr = get_indexed_addr(end_val)
             end_item_iaddrs: List[IndexedAddr] = collect_meta(
                 end_siaddr, leaf_type=IndexedAddr
             )
@@ -453,6 +450,57 @@ class ViewSrcValidation(ViewSrcTrackerBase):
                 f" '{current_node.target}' changes:"
                 f" {prev_view_src} => {view_src}"
             )
+
+
+class TensorReadsWritesRecorder(NodeHandlerBase):
+    def __init__(
+        self, module: esr.Module, stackframe: Dict[Node, RuntimeValue],
+        jit_engine: 'JitEngine'
+    ):
+        super().__init__(module, stackframe)
+
+        self.jit_engine = jit_engine
+
+        self.tensors: Dict[int, esr.Tensor] = {}
+    
+    def postprocess(
+        self, current_node: Node, res: RuntimeValue, args, kwargs
+    ) -> RuntimeValue:
+        # Inspect result tensors -- writes
+        res_siaddr: StructuredIndexedAddr = get_indexed_addr(res)
+        res_item_iaddrs: List[IndexedAddr] = collect_meta(res_siaddr, leaf_type=IndexedAddr)
+
+        # # First appear of an esr.Tensor by GET_ATTR -- a write
+        # if current_node.op == FX.GET_ATTR:
+        #     assert isinstance(res_iaddr, IndexedAddr)
+        #     assert res_iaddr.index is None
+        #     assert isinstance(res, esr.Tensor)
+        #     assert res_iaddr.addr not in self.tensors
+
+        #     self.tensors[res_iaddr.addr] = res
+
+        # Traverse all arguments of possible esr.Tensor -- reads
+        for ir_arg, arg_val in itertools.chain(
+            zip(current_node.args, args),
+            ((current_node.kwargs[k], kwargs[k]) for k in kwargs)
+        ):
+            # NOTE ir_arg itself may not be a single Node, but a structure
+            # of many Nodes, e.g. torch.stack([a,b,c], dim=1)
+            # get_indexed_addr() can handle such cases where the depth of
+            # the structure is 1.
+            # But it requies we handle `arg_val` one by one, instead of
+            # handling the whole `args` tuple.
+
+            arg_siaddr: StructuredIndexedAddr = get_indexed_addr(arg_val)
+            arg_item_iaddrs: List[IndexedAddr] = collect_meta(
+                arg_siaddr, leaf_type=IndexedAddr
+            )
+        
+
+
+
+
+        return res
 
 
 class MetadataValidation(NodeHandlerBase):
