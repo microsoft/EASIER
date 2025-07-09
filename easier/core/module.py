@@ -208,12 +208,12 @@ def arange(*args, **kwargs):
 
     def _resolve():
         try:
-            return _end_matcher(*args, **kwargs)
+            return _start_end_matcher(*args, **kwargs)
         except TypeError:
             pass
 
         try:
-            return _start_end_matcher(*args, **kwargs)
+            return _end_matcher(*args, **kwargs)
         except TypeError:
             pass
 

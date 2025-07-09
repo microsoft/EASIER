@@ -41,17 +41,20 @@ def _assert_deps(inputs: Dict[Node, List[Node]], nodes: Iterable[Node]):
     # - consistency of whether it has or not the dep edges.
     inputs_sets = {k: set(v) for k, v in inputs.items()}
     users_sets = {}
+    es = set()
     for k, v in inputs.items():
         for arg in v:
-            users: Set[Node] = users_sets.setdefault(arg, set())
+            users: Set[Node] = users_sets.setdefault(arg, es)
             users.add(k)
 
     for n in nodes:
         if n.op == FX.OUTPUT:
             continue
 
-        assert inputs_sets.get(n, set()) == set(get_data_dependency_inputs(n))
-        assert users_sets.get(n, set()) == set(get_data_dependency_users(n))
+        assert inputs_sets.get(n, es) == set(get_data_dependency_inputs(n)), \
+            f"Node {n} dep inputs incorrect"
+        assert users_sets.get(n, es) == set(get_data_dependency_users(n)), \
+            f"Node {n} dep users incorrect"
 
 
 def _get_viewsrc_node(node: Node) -> Union[Node, None]:
@@ -207,45 +210,78 @@ def test_data_dependency_nested_call():
         def __init__(self):
             super().__init__()
             self.v = v
-            self.intermediate = Intermediate()
+            self.intmd = Intermediate()
 
         def forward(self):
-            a = self.v[:]
-            a[:] += 1
-            self.intermediate()
-            # we treated intermediate() as writer of r2.
-            r2 = self.intermediate.r2
-            a[:] *= r2
+            v = self.v[:]
+            v[:] += 1
+            r2 = self.intmd.r2
+            r2.add_(3)
+            self.intmd()
+            v[:] *= r2
 
     m = Outer()
     from easier.core.jit import compile
-    [jm] = compile([m], 'torch')
+    [jm] = compile([m], 'torch')  # type: ignore
     jm.forward()
 
+    intmd, inner = m.intmd, m.intmd.inner
+
+    je_inner = cast(JitEngine, inner.forward.__self__)
+    assert list(je_inner.read_tensors) == [v]
+    assert list(je_inner.write_tensors) == [v]
+
+    je_intmd = cast(JitEngine, intmd.forward.__self__)
+    assert list(je_intmd.read_tensors) == [intmd.r, v]
+    assert list(je_intmd.write_tensors) == [intmd.r, v]
+
+    je_outer = cast(JitEngine, m.forward.__self__)
+    assert list(je_outer.read_tensors) == [v, intmd.r2, intmd.r]
+    assert list(je_outer.write_tensors) == [v, intmd.r2, intmd.r]
+
     graph = cast(JitEngine, jm.forward.__self__).graph
-    get_attr, a, \
-        a_view, add, set_a, \
+    get_attr, var_v, \
+        v_view, add, set_v, \
+        get_attr_r2,  add_r2_3, \
         call_intermediate, \
-        get_attr_r2, a_view2, mul, set_a2, output \
+        v_view2, mul, set_v_2, output \
         = graph.nodes
+    """
+    get_attr = GET_ATTR["v"]
+    var_v = getitem(get_attr, :)
+
+    v_view = getitem(var_v, :)
+    add = add(v_view, 1)
+    set_v = setitem(var_v, :, add)
+
+    get_attr_r2 = GET_ATTR["intmd.r2"]
+    add_r2_3 = get_attr_r2.add_(3)
+
+    call_inter = CALL_MODULE["intmd"]  # RW: intmd.r, v
+
+    v_view2 = getitem(var_v, :)
+    mul = mul(v_view, get_attr_r2)
+    set_v_2 = setitem(var_v, :, mul)
+    """
 
     assert _get_viewsrc_node(get_attr) == get_attr
-    assert _get_viewsrc_node(a) == get_attr
-    assert _get_viewsrc_node(a_view) == get_attr
+    assert _get_viewsrc_node(var_v) == get_attr
+    assert _get_viewsrc_node(v_view) == get_attr
     assert _get_viewsrc_node(add) == add  # view=a[:]; add=view+1; set(a,add)
-    assert _get_viewsrc_node(set_a) == get_attr
-    assert _get_viewsrc_node(call_intermediate) == None
+    assert _get_viewsrc_node(set_v) == get_attr
     assert _get_viewsrc_node(get_attr_r2) == get_attr_r2
-    assert _get_viewsrc_node(a_view2) == get_attr
+    assert _get_viewsrc_node(add_r2_3) == get_attr_r2
+    assert _get_viewsrc_node(call_intermediate) == None
+    assert _get_viewsrc_node(v_view2) == get_attr
     assert _get_viewsrc_node(mul) == mul
-    assert _get_viewsrc_node(set_a2) == get_attr
+    assert _get_viewsrc_node(set_v_2) == get_attr
 
     _assert_deps({
-        set_a: [a_view],
-        call_intermediate: [set_a],
-        get_attr_r2: [call_intermediate],  # cuz intermediate() writes r2
-        a_view2: [call_intermediate],  # cuz intermediate() writes self.v
-        set_a2: [a_view2]
+        set_v: [v_view],
+        call_intermediate: [set_v],
+        v_view2: [call_intermediate],  # cuz intermediate() writes self.v
+        mul: [add_r2_3],
+        set_v_2: [v_view2]
     }, graph.nodes)
 
 

@@ -3,14 +3,14 @@
 
 import itertools
 import operator
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, cast
 
 from torch import nn
 from torch.fx.graph import Graph
 from torch.fx.node import Node
 from easier.core.runtime.metadata import \
     Role, RuntimeTensorMeta, get_node_meta, collect_meta, \
-    ViewSrc, get_node_view_src
+    ViewSrc, get_node_view_src, is_node_skipped
 
 import easier.core.module as esr
 
@@ -76,6 +76,18 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
 
         self.src2readers: Dict[ViewSrc, OrderedSet[Node]] = {}
 
+        et2src: Dict[esr.Tensor, ViewSrc] = {}
+        class _TensorViewSrcCollector(EasierInterpreter):
+            def if_get_attr(self, submod_path: str, attr_name: str, attr_val):
+                if is_node_skipped(self.current_node):
+                    return
+                if isinstance(attr_val, esr.Tensor):
+                    et2src[attr_val] = get_node_view_src(  # type: ignore
+                        self.current_node
+                    )
+        _TensorViewSrcCollector(modules, graphs).run()
+        self.et2src = et2src
+
     def add_data_dependency_edge(self, src: Node, dst: Node):
         # NOTE only existing dataflow/dependency edges are deduplicated,
         # but if the adding edge is the composition of multiple existing edges,
@@ -111,8 +123,11 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         """
         reader = self.current_node
 
-        latest_writer = self.src2writer[arg_src]
-        self.add_data_dependency_edge(latest_writer, reader)
+        latest_writer = self.src2writer.get(arg_src, None)
+        if latest_writer is not None:
+            # If the Tensor is read-only (args of matmul etc.) it has no
+            # previous writers. 
+            self.add_data_dependency_edge(latest_writer, reader)
 
         # Other readers in the same barrier-barrier region.
         # Since the next writer will be enforced to be after these readers,
@@ -162,12 +177,6 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         self.src2writer[res_src] = writer
         self.src2readers[res_src] = OrderedSet()
 
-    def is_skipped(self, node: Node):
-        meta = get_node_meta(node)
-        if isinstance(meta, RuntimeTensorMeta):
-            return meta.role == Role.DISTRIBUTED and meta.shape[0] == 0
-        return False
-
     def for_each_node(self):
         # Some ops may take multiple input writable tensors, and the result
         # will be a tuple of those tensors themselves.
@@ -177,16 +186,28 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         # TODO any FX-traceable torch ops violate this convention? Or any way
         # to detect if the violation happens?
         #
-        if self.is_skipped(self.current_node):
+        if is_node_skipped(self.current_node):
+            return
+        if self.current_node.op == FX.GET_ATTR:
+            # GET_ATTR is purely syntactic, its position in IR does not matter.
+            #
+            # TODO
+            # Some functions are purely manipulating the views, too, e.g.
+            # `a2 = a[...]; a3 = a[...]`, followed by `a[:] = 42; b = sin(a2)`.
+            # As long as we ensure `a[:] and b` are kept in order,
+            # it's actually safe to move `a2 a3` around.
+            # We might omit adding data dependency edges on them if needed.
             return
 
         arg_srcs = None  # type: ignore
 
         # If getitem is for tuple indexing, which is essentially a syntactic
-        # construct of EASIER IR, R/W relations only cover that specified item.
+        # construct of EASIER IR, R/W relations only cover that specified item,
+        # e.g. svd() returns 3 memory blocks, subsequent dependency edges
+        # must be calculated on individual block, rather than 3 blocks together.
         if self.current_node.target == operator.getitem:
             arg0 = self.current_node.all_input_nodes[0]
-            assert not self.is_skipped(arg0)
+            assert not is_node_skipped(arg0)
             is_tuple_indexing = not isinstance(
                 get_node_meta(arg0), RuntimeTensorMeta
             )
@@ -204,7 +225,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
                 [
                     get_node_view_src(arg)
                     for arg in self.current_node.all_input_nodes
-                    if not self.is_skipped(arg)
+                    if not is_node_skipped(arg)
                 ],
                 leaf_type=ViewSrc
             )
@@ -212,6 +233,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         arg_srcs: List[ViewSrc]
         for arg_src in arg_srcs:
             self.add_reader_dependency(arg_src)
+        
 
         # Generally, purely viewing operators like getitem, reshape will
         # return the argument memory addr, making themselves look like
@@ -226,56 +248,28 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         # Handle more specific scenarios like nested esr.Module calls
         super().for_each_node()
 
-    # TODO
-    # Some functions are purely manipulating the views, e.g.
-    # `a2 = a[...]; a3 = a[...]`, and followed by `a[:] = 42; b = sin(a2)`.
-    # As long as we ensure `a[:] and b` are kept in order,
-    # it's actually safe to move `a2 a3` around.
-    # We might omit adding data dependency edges on them if needed.
 
     def if_call_module(self, submod: nn.Module):
-        if isinstance(submod, esr.Module):
-            # A nested esr.Module call has no input/output, data dependency
-            # may occur through esr.Tensor instances the inner Module
-            # shares/writes.
-            # TODO we may identify the concrete RECURSIVE intersection set
-            # of esr.Tensors:
-            # intersect(tensors, union(read_write_tensors for nested_mod))
+        """
+        A nested esr.Module call has no input/output, data dependency
+        may occur through esr.Tensor instances the inner Module
+        shares/writes.
+        """
+        if not isinstance(submod, esr.Module):
+            return
+        
+        from easier.core.runtime.jit_engine.jit_engine import JitEngine
+        nested_jit_engine = cast(JitEngine, submod.forward.__self__)
 
-            #
-            # For the sake of simplicity,
-            # add read/write dependencies on ALL esr.Tensors in current_module.
-            #
-            param_srcs_to_write: OrderedSet[ViewSrc] = OrderedSet()
-            # However, get_attr Nodes may appear after the esr.Module call,
-            # in such cases the initial writer for the ViewSrc hasn't
-            # been decided yet -- the esr.Module call is the initial
-            # writer.
-            param_srcs_to_read: OrderedSet[ViewSrc] = OrderedSet()
+        for et_read in nested_jit_engine.read_tensors:
+            nested_read = self.et2src.get(et_read, None)
+            if nested_read is not None:
+                self.add_reader_dependency(nested_read)
 
-            before_call_node = True
-            for getattr in self.current_graph.nodes:
-                if getattr is self.current_node:
-                    before_call_node = False
-
-                if getattr.op == FX.GET_ATTR:
-                    if self.is_skipped(getattr):
-                        # Even it's get_attr of an esr.Tensor, if it's skipped
-                        # the Node has no view info.
-                        continue
-
-                    attr_view_src = get_node_view_src(getattr)
-                    assert isinstance(attr_view_src, ViewSrc)
-                    param_srcs_to_write.add(attr_view_src)
-
-                    if before_call_node:
-                        param_srcs_to_read.add(attr_view_src)
-
-            for param_src in param_srcs_to_read:
-                self.add_reader_dependency(param_src)
-
-            for param_src in param_srcs_to_write:
-                self.add_writer_dependency(param_src)
+        for et_write in nested_jit_engine.write_tensors:
+            nested_write = self.et2src.get(et_write, None)
+            if nested_write is not None:
+                self.add_writer_dependency(nested_write)
 
 
 def analyze_data_dependency(modules: List[esr.Module], graphs: List[Graph]):

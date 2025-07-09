@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import itertools
 from typing import Dict, Final, List, Tuple, cast, Optional
 
 import torch
@@ -12,7 +13,7 @@ from easier.core import passes
 from easier.core import module as _EsrMod
 from easier.core.passes.life_range_analysis import get_nodes_end_at
 from easier.core.passes.utils import \
-    FX, tree_map, normalize_reducer_call_into_args, \
+    FX, OrderedSet, tree_map, normalize_reducer_call_into_args, \
     get_called_module, get_attr_value, get_easier_tensors
 from easier.core.utils import EasierJitException
 from easier.core.runtime.dist_env import \
@@ -22,13 +23,27 @@ from easier.core.runtime.metadata import \
     RuntimeTensorMeta, StructuredTensorMeta, Role, ViewSrc, \
     get_node_meta, set_node_meta, get_runtime_metadata_from_scalar, \
     StructuredViewSrc, set_node_view_src, get_node_view_src, \
-    IndexedAddr, StructuredIndexedAddr, collect_meta, jit_skipped_meta
+    IndexedAddr, StructuredIndexedAddr, collect_meta
 from easier.core.runtime.jit_engine.handlers import \
     NodeHandlerBase, PreprocessDecision
 from easier.core.runtime.jit_engine.values import \
     JitSkipped, jit_skipped, jit_released, evaluate_node, RuntimeValue, \
     allgather_meta_for_collective_input, exchange_meta_for_halo_exchanger, \
     get_aggregator_neutral_value
+
+
+replica_none_meta = RuntimeTensorMeta(
+    Role.REPLICATED, (), torch.int32
+)
+
+jit_skipped_meta = RuntimeTensorMeta(
+    # It's a convention that Role.DIST and shape=(0,) are used for
+    # skipped Nodes/values,
+    # no matter what shape[1:] will be in the runtime.
+    #
+    # The '0' here should be interpreted as the batch size.
+    Role.DISTRIBUTED, (0,), torch.int32
+)
 
 
 def get_value_runtime_metadata(
@@ -61,7 +76,7 @@ def get_value_runtime_metadata(
         # TODO assert _rec_depth == 0  # possible?
 
         # nested esr.Module calls may return None
-        return RuntimeTensorMeta(Role.REPLICATED, (), torch.int32)
+        return replica_none_meta
 
     elif val is jit_skipped:
         assert _rec_depth == 0, "jit_skipped is always not nested"
@@ -131,6 +146,87 @@ def get_meta_role_size(meta: StructuredTensorMeta) -> Tuple[Role, int]:
         return dist_bases.pop()
     else:
         return replica
+
+
+def get_indexed_addr(
+    val: RuntimeValue,
+    *,
+    _rec_depth=0  # debug-only
+) -> StructuredIndexedAddr:
+    """
+    Each resultant item tuple is:
+    an addr int with either a) None, b) an index within multi-result.
+
+    A typical use case is:
+    When the ref count is increased 0 -> 1, we know the addr is allocated
+    by current_node, and we map
+    IndexedAddr(addr:int, index:int|None) |-> ViewSrc(current_node, index)
+
+    Otherwise, although we have an index, it's irrelevant, because the addr
+    with refcount > 0 indicates the memory was allocated earlier.
+
+    Args:
+    -   val: The RuntimeValue bound to `node`,
+            not necessary to be `res` arg of `postprocess()`
+    
+    Returns:
+    -   A structure of possibly nested IndexAddr, e.g.
+        `IndexAddr(addr, index=None)` or `None`,
+
+    -   When it's really nested, its leaf item can be None, e.g.
+        `[None, IndexAddr(addr, index=1), None]`
+    """
+    if isinstance(val, torch.Tensor):
+        item_iaddr = val.untyped_storage().data_ptr()
+        return IndexedAddr(item_iaddr, None)
+
+    elif isinstance(val, (tuple, list)):
+        if _rec_depth > 0:
+            # TODO there exist multi-res torch ops whose rec_depth > 1, e.g.
+            # `torch.histogramdd() -> (Tensor, Tensor[])`
+            # for which we may change IndexedAddr.index to List[int].
+            # And this would simplify handling of the args list.
+            raise EasierJitException(
+                "Unexpected nested result with nested depth > 1"
+            )
+
+        indexed_addrs = []
+        for i, item in enumerate(val):
+            item_iaddr = get_indexed_addr(
+                item, _rec_depth=_rec_depth+1
+            )
+
+            if isinstance(item_iaddr, IndexedAddr):
+                # So far, if the recursive item is IndexedAddr,
+                # it must have a single addr int.
+                assert item_iaddr.index is None
+                indexed_addr = IndexedAddr(item_iaddr.addr, i)
+            else:
+                assert item_iaddr is None
+                indexed_addr = None
+
+            indexed_addrs.append(indexed_addr)
+
+        return indexed_addrs
+
+    elif val is None:
+        # TODO assert _rec_depth == 0  # possible?
+        return None
+
+    elif val is jit_skipped:
+        assert _rec_depth == 0, "jit_skipped is always not nested"
+        return None
+    
+    elif val is Ellipsis or isinstance(val, (int, float, bool, str, slice)):
+        # rec_depth can > 0
+        # e.g. in `getitem(input=x, position=[:, slice, 5, tensoridx])`
+        # argument `position` will result in `[None, None, None, IndexAddr()]`
+        return None
+
+    else:
+        raise EasierJitException(
+            f"Unexpected runtime value {val} or nested structure"
+        )
 
 
 class StackframeManager(NodeHandlerBase):
@@ -249,71 +345,6 @@ class ViewSrcTrackerBase(NodeHandlerBase):
         # their storage be changed? We can detect the change and decr refcount
         # before resetting and incr refcount of the shared storage.
 
-    def _get_indexed_addr(
-        self, iaddr_node: Node, val: RuntimeValue,
-        *,
-        _rec_depth=0  # debug-only
-    ) -> StructuredIndexedAddr:
-        """
-        Each resultant item tuple is:
-        an addr int with either a) None, b) an index within multi-result.
-
-        When the ref count is increased 0 -> 1, we know the addr is allocated
-        by current_node, and we map
-        IndexedAddr(addr:int, index:int|None) |-> ViewSrc(current_node, index)
-
-        Otherwise, although we have an index, it's irrelevant, because the addr
-        with refcount > 0 indicates the memory was allocated earlier.
-
-        Args:
-        -   iaddr_node: The Node whose items' addresses will be checked,
-                not necessary to be `current_node`
-        -   val: The RuntimeValue bound to `iaddr_node`,
-                not necessary to be `res` arg of `postprocess()`
-        """
-        if isinstance(val, torch.Tensor):
-            item_iaddr = val.untyped_storage().data_ptr()
-            return IndexedAddr(item_iaddr, None)
-
-        elif isinstance(val, (tuple, list)):
-            if _rec_depth > 0:
-                raise EasierJitException(
-                    "Unexpected nested result with nested depth > 1 from"
-                    f" {iaddr_node.format_node()}"
-                )
-
-            indexed_addrs = []
-            for i, item in enumerate(val):
-                item_iaddr = self._get_indexed_addr(
-                    iaddr_node, item,
-                    _rec_depth=_rec_depth+1
-                )
-
-                if isinstance(item_iaddr, IndexedAddr):
-                    # So far, if the recursive item is IndexedAddr,
-                    # it must have a single addr int.
-                    assert item_iaddr.index is None
-                    indexed_addr = IndexedAddr(item_iaddr.addr, i)
-                else:
-                    indexed_addr = None
-
-                indexed_addrs.append(indexed_addr)
-
-            return indexed_addrs
-
-        elif val is None:
-            # TODO assert _rec_depth == 0  # possible?
-            return None
-
-        elif val is jit_skipped or isinstance(val, (int, float, bool)):
-            assert _rec_depth == 0, \
-                "Scalars and jit_skipped are always not nested"
-            return None
-
-        else:
-            raise EasierJitException(
-                f"Unexpected runtime value {val} or nested structure"
-            )
 
     def postprocess(
         self, current_node: Node, res: RuntimeValue, args, kwargs
@@ -322,9 +353,7 @@ class ViewSrcTrackerBase(NodeHandlerBase):
         # Increase ref count;
         # If previous ref count is 0, set current_node as ViewSrc.
         #
-        res_siaddr: StructuredIndexedAddr = self._get_indexed_addr(
-            current_node, res
-        )
+        res_siaddr: StructuredIndexedAddr = get_indexed_addr(res)
 
         def _to_view_src(
             res_item_iaddr: Optional[IndexedAddr]
@@ -399,9 +428,7 @@ class ViewSrcTrackerBase(NodeHandlerBase):
             # NOTE currently for the sake of simplicity _get_indexed_addr()
             # cannot handle nester layer > 1, so we cannot concat `env_val`s
             # into a list first.
-            end_siaddr: StructuredIndexedAddr = self._get_indexed_addr(
-                node_ends_here, end_val
-            )
+            end_siaddr: StructuredIndexedAddr = get_indexed_addr(end_val)
             end_item_iaddrs: List[IndexedAddr] = collect_meta(
                 end_siaddr, leaf_type=IndexedAddr
             )
@@ -439,6 +466,7 @@ class ViewSrcValidation(ViewSrcTrackerBase):
                 f" '{current_node.target}' changes:"
                 f" {prev_view_src} => {view_src}"
             )
+
 
 
 class MetadataValidation(NodeHandlerBase):
@@ -1011,12 +1039,91 @@ class NotFullReducerOutputAllocation(NodeHandlerBase):
         return out
 
 
+class AttrTensorAccessRecorder(NodeHandlerBase):
+    """
+    Given the fact esr.Module calls can be nested, we must inspect through the
+    call stack to check which esr.Tensors are really read/written.
+
+    In the first run and in the postprocess(), we can easily ensure
+    JitEngine/esr.Module in the whole call stack have been inspected.
+
+    NOTE
+    -   esr.Tensors will not share storage.
+
+    -   Except the syntactic GET_ATTR, we cannot tell if the esr.Tensor is
+        really written (e.g. getitem, reshape etc. returns the same address).
+        We have to treat all ops returning the address as writers.
+
+    -   Skipped esr.Tensors (shape[0] == 0) are not recorded.
+    """
+    def __init__(
+        self, module: esr.Module, stackframe: Dict[Node, RuntimeValue],
+        jit_engine: 'JitEngine'
+    ):
+        super().__init__(module, stackframe)
+
+        self.jit_engine = jit_engine
+
+        self.addr2tensor: Dict[int, esr.Tensor] = {}
+
+    def postprocess(
+        self, current_node: Node, res: RuntimeValue, args, kwargs
+    ) -> RuntimeValue:
+        res_siaddr: StructuredIndexedAddr = get_indexed_addr(res)
+
+        if current_node.op == FX.GET_ATTR:
+            # the same Tensor may be GET_ATTR multi times i.e. aliases
+            assert isinstance(res, esr.Tensor)
+            assert isinstance(res_siaddr, IndexedAddr)
+            self.addr2tensor[res_siaddr.addr] = res
+        
+        else:  # OK for CALL_MODULE to appear again, since it has no returns.
+            arg_item_iaddrs = collect_meta(
+                list(map(
+                    get_indexed_addr, itertools.chain(args, kwargs.values())
+                )),
+                leaf_type=IndexedAddr
+            )
+            for arg_item_iaddr in arg_item_iaddrs:
+                t = self.addr2tensor.get(arg_item_iaddr.addr, None)
+                if t is not None:
+                    self.jit_engine.read_tensors.add(t)
+
+            res_item_iaddrs = collect_meta(res_siaddr, leaf_type=IndexedAddr)
+            for res_item_iaddr in res_item_iaddrs:
+                t = self.addr2tensor.get(res_item_iaddr.addr, None)
+                if t is not None:
+                    self.jit_engine.write_tensors.add(t)
+
+        if current_node.op == FX.CALL_MODULE:
+            submod = get_called_module(self.current_module, current_node)
+            if isinstance(submod, esr.Module):
+                # nested_jit_engine has been run
+                # (and probably been run for multi times),
+                # its `accessed_tensors` has been calculated.
+                nested_jit_engine = cast(JitEngine, submod.forward.__self__)
+
+                for nested_read in nested_jit_engine.read_tensors:
+                    self.jit_engine.read_tensors.add(nested_read)
+                for nested_write in nested_jit_engine.write_tensors:
+                    self.jit_engine.write_tensors.add(nested_write)
+
+        return res
+
+
 class JitEngine:
     def __init__(self, module: esr.Module, graph: Graph) -> None:
         self.module = module
         self.graph = graph
 
         self.run_count = 0
+
+        # esr.Tensors this Module/JitEngine and its all nested Modules
+        # read/write.
+        # NOTE a nested esr.Tensor may be not referenced in this Module
+        # i.e. not used, or, isn't an attribute at all.
+        self.read_tensors: OrderedSet[esr.Tensor] = OrderedSet()
+        self.write_tensors: OrderedSet[esr.Tensor] = OrderedSet()
 
     def create_first_run_handlers(self, stackframe: Dict[Node, RuntimeValue]):
         first_run_handlers: List[NodeHandlerBase] = [
@@ -1053,6 +1160,11 @@ class JitEngine:
             # <---- Allocates zero-ed output _________/
             # <--else --------------------------------------------------
             NotFullReducerOutputAllocation(self.module, stackframe),
+
+            # ->
+            # <- if GET_ATTR, record the esr.Tensor;
+            #    if nested esr.Module calls, merge the records ---------
+            AttrTensorAccessRecorder(self.module, stackframe, self),
         ]
         return first_run_handlers
 
