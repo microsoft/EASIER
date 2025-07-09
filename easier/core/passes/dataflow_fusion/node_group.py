@@ -10,7 +10,7 @@ from torch import fx
 import easier.core.module as esr
 from easier.core.passes.data_dependency_analysis import get_data_dependency_users
 from easier.core.runtime.modules import HaloExchanger
-from easier.core.runtime.metadata import Role, collect_meta, get_node_meta, RuntimeTensorMeta, StructuredTensorMeta, jit_skipped_meta
+from easier.core.runtime.metadata import Role, collect_meta, get_node_meta, RuntimeTensorMeta, StructuredTensorMeta, is_node_skipped
 from easier.core.passes.utils import FX, OrderedSet, get_called_module
 from easier.core.utils import EasierJitException
 
@@ -38,7 +38,11 @@ class NodeGroup:
         self.root = root
         self.nodes = OrderedSet(nodes)
 
-        self.representative_reduces: Optional[Tuple[esr.Reducer, List[fx.Node]]] = None
+        # NOTE if Reducer is skipped by JitEngine, its group is EXCLUDED
+        # and won't have this field.
+        self.representative_reduces: Optional[
+            Tuple[esr.Reducer, List[fx.Node]]
+        ] = None
         
         # Aggregators, AKA allreduces, can be grouped regardless of
         # the allreduce op (SUM PROD etc.) or the input TensorGroup.
@@ -46,6 +50,20 @@ class NodeGroup:
 
         self.type: GroupType
         self.infer_type()
+    
+    def __eq__(self, other: 'NodeGroup') -> bool:
+        return self.nodes == other.nodes
+    
+    def __lt__(self, other: 'NodeGroup') -> bool:
+        """
+        Minimal protocol for `list.sort()`.
+        """
+        if _has_path(other, self):
+            return False
+        else:
+            return True
+    
+
 
     def infer_type(self) -> GroupType:
         res = GroupType.MAP
@@ -107,6 +125,13 @@ class NodeGroup:
     def all_output_nodes(self) -> OrderedSet[fx.Node]:
         """
         Get inner Nodes which have users that are not in this NodeGroup.
+
+        NOTE
+        Multi-res operators like torch.svd() are generally grouped with
+        following `getitem()` Nodes to unpack the multi-item result,
+        so output Nodes of a NodeGroup won't be multi-res, i.e. in codegen
+        we can treat an output Node as a single Tensor,
+        without extra nested structure.
         """
         outputs = OrderedSet()
         for node in self.nodes:
@@ -117,6 +142,7 @@ class NodeGroup:
 
 
 def _infer_group_type(gt: GroupType, nt: NodeType) -> GroupType:
+    # TODO many checks are duplicated with NdoeGroup.infer, can these methods be merged?
     assert nt is not NodeType.EXCLUDED, \
         "EXCLUDED Nodes are never grouped together"
 
@@ -170,12 +196,12 @@ def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
     #   -   nested esr.Module calls, return None -- FX.CALL_MODULE
     #   -   FX.OUTPUT, return None and are purely syntactic
     # - HaloExchanger Nodes -- FX.CALL_MODULE
-    meta = get_node_meta(node)
+    meta: StructuredTensorMeta = get_node_meta(node)
     all_replica = len(
         collect_meta(meta, lambda tm: tm.role, sentinel=Role.REPLICATED)
     ) == 0
 
-    if meta is jit_skipped_meta:
+    if is_node_skipped(node):
         return NodeType.EXCLUDED  # skip
 
     if node.op == FX.GET_ATTR:
@@ -231,7 +257,8 @@ def _get_downstream(
                         ret.add(usr)
     return ret
 
-def fuse_node_groups(ng1: NodeGroup, ng2: NodeGroup) -> bool:
+
+def try_fuse_node_groups(ng1: NodeGroup, ng2: NodeGroup) -> bool:
     """
     NodeGroups ng1 ng2 and the resultant fused NodeGroup are valid NodeGroups,
     e.g. won't have both Reducer and aggregator.

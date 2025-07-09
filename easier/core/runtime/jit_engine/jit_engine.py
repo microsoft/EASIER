@@ -154,8 +154,8 @@ def get_indexed_addr(
     _rec_depth=0  # debug-only
 ) -> StructuredIndexedAddr:
     """
-    Each resultant item tuple is:
-    an addr int with either a) None, b) an index within multi-result.
+    An IndexedAddr is an addr int with either
+    a) None, b) an index within multi-result.
 
     A typical use case is:
     When the ref count is increased 0 -> 1, we know the addr is allocated
@@ -166,8 +166,9 @@ def get_indexed_addr(
     with refcount > 0 indicates the memory was allocated earlier.
 
     Args:
-    -   val: The RuntimeValue bound to `node`,
-            not necessary to be `res` arg of `postprocess()`
+    -   val: A RuntimeValue that's possiby a Tensor,
+            not necessary to be `res` arg of `postprocess()`,
+            may be an item in `args` too.
     
     Returns:
     -   A structure of possibly nested IndexAddr, e.g.
@@ -210,7 +211,8 @@ def get_indexed_addr(
         return indexed_addrs
 
     elif val is None:
-        # TODO assert _rec_depth == 0  # possible?
+        # Besides resultant None of esr.Module calls, None can also be used
+        # as tensor index e.g. `getitem(x, [:, 1, None])` to unsqueeze dims.
         return None
 
     elif val is jit_skipped:

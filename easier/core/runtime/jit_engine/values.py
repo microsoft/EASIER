@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import operator
+from types import EllipsisType
 from typing import \
     Callable, Dict, List, Sequence, Tuple, TypeAlias, Union, cast
 import numpy
@@ -41,14 +42,18 @@ jit_released = JitReleased()
 
 _RuntimeValue: TypeAlias = Union[
     torch.Tensor,
-    Sequence['_RuntimeValue']
+    Sequence['_RuntimeValue'],
 
     # NOTE it's possible that FX trace `Tensor.item()` call which results in
     # a pure int/float scalar rather than a [0]-shape tensor.
+    int, float, bool,
+    # plus types may appear as constants or indexes in the parameter list
+    # of an operator.
+    str, slice, EllipsisType, None,
 ]
 RuntimeValue: TypeAlias = Union[
     _RuntimeValue,
-    None,  # output Nodes, nested esr.Module calls  # TODO any nested Nones?
+    None,  # output Nodes, nested esr.Module calls
     JitSkipped,  # Skipped won't be nested
     JitReleased
 ]

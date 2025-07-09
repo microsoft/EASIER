@@ -6,11 +6,11 @@ from torch import fx
 from torch.fx.graph import Graph
 
 import easier.core.module as esr
-from easier.core.passes.dataflow_fusion.node_group import NodeGroup, get_node_group, set_node_group, fuse_node_groups
-from easier.core.passes.dataflow_fusion.fusion_rules import GroupRule, NodeRule, RuleDecision
-from easier.core.passes.utils import FX, EasierInterpreter, get_called_module
-from easier.core.runtime.modules import HaloExchanger
-from easier.core.runtime.metadata import get_node_meta, RuntimeTensorMeta, StructuredTensorMeta, is_node_skipped, is_node_replica
+from easier.core.passes.dataflow_fusion.node_group import NodeGroup, get_node_group, set_node_group, try_fuse_node_groups
+from easier.core.passes.dataflow_fusion.fusion_rules import GroupRule, NodeRule, FuseDecision
+import easier.core.passes.dataflow_fusion.fusion_rules as rules
+from easier.core.passes.utils import EasierInterpreter
+from easier.core.utils import logger
 
 
 class NodeGrouper(EasierInterpreter):
@@ -18,29 +18,39 @@ class NodeGrouper(EasierInterpreter):
         assert len(modules) == len(graphs) == 1
         super().__init__(modules, graphs)
 
-        self.group_rules: List[GroupRule] = []
-        self.node_rules: List[NodeRule] = []
+        self.group_rules: List[GroupRule] = [
+            rules.RejectExcludedGroup(),
+            rules.ReducerAggregatorGroupsConflict(),
+            rules.FuseSameReducerGroups(),
+            rules._FuseReduceGroupAndOtherGroup(),
+        ]
+        self.node_rules: List[NodeRule] = [
+            rules.GroupingEndsBeforeSelector(),
+            rules.GroupingEndsAfterReducer(),
+            rules.GroupingEndsAfterAggregator(),
+        ]
 
-    def _check_rules(self, ng1: NodeGroup, ng2: NodeGroup) -> RuleDecision:
+    def _check_rules(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:
         """
         Check if any rule rejects, in a blacklist manner.
+
+        ng1 is graph-wise upstream to ng2.
 
         Returns:
         -   REJECT if any rules reject, PASS if all rules pass.
         """
-        for rule in self.group_rules:
-            if rule.check(ng1, ng2) == RuleDecision.REJECT:
-                return RuleDecision.REJECT
+        for group_rule in self.group_rules:
+            if group_rule.check(ng1, ng2) == FuseDecision.REJECT:
+                return FuseDecision.REJECT
 
         for n1 in ng1.nodes:
             for n2 in ng2.nodes:
                 if n2 in n1.users:
-                    # TODO how about n1 in n2.users?
-                    for rule in self.node_rules:
-                        if rule.check(n1, n2) == RuleDecision.REJECT:
-                            return RuleDecision.REJECT
+                    for node_rule in self.node_rules:
+                        if node_rule.check(n1, n2) == FuseDecision.REJECT:
+                            return FuseDecision.REJECT
 
-        return RuleDecision.PASS
+        return FuseDecision.PASS
 
     def _create_node_group(self, node: fx.Node) -> NodeGroup:
         ng = NodeGroup(self.current_module, [node])
@@ -51,34 +61,19 @@ class NodeGrouper(EasierInterpreter):
             if downstream_ng is None:
                 downstream_ng = self._create_node_group(user)
 
-            if ng is not downstream_ng and self._check_rules(ng, downstream_ng) == RuleDecision.PASS:
-                fuse_node_groups(ng, downstream_ng)
+            if ng is not downstream_ng and self._check_rules(ng, downstream_ng) == FuseDecision.PASS:
+                try_fuse_node_groups(ng, downstream_ng)
 
         return ng
-
+    
     def for_each_node(self):
-        # Skip:
-        # - JitEngine skipped Nodes, distributed but batchsize==0;
-        # - FX.GET_ATTR, purely syntactic Nodes
-        # - Non-aggregator replica Nodes:
-        #   -   Pure replica Nodes
-        #   -   nested esr.Module calls, return None
-        #   -   FX.OUTPUT, return None and are purely syntactic
-        # - HaloExchanger Nodes
-        if is_node_skipped(self.current_node) \
-            or self.current_node.op == FX.GET_ATTR \
-            or (
-            is_node_replica(self.current_node) and
-            not self.current_node.target in esr.easier_aggregators
-        ) \
-            or (
-            self.current_node.op == FX.CALL_MODULE and
-            isinstance(
-                get_called_module(self.current_module, self.current_node),
-                HaloExchanger
-            )
-        ):
-            # set_node_group(self.current_node, "TRIVIAL_GROUP")
-            return None
+        if get_node_group(self.current_node) is None:
+            self._create_node_group(self.current_node)
 
-        return super().for_each_node()
+
+def fuse_dataflow(modules: List[esr.Module], graphs: List[Graph]):
+    logger.info('Fusion pass is running')
+    NodeGrouper(modules, graphs).run()
+    logger.info('Fusion pass has completed')
+
+    return modules, graphs
