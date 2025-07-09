@@ -168,6 +168,13 @@ def get_indexed_addr(
     Args:
     -   val: The RuntimeValue bound to `node`,
             not necessary to be `res` arg of `postprocess()`
+    
+    Returns:
+    -   A structure of possibly nested IndexAddr, e.g.
+        `IndexAddr(addr, index=None)` or `None`,
+
+    -   When it's really nested, its leaf item can be None, e.g.
+        `[None, IndexAddr(addr, index=1), None]`
     """
     if isinstance(val, torch.Tensor):
         item_iaddr = val.untyped_storage().data_ptr()
@@ -175,6 +182,10 @@ def get_indexed_addr(
 
     elif isinstance(val, (tuple, list)):
         if _rec_depth > 0:
+            # TODO there exist multi-res torch ops whose rec_depth > 1, e.g.
+            # `torch.histogramdd() -> (Tensor, Tensor[])`
+            # for which we may change IndexedAddr.index to List[int].
+            # And this would simplify handling of the args list.
             raise EasierJitException(
                 "Unexpected nested result with nested depth > 1"
             )
@@ -202,9 +213,14 @@ def get_indexed_addr(
         # TODO assert _rec_depth == 0  # possible?
         return None
 
-    elif val is jit_skipped or isinstance(val, (int, float, bool)):
-        assert _rec_depth == 0, \
-            "Scalars and jit_skipped are always not nested"
+    elif val is jit_skipped:
+        assert _rec_depth == 0, "jit_skipped is always not nested"
+        return None
+    
+    elif val is Ellipsis or isinstance(val, (int, float, bool, str, slice)):
+        # rec_depth can > 0
+        # e.g. in `getitem(input=x, position=[:, slice, 5, tensoridx])`
+        # argument `position` will result in `[None, None, None, IndexAddr()]`
         return None
 
     else:
@@ -1090,7 +1106,7 @@ class AttrTensorAccessRecorder(NodeHandlerBase):
                 for nested_read in nested_jit_engine.read_tensors:
                     self.jit_engine.read_tensors.add(nested_read)
                 for nested_write in nested_jit_engine.write_tensors:
-                    self.jit_engine.read_tensors.add(nested_write)
+                    self.jit_engine.write_tensors.add(nested_write)
 
         return res
 
@@ -1102,6 +1118,10 @@ class JitEngine:
 
         self.run_count = 0
 
+        # esr.Tensors this Module/JitEngine and its all nested Modules
+        # read/write.
+        # NOTE a nested esr.Tensor may be not referenced in this Module
+        # i.e. not used, or, isn't an attribute at all.
         self.read_tensors: OrderedSet[esr.Tensor] = OrderedSet()
         self.write_tensors: OrderedSet[esr.Tensor] = OrderedSet()
 
