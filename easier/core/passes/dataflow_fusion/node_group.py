@@ -51,7 +51,15 @@ class NodeGroup:
         self.type: GroupType
         self.infer_type()
     
-    def __eq__(self, other: 'NodeGroup') -> bool:
+    def __hash__(self) -> int:
+        ret = 0
+        for node in self.nodes:
+            ret += hash(node)
+        return ret
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, NodeGroup):
+            return False
         return self.nodes == other.nodes
     
     def __lt__(self, other: 'NodeGroup') -> bool:
@@ -63,6 +71,18 @@ class NodeGroup:
         else:
             return True
     
+    def __repr__(self) -> str:
+        return f'NodeGroup({self.type}, {[node.name for node in self.nodes]})'
+    
+    def copy_(self, other: 'NodeGroup') -> 'NodeGroup':
+        assert self.root is other.root
+
+        self.nodes = other.nodes
+        self.representative_reduces = other.representative_reduces
+        self.representative_aggregators = other.representative_aggregators
+        self.type = other.type
+
+        return self
 
 
     def infer_type(self) -> GroupType:
@@ -229,6 +249,12 @@ def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
 
 def _has_path(n1: NodeGroup|fx.Node, n2: NodeGroup) -> bool:
         # n1: Union[NodeGroup, fx.Node], n2: Union[NodeGroup, fx.Node]) -> bool:
+    # if isinstance(n1, fx.Node):
+    #     n1_nodes = OrderedSet([n1])
+    # else:
+    #     n1_nodes = n1.nodes
+
+    # if n1_nodes == n2.nodes:
     if n1 == n2:
         return True
     else:
@@ -264,16 +290,29 @@ def try_fuse_node_groups(ng1: NodeGroup, ng2: NodeGroup) -> bool:
     e.g. won't have both Reducer and aggregator.
 
     But if the fused NodeGroup has "deadlock" dataflow
+
+    NOTE Involved NodeGroups will be modified before calculating the fusion
+    result, in order to make graph-level analysis effective regarding the
+    possible fused NodeGroup.
+    Only if the analysis fails, do we reset the involved NodeGroups to the
+    states when they enter this method.
     """
     assert ng1.root is ng2.root
-    fused = NodeGroup(ng1.root, list(ng1.nodes) + list(ng2.nodes))
+    tmp1 = NodeGroup(ng1.root, []).copy_(ng1)
+    tmp2 = NodeGroup(ng1.root, []).copy_(ng2)
 
-    for usr in _get_downstream(fused):
-        if _has_path(usr, fused):
+    fused = NodeGroup(ng1.root, list(ng1.nodes) + list(ng2.nodes))
+    ng1.copy_(fused)
+    ng2.copy_(fused)
+
+    for usr in _get_downstream(ng1):
+        if _has_path(usr, ng1):
+            ng1.copy_(tmp1)
+            ng2.copy_(tmp2)
             return False
     
-    for node in fused.nodes:
-        set_node_group(node, fused)
+    for node in ng1.nodes:
+        set_node_group(node, ng1)
     return True
 
 

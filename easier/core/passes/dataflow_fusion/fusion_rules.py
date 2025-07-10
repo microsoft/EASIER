@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 from enum import Enum, auto
 from torch import fx
 
+from easier.core.passes.data_dependency_analysis import get_data_dependency_users
 from easier.core.passes.dataflow_fusion.node_group import \
     GroupType, NodeGroup, NodeType, get_node_group, get_node_type
 
@@ -12,6 +13,50 @@ from easier.core.passes.dataflow_fusion.node_group import \
 class FuseDecision(Enum):
     REJECT = auto()
     PASS = auto()
+
+
+class NodeRule(ABC):
+    """
+    Dataflow arg and user.
+    """
+    @abstractmethod
+    def check(self, arg: fx.Node, user: fx.Node) -> FuseDecision:
+        pass
+
+class GroupingEndsBeforeSelector(NodeRule):
+    def check(self, arg: fx.Node, user: fx.Node) -> FuseDecision:
+        user_ng = get_node_group(user)
+        assert user_ng is not None
+
+        if get_node_type(user_ng.root, user) == NodeType.SELECT:
+            return FuseDecision.REJECT
+        else:
+            return FuseDecision.PASS
+
+
+class GroupingEndsAfterAggregator(NodeRule):
+    def check(self, arg: fx.Node, user: fx.Node) -> FuseDecision:
+        arg_ng = get_node_group(arg)
+        assert arg_ng is not None
+
+        if get_node_type(arg_ng.root, arg) == NodeType.AGGREGATOR:
+            return FuseDecision.REJECT
+        else:
+            return FuseDecision.PASS
+
+class GroupingEndsAfterReducer(NodeRule):
+    # TODO this rule and EndsAfterAggregator rule can be seen as
+    # Group-Node rule, which can be checked faster by
+    # rep_reducer and other_ng.nodes.
+    def check(self, arg: fx.Node, user: fx.Node) -> FuseDecision:
+        arg_ng = get_node_group(arg)
+        assert arg_ng is not None
+
+        if get_node_type(arg_ng.root, arg) == NodeType.REDUCE:
+            return FuseDecision.REJECT
+        else:
+            return FuseDecision.PASS
+
 
 
 class GroupRule(ABC):
@@ -60,56 +105,22 @@ class FuseSameReducerGroups(GroupRule):
             r2 = ng2.representative_reduces[0]
             if r1 is not r2:
                 return FuseDecision.REJECT
-        
+
         return FuseDecision.PASS
 
 
-class _FuseReduceGroupAndOtherGroup(GroupRule):
-    def _check(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:
+class _RejectSerializedReducers(GroupRule):
+    def _reject(self, ng1: NodeGroup, ng2: NodeGroup) -> bool:
         if ng1.representative_reduces is not None:
-            reducer, reduce_nodes = ng1.representative_reduces
-
-
+            reducer, nodes = ng1.representative_reduces
+            for reduce_node in nodes:
+                for dep_usr in get_data_dependency_users(reduce_node):
+                    if dep_usr in ng2.nodes:
+                        return True
+        return False
 
     def check(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:
-        1
-
-
-class NodeRule(ABC):
-    """
-    Dataflow arg and user.
-    """
-    @abstractmethod
-    def check(self, arg: fx.Node, user: fx.Node) -> FuseDecision:
-        pass
-
-class GroupingEndsBeforeSelector(NodeRule):
-    def check(self, arg: fx.Node, user: fx.Node) -> FuseDecision:
-        user_ng = get_node_group(user)
-        assert user_ng is not None
-
-        if get_node_type(user_ng.root, user) == NodeType.SELECT:
-            return FuseDecision.REJECT
-        else:
-            return FuseDecision.PASS
-
-
-class GroupingEndsAfterAggregator(NodeRule):
-    def check(self, arg: fx.Node, user: fx.Node) -> FuseDecision:
-        arg_ng = get_node_group(arg)
-        assert arg_ng is not None
-
-        if get_node_type(arg_ng.root, arg) == NodeType.AGGREGATOR:
-            return FuseDecision.REJECT
-        else:
-            return FuseDecision.PASS
-
-class GroupingEndsAfterReducer(NodeRule):
-    def check(self, arg: fx.Node, user: fx.Node) -> FuseDecision:
-        arg_ng = get_node_group(arg)
-        assert arg_ng is not None
-
-        if get_node_type(arg_ng.root, arg) == NodeType.REDUCE:
+        if self._reject(ng1, ng2) or self._reject(ng2, ng1):
             return FuseDecision.REJECT
         else:
             return FuseDecision.PASS

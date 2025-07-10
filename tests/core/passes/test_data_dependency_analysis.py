@@ -148,7 +148,7 @@ def test_data_dependency__two_path_inplace():
 
 
 @pytest.mark.usefixtures('dummy_dist_env')
-def test_data_dependency__undetermined():
+def test_data_dependency__uncommon_data_type_str():
     class M(esr.Module):
         def __init__(self):
             super().__init__()
