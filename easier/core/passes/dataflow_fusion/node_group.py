@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 
 import itertools
-from typing import List, Sequence, Set, Tuple, Union, cast
+from typing import List, Sequence, Set, Tuple, Union, cast, Self
 from enum import Enum, auto
 from typing import Optional
 from torch import fx
@@ -50,6 +50,14 @@ class NodeGroup:
 
         self.type: GroupType
         self.infer_type()
+
+    def copy_(self, other: 'NodeGroup') -> Self:
+        self.root = other.root
+        self.nodes = other.nodes
+        self.representative_reduces = other.representative_reduces
+        self.representative_aggregators = other.representative_aggregators
+        self.type = other.type
+        return self
     
     def __hash__(self) -> int:
         ret = 0
@@ -72,17 +80,10 @@ class NodeGroup:
             return True
     
     def __repr__(self) -> str:
-        return f'NodeGroup({self.type}, {[node.name for node in self.nodes]})'
+        type_name = self.type.name  # e.g. shorter 'REDUCE' without class name
+        node_names = [node.name for node in self.nodes]
+        return f'NodeGroup({type_name}, {node_names})'
     
-    def copy_(self, other: 'NodeGroup') -> 'NodeGroup':
-        assert self.root is other.root
-
-        self.nodes = other.nodes
-        self.representative_reduces = other.representative_reduces
-        self.representative_aggregators = other.representative_aggregators
-        self.type = other.type
-
-        return self
 
 
     def infer_type(self) -> GroupType:

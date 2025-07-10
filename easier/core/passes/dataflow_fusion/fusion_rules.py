@@ -46,8 +46,9 @@ class GroupingEndsAfterAggregator(NodeRule):
 
 class GroupingEndsAfterReducer(NodeRule):
     # TODO this rule and EndsAfterAggregator rule can be seen as
-    # Group-Node rule, which can be checked faster by
-    # rep_reducer and other_ng.nodes.
+    # GroupRule (or Group-Node rule), which can be checked faster by
+    # rep_reducer and other_ng.nodes,
+    # rather than being checked at O(#self.nodes * #other.nodes) complexity.
     def check(self, arg: fx.Node, user: fx.Node) -> FuseDecision:
         arg_ng = get_node_group(arg)
         assert arg_ng is not None
@@ -109,14 +110,35 @@ class FuseSameReducerGroups(GroupRule):
         return FuseDecision.PASS
 
 
-class _RejectSerializedReducers(GroupRule):
+class UnifyReduceScheduling(GroupRule):
+    """
+    The scheduling for hardware threads of Reducer may be inconsistent to
+    the scheduling of Mapped ops on Reducer input or output tensor.
+    Such inconsistency may also occur when Reducer is in-place and its
+    `forward(input, out=x)` memory is then read/write by other Nodes.
+
+    Also, EASIER aggregators, AKA all_reduces, may also be affected by such
+    inconsistency.
+
+    The way to identify it is to check data dependency edges.
+
+    However, currently this has side effects:
+    -   Data dependency edges regarding Reducer input is taken into
+        consideration too. Scheduling for Reducer input is less inconsistent
+        than scheduling for Reducer output.
+    """
     def _reject(self, ng1: NodeGroup, ng2: NodeGroup) -> bool:
         if ng1.representative_reduces is not None:
             reducer, nodes = ng1.representative_reduces
-            for reduce_node in nodes:
-                for dep_usr in get_data_dependency_users(reduce_node):
-                    if dep_usr in ng2.nodes:
-                        return True
+        elif ng1.representative_aggregators is not None:
+            nodes = ng1.representative_aggregators
+        else:
+            nodes = []
+
+        for reduce_node in nodes:
+            for dep_usr in get_data_dependency_users(reduce_node):
+                if dep_usr in ng2.nodes:
+                    return True
         return False
 
     def check(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:

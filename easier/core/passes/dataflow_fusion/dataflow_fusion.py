@@ -22,7 +22,7 @@ class NodeGrouper(EasierInterpreter):
             rules.RejectExcludedGroup(),
             rules.ReducerAggregatorGroupsConflict(),
             rules.FuseSameReducerGroups(),
-            rules._RejectSerializedReducers(),
+            rules.UnifyReduceScheduling(),
         ]
         self.node_rules: List[NodeRule] = [
             rules.GroupingEndsBeforeSelector(),
