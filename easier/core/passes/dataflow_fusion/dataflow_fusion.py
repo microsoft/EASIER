@@ -6,11 +6,12 @@ from torch import fx
 from torch.fx.graph import Graph
 
 import easier.core.module as esr
-from easier.core.passes.dataflow_fusion.node_group import NodeGroup, get_node_group, set_node_group, try_fuse_node_groups
+from easier.core.passes.dataflow_fusion.node_group import GroupType, NodeGroup, get_node_group, set_node_group, try_fuse_node_groups
 from easier.core.passes.dataflow_fusion.fusion_rules import GroupRule, NodeRule, FuseDecision
 import easier.core.passes.dataflow_fusion.fusion_rules as rules
 from easier.core.passes.utils import EasierInterpreter
 from easier.core.utils import logger
+from easier.core.runtime.dist_env import unbalanced_compute_heartbeat
 
 
 class NodeGrouper(EasierInterpreter):
@@ -21,8 +22,8 @@ class NodeGrouper(EasierInterpreter):
         self.group_rules: List[GroupRule] = [
             rules.RejectExcludedGroup(),
             rules.ReducerAggregatorGroupsConflict(),
-            rules.FuseSameReducerGroups(),
-            rules.UnifyReduceScheduling(),
+            rules.ReducerInstancesConflict(),
+            rules.UnifyReducerScheduling(),
         ]
         self.node_rules: List[NodeRule] = [
             rules.GroupingEndsBeforeSelector(),
@@ -56,6 +57,8 @@ class NodeGrouper(EasierInterpreter):
         ng = NodeGroup(self.current_module, [node])
         set_node_group(node, ng)
 
+        logger.debug(node)
+
         for user in node.users:
             downstream_ng = get_node_group(user)
             if downstream_ng is None:
@@ -72,8 +75,32 @@ class NodeGrouper(EasierInterpreter):
 
 
 def fuse_dataflow(modules: List[esr.Module], graphs: List[Graph]):
-    logger.info('Fusion pass is running')
-    NodeGrouper(modules, graphs).run()
-    logger.info('Fusion pass has completed')
+    with unbalanced_compute_heartbeat("dataflow fusion"):
+
+        # import cProfile
+        # from easier.core.runtime.dist_env import get_default_dist_env
+        # rank = get_default_dist_env().rank
+        # p = cProfile.Profile()
+        # p.enable()
+
+        logger.info('Fusion pass is running')
+        NodeGrouper(modules, graphs).run()
+        logger.info('Fusion pass has completed')
+
+        # p.disable()
+        # p.dump_stats(f'fusion_{rank}.prof')
+
+        m, = modules
+        g, = graphs
+        ngs = set()
+        for n in g.nodes:
+            ng = get_node_group(n)
+            ngs.add(ng)
+
+        logger.info(m.__class__.__name__)
+        logger.info(g)
+        for ng in ngs:
+            if ng.type != GroupType.EXCLUDED:
+                logger.info(ng)
 
     return modules, graphs

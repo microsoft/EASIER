@@ -5,7 +5,8 @@ from abc import ABC, abstractmethod
 from enum import Enum, auto
 from torch import fx
 
-from easier.core.passes.data_dependency_analysis import get_data_dependency_users
+from easier.core.passes.data_dependency_analysis import \
+    get_data_dependency_users
 from easier.core.passes.dataflow_fusion.node_group import \
     GroupType, NodeGroup, NodeType, get_node_group, get_node_type
 
@@ -87,18 +88,24 @@ class RejectExcludedGroup(GroupRule):
 
 
 class ReducerAggregatorGroupsConflict(GroupRule):
-    def _reject(self, ng1: NodeGroup, ng2: NodeGroup) -> bool:
-        return \
-            ng1.representative_aggregators is not None \
-            and ng2.representative_reduces is not None
-
     def check(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:
         if self._reject(ng1, ng2) or self._reject(ng2, ng1):
             return FuseDecision.REJECT
         else:
             return FuseDecision.PASS
 
-class FuseSameReducerGroups(GroupRule):
+    def _reject(self, ng1: NodeGroup, ng2: NodeGroup) -> bool:
+        return \
+            ng1.representative_aggregators is not None \
+            and ng2.representative_reduces is not None
+
+
+# NOTE unlike Reducers, different aggregators (esr.sum, esr.max, etc.)
+# won't conflict, they can be grouped as long as their input Tensors
+# are of the same TensorGroup.
+
+
+class ReducerInstancesConflict(GroupRule):
     def check(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:
         if ng1.representative_reduces is not None \
         and ng2.representative_reduces is not None:
@@ -110,28 +117,33 @@ class FuseSameReducerGroups(GroupRule):
         return FuseDecision.PASS
 
 
-class UnifyReduceScheduling(GroupRule):
+class UnifyReducerScheduling(GroupRule):
     """
-    The scheduling for hardware threads of Reducer may be inconsistent to
-    the scheduling of Mapped ops on Reducer input or output tensor.
-    Such inconsistency may also occur when Reducer is in-place and its
-    `forward(input, out=x)` memory is then read/write by other Nodes.
+    The scheduling for hardware threads of Reducer are generally inconsistent
+    with the scheduling of Mapped ops on Reducer input or output tensor.
 
-    Also, EASIER aggregators, AKA all_reduces, may also be affected by such
-    inconsistency.
+    An example of inconsistency between Reducer and output tensor is
+    when Reducer is in-place: `forward(input, out=x)`
+    and out tensor `x` is then read/write by other Nodes.
 
     The way to identify it is to check data dependency edges.
 
-    However, currently this has side effects:
+    TODO although simple, this has side effects:
     -   Data dependency edges regarding Reducer input is taken into
         consideration too. Scheduling for Reducer input is less inconsistent
         than scheduling for Reducer output.
+    -   Two Reducer calls writing the same memory block, the execution of which
+        can possibly be serialized, won't be grouped together.
     """
+    def check(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:
+        if self._reject(ng1, ng2) or self._reject(ng2, ng1):
+            return FuseDecision.REJECT
+        else:
+            return FuseDecision.PASS
+
     def _reject(self, ng1: NodeGroup, ng2: NodeGroup) -> bool:
         if ng1.representative_reduces is not None:
             reducer, nodes = ng1.representative_reduces
-        elif ng1.representative_aggregators is not None:
-            nodes = ng1.representative_aggregators
         else:
             nodes = []
 
@@ -140,9 +152,3 @@ class UnifyReduceScheduling(GroupRule):
                 if dep_usr in ng2.nodes:
                     return True
         return False
-
-    def check(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:
-        if self._reject(ng1, ng2) or self._reject(ng2, ng1):
-            return FuseDecision.REJECT
-        else:
-            return FuseDecision.PASS
