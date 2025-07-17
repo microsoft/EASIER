@@ -5,7 +5,10 @@ import itertools
 from typing import List, Sequence, Set, Tuple, Union, cast, Self
 from enum import Enum, auto
 from typing import Optional
+import numpy
+import scipy
 from torch import fx
+import torch
 
 import easier.core.module as esr
 from easier.core.passes.data_dependency_analysis import get_data_dependency_inputs, get_data_dependency_users
@@ -35,7 +38,7 @@ class GroupType(Enum):
     AGGREGATOR = auto()
 
 class NodeGroup:
-    def __init__(self, root: esr.Module, nodes: Sequence[fx.Node], id: int) -> None:
+    def __init__(self, root: esr.Module, nodes: Sequence[fx.Node], id: int, conn_mat: int) -> None:
         self.root = root
         self.nodes = OrderedSet(nodes)
         self.id = id
@@ -53,9 +56,6 @@ class NodeGroup:
         self.type: GroupType
         self._infer_type()
 
-        self.downstream: Set[NodeGroup]
-        self.reset_downstream()
-
     def copy_(self, other: 'NodeGroup') -> Self:
         self.root = other.root
         self.nodes = OrderedSet(other.nodes)
@@ -71,8 +71,6 @@ class NodeGroup:
             self.representative_aggregators = other.representative_aggregators.copy()
 
         self.type = other.type
-
-        self.downstream = set(other.downstream)
 
         return self
     
@@ -95,7 +93,7 @@ class NodeGroup:
         """
         E.g.
         ```
-        NodeGroup(MAP, [sub_53], downstream=[[mul_33], [getitem_52]])
+        NodeGroup@5(MAP, [sub_53], downstream=[[mul_33]@7, [getitem_52]@11])
         ```
         """
         type_name = self.type.name
@@ -104,9 +102,13 @@ class NodeGroup:
             return '[' + ', '.join(node.name for node in ng.nodes) + ']'
 
         node_names = _node_names(self)
-        downstream_names = '[' + ', '.join(_node_names(d_ng) for d_ng in self.downstream) + ']'
+        downstream_names = '[' + ', '.join(
+            _node_names(d_ng) + f'@{d_ng.id}'
+            for d_ng in _get_downstream(self)
+        ) + ']'
 
-        return f'NodeGroup(type={type_name}, nodes={node_names}, downstream={downstream_names})'
+        return f'NodeGroup@{self.id}({type_name}, {node_names},' \
+            f' downstream={downstream_names})'
     
 
 
@@ -156,27 +158,6 @@ class NodeGroup:
         self.type = res
         return res
     
-    def reset_downstream(self) -> Set['NodeGroup']:
-        # TODO cut down on GT.EXCLUDED
-        downstream = set()
-        for node in self.nodes:
-            for usr in set(list(node.users) + get_data_dependency_users(node)).difference(self.nodes):
-                # if usr not in self.nodes:
-                usr_ng = get_node_group(usr)
-                downstream.add(usr_ng)
-        self.downstream = downstream
-        return downstream
-    
-    def get_upstream(self) -> Set['NodeGroup']:
-        # TODO cut down on GT.EXCLUDED
-        upstream = set()
-        for node in self.nodes:
-            for input in set(list(node.all_input_nodes) + get_data_dependency_inputs(node)).difference(self.nodes):
-                # if input not in self.nodes:
-                input_ng = get_node_group(input)
-                upstream.add(input_ng)
-        return upstream
-
     def all_input_nodes(self) -> OrderedSet[fx.Node]:
         """
         Get Nodes that are inputs to inner Nodes and not in this NodeGroup.
@@ -293,7 +274,7 @@ def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
     
     return NodeType.MAP
 
-def _has_path(n1: NodeGroup, n2: NodeGroup) -> bool:
+def _has_path(n1: NodeGroup, n2: NodeGroup, conn_mat: torch.Tensor) -> bool:
     """
     Detect if there is a dataflow/data-dependency path from n1 to n2.
     """
@@ -313,32 +294,44 @@ def _has_path(n1: NodeGroup, n2: NodeGroup) -> bool:
         return True
     else:
         for usr in n1.downstream:
-            if _has_path(usr, n2):
+            if _has_path(usr, n2, conn_mat):
                 return True
         return False
 
-# def _get_downstream(
-#         input: Union[NodeGroup, fx.Node]) -> Set[Union[NodeGroup, fx.Node]]:
-#     ret = set()
-#     if isinstance(input, fx.Node):
-#         for usr in set(list(input.users) + get_data_dependency_users(input)):
-#             if get_node_group(usr):
-#                 ret.add(get_node_group(usr))
-#             else:
-#                 ret.add(usr)
 
-#     else:
-#         for node in input.nodes:
-#             for usr in set(list(node.users) + get_data_dependency_users(node)):
-#                 if usr not in input.nodes:
-#                     if get_node_group(usr):
-#                         ret.add(get_node_group(usr))
-#                     else:
-#                         ret.add(usr)
-#     return ret
+def init_connectivity(nodes: List[fx.Node]):
+    num = len(nodes)
+
+    adjmat = torch.full((num, num), fill_value=0, dtype=torch.int64)
+    for node in nodes:
+        ng = get_node_group(node)
+        for downstream_ng in _get_downstream(ng):
+            adjmat[ng.id][downstream_ng.id] = 1
+        
+    adjmat = adjmat + adjmat.T
+
+    # TODO the distribution of degree of adjmat is probably ~ Poisson(1)
+    # adjust shortest_path algorithm that most fits the distribution.
+    conn_mat = scipy.sparse.csgraph.shortest_path(adjmat.numpy())
+    conn_mat = torch.from_numpy(conn_mat != numpy.inf).to(torch.int64)
+
+    assert torch.equal(conn_mat, conn_mat.T)
+
+    return conn_mat
+
+def _get_downstream(ng: NodeGroup) -> Set[NodeGroup]:
+    ret = set()
+    for node in ng.nodes:
+        for usr in set(
+            list(node.users) + get_data_dependency_users(node)
+        ).difference(ng.nodes):
+            ret.add(get_node_group(usr))
+    return ret
 
 
-def try_fuse_node_groups(ng1: NodeGroup, ng2: NodeGroup) -> bool:
+def fuse_groups_if_no_deadlock(
+    ng1: NodeGroup, ng2: NodeGroup, conn_mat: torch.Tensor
+) -> bool:
     """
     NodeGroups ng1 ng2 and the resultant fused NodeGroup are valid NodeGroups,
     e.g. won't have both Reducer and aggregator.
@@ -365,6 +358,7 @@ def try_fuse_node_groups(ng1: NodeGroup, ng2: NodeGroup) -> bool:
     assert ng1.root is ng2.root
     tmp1 = NodeGroup(ng1.root, [], ng1.id).copy_(ng1)
     tmp2 = NodeGroup(ng1.root, [], ng2.id).copy_(ng2)
+    tmpmat = conn_mat.clone()
 
     # NOTE we never call `set_node_group(..., fused)` to associate
     # temporary NodeGroup instance `fused` to the graph,
@@ -373,22 +367,28 @@ def try_fuse_node_groups(ng1: NodeGroup, ng2: NodeGroup) -> bool:
     ng1.copy_(fused)
     ng2.copy_(fused)
 
-    for usr in ng1.downstream:
+    fused_row = (conn_mat[ng1.id] + conn_mat[ng2.id] > 0).to(conn_mat.dtype)
+    conn_mat[ng1.id, :] = fused_row
+    conn_mat[ng2.id, :] = fused_row
+    conn_mat[:, ng1.id] = fused_row
+    conn_mat[:, ng2.id] = fused_row
+
+    for usr in _get_downstream(ng1): # ng1.downstream:
         # If a dataflow/data-dependency user Node of the whole ng1 (fused),
         # has a downstream path back into ng1 (fused) itself, it means
         # fusing ng1 (original) and ng2 will cause a "deadlock" in the graph.
         # Then we cannot fuse ng1 and ng2.
-        if _has_path(usr, ng1):
+
+        # if _has_path(usr, ng1, conn_mat):
+        if conn_mat[usr.id, ng1.id] > 0:
             ng1.copy_(tmp1)
             ng2.copy_(tmp2)
+            conn_mat.copy_(tmpmat)
             return False
 
     for node in ng1.nodes:
         set_node_group(node, ng1)
 
-    for up_ng in ng1.get_upstream():
-        up_ng.reset_downstream()
-    
     return True
 
 def sort_node_groups():
