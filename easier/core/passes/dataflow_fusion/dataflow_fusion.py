@@ -42,13 +42,14 @@ class NodeGrouper(EasierInterpreter):
         # Init NodeGroup for each Node, as NodeGroup.ctor will calculate
         # downstream NodeGroups, we need to traverse in the reversed list.
         nodes = list(graph.nodes)
+        num = len(nodes)
+        self.conn_mat = torch.full((num, num), fill_value=0, dtype=torch.int64)
+
         for id, n in reversed(list(enumerate(nodes))):
-            ng = NodeGroup(root, [n], id)
+            ng = NodeGroup(root, [n], id, self.conn_mat)
             set_node_group(n, ng)
         
-    
-        self.conn_mat = init_connectivity(nodes)
-
+        init_connectivity(nodes, self.conn_mat)
         
 
     def _check_rules(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:

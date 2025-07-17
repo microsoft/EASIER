@@ -38,10 +38,11 @@ class GroupType(Enum):
     AGGREGATOR = auto()
 
 class NodeGroup:
-    def __init__(self, root: esr.Module, nodes: Sequence[fx.Node], id: int, conn_mat: int) -> None:
+    def __init__(self, root: esr.Module, nodes: Sequence[fx.Node], id: int, conn_mat: torch.Tensor) -> None:
         self.root = root
         self.nodes = OrderedSet(nodes)
         self.id = id
+        self.conn_mat = conn_mat
 
         # NOTE if Reducer is skipped by JitEngine, its group is EXCLUDED
         # and won't have this field.
@@ -60,6 +61,7 @@ class NodeGroup:
         self.root = other.root
         self.nodes = OrderedSet(other.nodes)
         self.id = other.id
+        self.conn_mat = other.conn_mat  # always reference, don't clone
 
         self.representative_reduces = None
         if other.representative_reduces is not None:
@@ -299,7 +301,7 @@ def _has_path(n1: NodeGroup, n2: NodeGroup, conn_mat: torch.Tensor) -> bool:
         return False
 
 
-def init_connectivity(nodes: List[fx.Node]):
+def init_connectivity(nodes: List[fx.Node], conn_mat: torch.Tensor):
     num = len(nodes)
 
     adjmat = torch.full((num, num), fill_value=0, dtype=torch.int64)
@@ -312,12 +314,11 @@ def init_connectivity(nodes: List[fx.Node]):
 
     # TODO the distribution of degree of adjmat is probably ~ Poisson(1)
     # adjust shortest_path algorithm that most fits the distribution.
-    conn_mat = scipy.sparse.csgraph.shortest_path(adjmat.numpy())
-    conn_mat = torch.from_numpy(conn_mat != numpy.inf).to(torch.int64)
-
+    short_distance = scipy.sparse.csgraph.shortest_path(adjmat.numpy())
+    conn_mat.copy_(
+        torch.from_numpy(short_distance != numpy.inf).to(conn_mat.dtype)
+    )
     assert torch.equal(conn_mat, conn_mat.T)
-
-    return conn_mat
 
 def _get_downstream(ng: NodeGroup) -> Set[NodeGroup]:
     ret = set()
@@ -356,14 +357,14 @@ def fuse_groups_if_no_deadlock(
     when they enter this method.
     """
     assert ng1.root is ng2.root
-    tmp1 = NodeGroup(ng1.root, [], ng1.id).copy_(ng1)
-    tmp2 = NodeGroup(ng1.root, [], ng2.id).copy_(ng2)
+    tmp1 = NodeGroup(ng1.root, [], ng1.id, conn_mat).copy_(ng1)
+    tmp2 = NodeGroup(ng1.root, [], ng2.id, conn_mat).copy_(ng2)
     tmpmat = conn_mat.clone()
 
     # NOTE we never call `set_node_group(..., fused)` to associate
     # temporary NodeGroup instance `fused` to the graph,
     # so we cannot do checks e.g. `get_node_group(...) is not fused`.
-    fused = NodeGroup(ng1.root, list(ng1.nodes) + list(ng2.nodes), ng1.id)
+    fused = NodeGroup(ng1.root, list(ng1.nodes) + list(ng2.nodes), ng1.id, conn_mat)
     ng1.copy_(fused)
     ng2.copy_(fused)
 
