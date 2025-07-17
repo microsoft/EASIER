@@ -257,27 +257,34 @@ def assemble_shallow_water(mesh: str, shallow_water: str, device='cpu'):
     components = ShallowWaterMeshComponentsCollector(mesh)
     components.to(device)
 
-    [components] = esr.compile(
-        [components], 'torch', partition_mode='evenly'
-    )  # type: ignore
-    components: ShallowWaterMeshComponentsCollector
-    components()
+    # [components] = esr.compile(
+    #     [components], 'torch', partition_mode='evenly'
+    # )  # type: ignore
+    # components: ShallowWaterMeshComponentsCollector
+    # components()
 
-    for i in range(3):
-        components.src_p[i].save(shallow_water, f'src_p{i}')
-        components.dst_p[i].save(shallow_water, f'dst_p{i}')
-        components.cells_p[i].save(shallow_water, f'cells_p{i}')
-    for i in range(2):
-        components.bp[i].save(shallow_water, f'bp{i}')
+    # for i in range(3):
+    #     components.src_p[i].save(shallow_water, f'src_p{i}')
+    #     components.dst_p[i].save(shallow_water, f'dst_p{i}')
+    #     components.cells_p[i].save(shallow_water, f'cells_p{i}')
+    # for i in range(2):
+    #     components.bp[i].save(shallow_water, f'bp{i}')
 
     initializer = ShallowWaterInitializer(shallow_water, mesh)
     initializer.to(device)
 
     [initializer] = esr.compile(
-        [initializer], 'torch', partition_mode='evenly'
+        [initializer], 'torch', partition_mode='evenly',
+        load_dir='~/.easier/dump/SW_init_100'
     )  # type: ignore
+
+    # esr.dump([initializer], '~/.easier/dump/SW_init_100')
+    # exit(0)
+
     initializer: ShallowWaterInitializer
     initializer()
+
+    exit(0)
 
     initializer.x.save(shallow_water, 'x')
     initializer.y.save(shallow_water, 'y')

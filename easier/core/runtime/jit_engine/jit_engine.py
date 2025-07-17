@@ -1208,6 +1208,9 @@ class JitEngine:
         ms, gs = passes.analyze_data_dependency(ms, gs)
         ms, gs = passes.fuse_dataflow(ms, gs)
         # ms, gs = passes.codegen(ms, gs)
+        # TODO only analyze_data_dpendnecy must be run after 1st run,
+        # as it generates nested info for outer JIT run
+        # but fuse and codegen and be moved to before 2nd run.
 
         [self.module], [self.graph] = ms, gs
 
