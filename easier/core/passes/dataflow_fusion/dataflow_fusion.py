@@ -75,11 +75,22 @@ class NodeGrouper(EasierInterpreter):
         return FuseDecision.PASS
 
     def _try_fuse_downstream_groups(self, node: fx.Node) -> NodeGroup:
+        """
+        Try to fuse NodeGroup on `node` and its downstream NodeGroups.
+
+        Two NodeGroups are only fused if:
+        -   all GroupRules/NodeRules pass;
+
+        -   there won't be _deadlock_ on the potentially fused NodeGroup,
+            i.e. on the graph, there cannot be a path going out of that
+            NodeGroup and then going back into it.
+
+            Such NodeGroups cannot be codegen-ed, deadlock indicates that
+            its input depends on its own output.
+        """
         self.visited.add(node)
 
         ng = get_node_group(node)
-
-        logger.debug(f'{node}')
 
         for user in node.users:
             if user not in self.visited:

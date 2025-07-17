@@ -83,12 +83,30 @@ class NodeGroup:
         return ret
 
     def __eq__(self, other: 'NodeGroup') -> bool:
-        return self.nodes == other.nodes
+        if self.id == other.id:
+            # About `assert self.nodes == other.nodes`:
+            # At whatever moment, NodeGroups on the graph must be in a valid
+            # state: cannot deadlock, cannot overlap, etc.
+            # Although implementation-wise possible to break this rule,
+            # e.g. `tmp_ng1` variables within fuse_if_no_deadlock() method,
+            # such temporary states cannot go out of that method scope.
+            assert self.nodes == other.nodes
+            return True
+        else:
+            return False
     
     def __lt__(self, other: 'NodeGroup') -> bool:
-        if _has_path(other, self):
+        if self.conn_mat[other.id, self.id] > 0:
             return False
         else:
+            # self is topologically upstream or in parallel
+            return True
+
+    def __gt__(self, other: 'NodeGroup') -> bool:
+        if self.conn_mat[self.id, other.id] > 0:
+            return False
+        else:
+            # self is topologically downstream or in parallel
             return True
     
     def __repr__(self) -> str:
@@ -276,49 +294,31 @@ def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
     
     return NodeType.MAP
 
-def _has_path(n1: NodeGroup, n2: NodeGroup, conn_mat: torch.Tensor) -> bool:
-    """
-    Detect if there is a dataflow/data-dependency path from n1 to n2.
-    """
-        # n1: Union[NodeGroup, fx.Node], n2: Union[NodeGroup, fx.Node]) -> bool:
-    # if isinstance(n1, fx.Node):
-    #     n1_nodes = OrderedSet([n1])
-    # else:
-    #     n1_nodes = n1.nodes
-
-    # TODO will we meet that [n1:Node] == n2.nodes ? 
-
-    if get_runtime_dist_env().rank == 0:
-        logger.debug(f'? has path {n1} {n2}')
-
-    # if n1_nodes == n2.nodes:
-    if n1 == n2:
-        return True
-    else:
-        for usr in n1.downstream:
-            if _has_path(usr, n2, conn_mat):
-                return True
-        return False
-
 
 def init_connectivity(nodes: List[fx.Node], conn_mat: torch.Tensor):
+    """
+    The connectivity matrix is basically a directed acyclic graph (DAG).
+
+    Although within certain implementation like fuse_if_no_deadlock(),
+    conn_mat can temporarily become cyclic, indicating deadlock occurs,
+    such temporary states cannot go out of that method scope.
+    """
     num = len(nodes)
 
+    # This adjmat is upper-triangular only
     adjmat = torch.full((num, num), fill_value=0, dtype=torch.int64)
     for node in nodes:
         ng = get_node_group(node)
         for downstream_ng in _get_downstream(ng):
             adjmat[ng.id][downstream_ng.id] = 1
         
-    adjmat = adjmat + adjmat.T
-
-    # TODO the distribution of degree of adjmat is probably ~ Poisson(1)
+    # TODO the distribution of NodeGroup degrees is probably ~ Poisson(1)
     # adjust shortest_path algorithm that most fits the distribution.
     short_distance = scipy.sparse.csgraph.shortest_path(adjmat.numpy())
     conn_mat.copy_(
         torch.from_numpy(short_distance != numpy.inf).to(conn_mat.dtype)
     )
-    assert torch.equal(conn_mat, conn_mat.T)
+
 
 def _get_downstream(ng: NodeGroup) -> Set[NodeGroup]:
     ret = set()
@@ -328,6 +328,25 @@ def _get_downstream(ng: NodeGroup) -> Set[NodeGroup]:
         ).difference(ng.nodes):
             ret.add(get_node_group(usr))
     return ret
+
+
+def sort_node_groups(groups: List[NodeGroup]):
+    if len(groups) <= 1:
+        return groups
+
+    pivot = groups[len(groups) // 2]
+    left = []
+    right = []
+    middle = []
+    for group in groups:
+        if group == pivot:
+            middle.append(group)
+        elif group > pivot:
+            right.append(group)
+        elif group < pivot:
+            left.append(group)
+
+    return sort_node_groups(left) + middle + sort_node_groups(right)
 
 
 def fuse_groups_if_no_deadlock(
@@ -346,8 +365,8 @@ def fuse_groups_if_no_deadlock(
     I.e. NodeGroup instance ng2 will be discarded from Node metas.
 
     NOTE
-    Because _get_downstream() and _has_path() methods above
-    inspect dataflow/dependency information on the graph,
+    Because `_get_downstream()` inspects and `conn_mat` reflects
+    dataflow/dependency information on the graph,
     involved NodeGroups will be modified by `ng1.copy_(fused)` temporarily.
 
     This will make graph-level analysis take the possibly resultant
@@ -368,19 +387,18 @@ def fuse_groups_if_no_deadlock(
     ng1.copy_(fused)
     ng2.copy_(fused)
 
+    # conn_mat is still directed, but now it may have loops
     fused_row = (conn_mat[ng1.id] + conn_mat[ng2.id] > 0).to(conn_mat.dtype)
     conn_mat[ng1.id, :] = fused_row
     conn_mat[ng2.id, :] = fused_row
     conn_mat[:, ng1.id] = fused_row
     conn_mat[:, ng2.id] = fused_row
 
-    for usr in _get_downstream(ng1): # ng1.downstream:
+    for usr in _get_downstream(ng1):
         # If a dataflow/data-dependency user Node of the whole ng1 (fused),
         # has a downstream path back into ng1 (fused) itself, it means
         # fusing ng1 (original) and ng2 will cause a "deadlock" in the graph.
         # Then we cannot fuse ng1 and ng2.
-
-        # if _has_path(usr, ng1, conn_mat):
         if conn_mat[usr.id, ng1.id] > 0:
             ng1.copy_(tmp1)
             ng2.copy_(tmp2)
@@ -392,8 +410,6 @@ def fuse_groups_if_no_deadlock(
 
     return True
 
-def sort_node_groups():
-    "TODO"
 
 def get_node_group(node: fx.Node) -> NodeGroup:
     return node.meta[KEY__FUSION_NODE_GROUP]
