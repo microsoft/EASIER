@@ -10,6 +10,7 @@ import scipy.sparse.csgraph
 
 import easier.core.module as esr
 from easier.core.passes.dataflow_fusion.node_group import GroupType, NodeGroup, get_node_group, set_node_group, fuse_groups_if_no_deadlock, init_connectivity
+from easier.core.passes.dataflow_fusion.debug import dump_visualized_fused_groups
 from easier.core.passes.dataflow_fusion.fusion_rules import GroupRule, NodeRule, FuseDecision
 import easier.core.passes.dataflow_fusion.fusion_rules as rules
 from easier.core.passes.utils import EasierInterpreter
@@ -116,31 +117,10 @@ class NodeGrouper(EasierInterpreter):
 def fuse_dataflow(modules: List[esr.Module], graphs: List[Graph]):
     with unbalanced_compute_heartbeat("dataflow fusion"):
 
-        # import cProfile
-        # from easier.core.runtime.dist_env import get_default_dist_env
-        # rank = get_default_dist_env().rank
-        # p = cProfile.Profile()
-        # p.enable()
-
-        m, = modules
-        g, = graphs
-        logger.info(m.__class__.__name__)
-        logger.info(g)
-
         logger.info('Fusion pass is running')
         NodeGrouper(modules, graphs).run()
         logger.info('Fusion pass has completed')
-
-        # p.disable()
-        # p.dump_stats(f'fusion_{rank}.prof')
-
-        ngs = set()
-        for n in g.nodes:
-            ng = get_node_group(n)
-            ngs.add(ng)
-
-        for ng in ngs:
-            if ng.type != GroupType.EXCLUDED:
-                logger.info(ng)
+    
+    dump_visualized_fused_groups(modules, graphs)
 
     return modules, graphs
