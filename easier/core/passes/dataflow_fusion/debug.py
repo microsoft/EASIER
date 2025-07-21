@@ -47,7 +47,7 @@ def _get_callsite_str(n: fx.Node):
 
         arg_s = []
         for arg in args:
-            if isinstance(arg, (int, float, bool)):
+            if isinstance(arg, (int, float, bool, slice)) or arg is Ellipsis:
                 arg_s.append(str(arg))
                 const_num += 1
             elif isinstance(arg, str):
@@ -64,9 +64,9 @@ def _get_callsite_str(n: fx.Node):
 
         if const_num > 0:
             callsite += '('
-            callsite += ','.join(kv_s)
-            callsite += ','
             callsite += ','.join(arg_s)
+            callsite += ','
+            callsite += ','.join(kv_s)
             callsite += ')'
 
         if n.op == FX.CALL_FUNCTION and n.target == operator.getitem:
@@ -154,11 +154,11 @@ def dump_visualized_fused_groups(
             if _renderable(ng):
                 hue = ngid2colorid[ng.id] * per_ng_hue
                 v_line = f'{fx_n.name} [label="{v_callsite}@{ng.id}", ' \
-                    f'color="{hue},1,1", fillcolor="{hue},1,1,0.3"];'
-                # fillcolor with alpha=0.3
+                    f'color="{hue},1,1", fillcolor="{hue},0.3,1"];'
+                # fillcolor with saturation=0.3
             elif ng.type == GroupType.EXCLUDED:
                 # excluded NodeGroup
-                v_line = f'{fx_n.name} [label="{v_callsite}#R"];'
+                v_line = f'{fx_n.name} [label="{v_callsite}#E"];'
             else:
                 # singleton NodeGroup
                 v_line = f'{fx_n.name} [label="{v_callsite}#{ng.id}"];'

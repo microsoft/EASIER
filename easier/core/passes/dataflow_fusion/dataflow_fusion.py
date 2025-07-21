@@ -117,9 +117,23 @@ class NodeGrouper(EasierInterpreter):
 def fuse_dataflow(modules: List[esr.Module], graphs: List[Graph]):
     with unbalanced_compute_heartbeat("dataflow fusion"):
 
+        m, = modules
+        g, = graphs
+        logger.info(m.__class__.__name__)
+        logger.info(g)
+
         logger.info('Fusion pass is running')
         NodeGrouper(modules, graphs).run()
         logger.info('Fusion pass has completed')
+
+        ngs = set()
+        for n in g.nodes:
+            ng = get_node_group(n)
+            ngs.add(ng)
+
+        for ng in ngs:
+            if ng.type != GroupType.EXCLUDED:
+                logger.info(ng)
     
     dump_visualized_fused_groups(modules, graphs)
 
