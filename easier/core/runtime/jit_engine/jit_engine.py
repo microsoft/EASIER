@@ -890,6 +890,51 @@ class ReducerMetadataPropagation(NodeHandlerBase):
         return PreprocessDecision.CONTINUE
 
 
+class CommunicationPrimitiveRecorder(NodeHandlerBase):
+    """
+    Given that in certain cases HaloExchanger/Aggregator execution handlers
+    will cause JitEngine to skip following NodeHandlers, this Recorder may be
+    registered before those communication primitive execution handlers.
+    """
+    def __init__(
+        self, module: esr.Module, stackframe: Dict[Node, RuntimeValue],
+        jit_engine: 'JitEngine'
+    ):
+        super().__init__(module, stackframe)
+
+        self.jit_engine = jit_engine
+
+        jit_engine.called_comm_primitive = False
+    
+    def preprocess_call_function(
+        self,
+        current_node: Node,
+        function,
+        args: List[RuntimeValue],
+        kwargs: Dict[str, RuntimeValue]
+    ) -> PreprocessDecision:
+        if function in _EsrMod.easier_aggregators:
+            self.jit_engine.called_comm_primitive = True
+        return PreprocessDecision.CONTINUE
+
+    def preprocess_call_module(
+        self,
+        current_node: Node,
+        submod,
+        args: List[RuntimeValue],
+        kwargs: Dict[str, RuntimeValue]
+    ) -> PreprocessDecision:
+        if isinstance(submod, HaloExchanger):
+            self.jit_engine.called_comm_primitive = True
+        
+        if isinstance(submod, esr.Module):
+            nested_jit_engine = cast(JitEngine, submod.forward.__self__)
+            if nested_jit_engine.called_comm_primitive:
+                self.jit_engine.called_comm_primitive = True
+
+        return PreprocessDecision.CONTINUE
+
+
 class AggregatorNeutralInputPreparation(NodeHandlerBase):
     """
     Aggregator Nodes are where distributed tensors convert into replicated
@@ -1066,6 +1111,9 @@ class AttrTensorAccessRecorder(NodeHandlerBase):
 
         self.jit_engine = jit_engine
 
+        jit_engine.read_tensors = OrderedSet()
+        jit_engine.write_tensors = OrderedSet()
+
         self.addr2tensor: Dict[int, esr.Tensor] = {}
 
     def postprocess(
@@ -1113,6 +1161,8 @@ class AttrTensorAccessRecorder(NodeHandlerBase):
         return res
 
 
+
+
 class JitEngine:
     def __init__(self, module: esr.Module, graph: Graph) -> None:
         self.module = module
@@ -1120,12 +1170,23 @@ class JitEngine:
 
         self.run_count = 0
 
+        # ======
+        # Fields for Handlers to setup
+
+        # CommunicationPrimitiveRecorder:
+        #
+        # Whether this Module or nested Modules called communication primitives
+        # like AllReduce/HaloExchanger(P2P).
+        self.called_comm_primitive: bool
+
+        # AttrTensorAccessRecorder:
+        #
         # esr.Tensors this Module/JitEngine and its all nested Modules
         # read/write.
         # NOTE a nested esr.Tensor may be not referenced in this Module
         # i.e. not used, or, isn't an attribute at all.
-        self.read_tensors: OrderedSet[esr.Tensor] = OrderedSet()
-        self.write_tensors: OrderedSet[esr.Tensor] = OrderedSet()
+        self.read_tensors: OrderedSet[esr.Tensor]
+        self.write_tensors: OrderedSet[esr.Tensor]
 
     def create_first_run_handlers(self, stackframe: Dict[Node, RuntimeValue]):
         first_run_handlers: List[NodeHandlerBase] = [
@@ -1152,11 +1213,15 @@ class JitEngine:
             # <-
             ReducerMetadataPropagation(self.module, stackframe),
 
-            # -> Prepares neutral input to esr.sum etc. and GOTO_EVAL
+            # -> Record self calls comm APIs; merge nested esr.Module records
             # <-
+            CommunicationPrimitiveRecorder(self.module, stackframe, self),
+
+            # -> Prepares neutral input to esr.sum etc.: GOTO_EVAL --\------
+            # <------------------------------------------------------/------
             AggregatorNeutralInputPreparation(self.module, stackframe),
-            # -> Prepares input to HaloExchanger and GOTO_EVAL
-            # <-
+            # -> Prepares input to HaloExchanger: GOTO_EVAL ---------\------
+            # <------------------------------------------------------/------
             HaloExchangerZeroLengthInputPreparation(self.module, stackframe),
             # -> if input is zero-length: SKIP_EVAL --\-----------------
             # <---- Allocates zero-ed output _________/

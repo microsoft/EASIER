@@ -1,9 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import dataclasses
 import itertools
 import operator
-from typing import Dict, Iterable, List, Optional, Sequence, cast
+from typing import Dict, Iterable, List, Optional, Sequence, Union, cast
 
 from torch import nn
 from torch.fx.graph import Graph
@@ -16,6 +17,7 @@ import easier.core.module as esr
 
 from easier.core.passes.utils import \
     FX, EasierInterpreter, OrderedSet
+from easier.core.runtime.modules import HaloExchanger
 
 
 KEY__DATA_DEPENDENCY_INPUTS = 'easier_dataDependency_inputs'
@@ -30,6 +32,11 @@ def get_data_dependency_inputs(node: Node) -> List[Node]:
 def get_data_dependency_users(node: Node) -> List[Node]:
     # Return a clone to avoid manipulating the node meta dict.
     return list(node.meta.get(KEY__DATA_DEPENDENCY_USERS, []))
+
+
+@dataclasses.dataclass(frozen=True, eq=True)
+class _DistEnvViewSrc:
+    pass
 
 
 class DataDependencyAnalyzer(EasierInterpreter[None]):
@@ -72,9 +79,15 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         # in dataflow, it will still be added to src2writer,
         # but may not be touched anymore, e.g. no more writers/readers torch
         # the same view source of `out=x`.
-        self.src2writer: Dict[ViewSrc, Node] = {}
+        self.src2writer: Dict[
+            Union[ViewSrc, _DistEnvViewSrc],
+            Node
+        ] = {}
 
-        self.src2readers: Dict[ViewSrc, OrderedSet[Node]] = {}
+        self.src2readers: Dict[
+            Union[ViewSrc, _DistEnvViewSrc],
+            OrderedSet[Node]
+        ] = {}
 
         et2src: Dict[esr.Tensor, ViewSrc] = {}
         class _TensorViewSrcCollector(EasierInterpreter):
@@ -87,6 +100,8 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
                     )
         _TensorViewSrcCollector(modules, graphs).run()
         self.et2src = et2src
+
+        self._dist_env_viewsrc = _DistEnvViewSrc()
 
     def add_data_dependency_edge(self, src: Node, dst: Node):
         # NOTE only existing dataflow/dependency edges are deduplicated,
@@ -135,7 +150,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         readers = self.src2readers.setdefault(arg_src, OrderedSet())
         readers.add(reader)
 
-    def add_writer_dependency(self, res_src: ViewSrc):
+    def add_writer_dependency(self, res_src: Union[ViewSrc, _DistEnvViewSrc]):
         """
         Add the current node as a writer on the memory at `res_src`.
 
@@ -145,6 +160,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         -   purely creates a view, e.g. getitem, reshape
             P.S. without being rule-based it's not that easy to tell if an op
             is purely creating views.
+        -   
         """
         writer = self.current_node
 
@@ -247,30 +263,43 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
 
         # Handle more specific scenarios like nested esr.Module calls
         super().for_each_node()
-
+    
+    def if_call_function(self, function) -> None:
+        if function in esr.easier_aggregators:
+            self.add_writer_dependency(self._dist_env_viewsrc)
 
     def if_call_module(self, submod: nn.Module):
         """
-        A nested esr.Module call has no input/output, data dependency
-        may occur through esr.Tensor instances the inner Module
-        shares/writes.
-        """
-        if not isinstance(submod, esr.Module):
-            return
+        `submod` may be:
         
+        -   A nested esr.Module call has no input/output, data dependency
+            may occur through:
+            -   esr.Tensor instances the inner Module shares/writes.
+            -   the inner Module calls communication primitives,
+                its call order must be strictly kept.
+
+        -   A HaloExchanger, its call order must be strictly kept.
+        """
         from easier.core.runtime.jit_engine.jit_engine import JitEngine
-        nested_jit_engine = cast(JitEngine, submod.forward.__self__)
 
-        for et_read in nested_jit_engine.read_tensors:
-            nested_read = self.et2src.get(et_read, None)
-            if nested_read is not None:
-                self.add_reader_dependency(nested_read)
+        if isinstance(submod, esr.Module):
+            nested_jit_engine = cast(JitEngine, submod.forward.__self__)
 
-        for et_write in nested_jit_engine.write_tensors:
-            nested_write = self.et2src.get(et_write, None)
-            if nested_write is not None:
-                self.add_writer_dependency(nested_write)
+            for et_read in nested_jit_engine.read_tensors:
+                nested_read = self.et2src.get(et_read, None)
+                if nested_read is not None:
+                    self.add_reader_dependency(nested_read)
 
+            for et_write in nested_jit_engine.write_tensors:
+                nested_write = self.et2src.get(et_write, None)
+                if nested_write is not None:
+                    self.add_writer_dependency(nested_write)
+            
+            if nested_jit_engine.called_comm_primitive:
+                self.add_writer_dependency(self._dist_env_viewsrc)
+
+        if isinstance(submod, HaloExchanger):
+            self.add_writer_dependency(self._dist_env_viewsrc)
 
 def analyze_data_dependency(modules: List[esr.Module], graphs: List[Graph]):
     """
