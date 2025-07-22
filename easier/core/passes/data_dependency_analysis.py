@@ -17,7 +17,7 @@ import easier.core.module as esr
 
 from easier.core.passes.utils import \
     FX, EasierInterpreter, OrderedSet
-from easier.core.runtime.modules import HaloExchanger
+from easier.core.runtime.modules import HaloExchanger, all_gather_into_tensor
 
 
 KEY__DATA_DEPENDENCY_INPUTS = 'easier_dataDependency_inputs'
@@ -204,8 +204,10 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         #
         if is_node_skipped(self.current_node):
             return
+
         if self.current_node.op == FX.GET_ATTR:
             # GET_ATTR is purely syntactic, its position in IR does not matter.
+            # NOTE However, GET_ATTR Nodes are still used as ViewSrc.
             #
             # TODO
             # Some functions are purely manipulating the views, too, e.g.
@@ -265,7 +267,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         super().for_each_node()
     
     def if_call_function(self, function) -> None:
-        if function in esr.easier_aggregators:
+        if function.target is all_gather_into_tensor:
             self.add_writer_dependency(self._dist_env_viewsrc)
 
     def if_call_module(self, submod: nn.Module):
@@ -300,6 +302,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
 
         if isinstance(submod, HaloExchanger):
             self.add_writer_dependency(self._dist_env_viewsrc)
+
 
 def analyze_data_dependency(modules: List[esr.Module], graphs: List[Graph]):
     """

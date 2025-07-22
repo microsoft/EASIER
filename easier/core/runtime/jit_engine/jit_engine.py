@@ -18,7 +18,7 @@ from easier.core.passes.utils import \
 from easier.core.utils import EasierJitException
 from easier.core.runtime.dist_env import \
     get_default_dist_env, get_runtime_dist_env
-from easier.core.runtime.modules import HaloExchanger
+from easier.core.runtime.modules import HaloExchanger, all_gather_into_tensor
 from easier.core.runtime.metadata import \
     RuntimeTensorMeta, StructuredTensorMeta, Role, ViewSrc, \
     get_node_meta, set_node_meta, get_runtime_metadata_from_scalar, \
@@ -905,35 +905,25 @@ class CommunicationPrimitiveRecorder(NodeHandlerBase):
         self.jit_engine = jit_engine
 
         jit_engine.called_comm_primitive = False
-    
-    def preprocess_call_function(
-        self,
-        current_node: Node,
-        function,
-        args: List[RuntimeValue],
-        kwargs: Dict[str, RuntimeValue]
-    ) -> PreprocessDecision:
-        if function in _EsrMod.easier_aggregators:
-            self.jit_engine.called_comm_primitive = True
-        return PreprocessDecision.CONTINUE
-
-    def preprocess_call_module(
-        self,
-        current_node: Node,
-        submod,
-        args: List[RuntimeValue],
-        kwargs: Dict[str, RuntimeValue]
-    ) -> PreprocessDecision:
-        if isinstance(submod, HaloExchanger):
+        
+    def postprocess(
+        self, current_node: Node, res: RuntimeValue, args, kwargs
+    ) -> RuntimeValue:
+        if current_node.target is all_gather_into_tensor:
             self.jit_engine.called_comm_primitive = True
         
-        if isinstance(submod, esr.Module):
-            nested_jit_engine = cast(JitEngine, submod.forward.__self__)
-            if nested_jit_engine.called_comm_primitive:
+        elif current_node.op == FX.CALL_MODULE:
+            submod = get_called_module(self.current_module, current_node)
+            if isinstance(submod, HaloExchanger):
                 self.jit_engine.called_comm_primitive = True
-
-        return PreprocessDecision.CONTINUE
-
+            
+            if isinstance(submod, esr.Module):
+                nested_jit_engine = cast(JitEngine, submod.forward.__self__)
+                if nested_jit_engine.called_comm_primitive:
+                    self.jit_engine.called_comm_primitive = True
+        
+        return res
+    
 
 class AggregatorNeutralInputPreparation(NodeHandlerBase):
     """
@@ -1213,8 +1203,8 @@ class JitEngine:
             # <-
             ReducerMetadataPropagation(self.module, stackframe),
 
-            # -> Record self calls comm APIs; merge nested esr.Module records
-            # <-
+            # ->
+            # <- Record self calls comm APIs; merge nested esr.Module records
             CommunicationPrimitiveRecorder(self.module, stackframe, self),
 
             # -> Prepares neutral input to esr.sum etc.: GOTO_EVAL --\------
