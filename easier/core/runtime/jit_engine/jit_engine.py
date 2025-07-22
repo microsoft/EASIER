@@ -1231,9 +1231,9 @@ class JitEngine:
             # <-
             ReducerMetadataPropagation(self.module, stackframe),
 
-            # ->
-            # <- Record self calls comm APIs; merge nested esr.Module records
-            CommunicationPrimitiveRecorder(self.module, stackframe, self),
+            # # ->
+            # # <- Record self calls comm APIs; merge nested esr.Module records
+            # CommunicationPrimitiveRecorder(self.module, stackframe, self),
 
             # -> Prepares neutral input to esr.sum etc.: GOTO_EVAL --\------
             # <------------------------------------------------------/------
@@ -1246,10 +1246,10 @@ class JitEngine:
             # <--else --------------------------------------------------
             NotFullReducerOutputAllocation(self.module, stackframe),
 
-            # ->
-            # <- if GET_ATTR, record the esr.Tensor;
-            #    if nested esr.Module calls, merge the records ---------
-            AttrTensorAccessRecorder(self.module, stackframe, self),
+            # # ->
+            # # <- if GET_ATTR, record the esr.Tensor;
+            # #    if nested esr.Module calls, merge the records ---------
+            # AttrTensorAccessRecorder(self.module, stackframe, self),
         ]
         return first_run_handlers
 

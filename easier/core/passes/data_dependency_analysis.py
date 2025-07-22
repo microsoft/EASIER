@@ -364,6 +364,18 @@ def analyze_data_dependency(modules: List[esr.Module], graphs: List[Graph]):
     dataflow edges (between node inputs/users) to ensure numerical correctness
     with tensor-writing operations like `y[:]=x` or `Reducer.forward(out=x)`.
     """
-    DataDependencyAnalyzer(modules, graphs).run()
+    assert len(modules) == len(graphs) == 1, \
+        "One module/graph at a time, avoid adding dep edges cross graphs"
+    m = modules[0]
+
+    dda = DataDependencyAnalyzer(modules, graphs).run()
+
+    from easier.core.runtime.jit_engine.jit_engine import JitEngine
+    je = cast(JitEngine, m.forward.__self__)
+
+    je.read_tensors = 1
+    je.write_tensors = 1
+
+    je.called_comm_primitive = 1
 
     return modules, graphs

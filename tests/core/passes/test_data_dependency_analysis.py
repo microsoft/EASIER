@@ -41,21 +41,20 @@ def _assert_deps(inputs: Dict[Node, List[Node]], nodes: Iterable[Node]):
     # - consistency of whether it has or not the dep edges.
     inputs_sets = {k: set(v) for k, v in inputs.items()}
     users_sets = {}
-    es = set()
     for k, v in inputs.items():
         for arg in v:
-            users: Set[Node] = users_sets.setdefault(arg, es)
+            users: Set[Node] = users_sets.setdefault(arg, set())
             users.add(k)
-
+    
     for n in nodes:
         if n.op == FX.OUTPUT:
             continue
 
-        assert inputs_sets.get(n, es) == set(get_data_dependency_inputs(n)), \
+        _es = set()
+        assert inputs_sets.get(n, _es) == set(get_data_dependency_inputs(n)), \
             f"Node {n} dep inputs incorrect"
-        assert users_sets.get(n, es) == set(get_data_dependency_users(n)), \
+        assert users_sets.get(n, _es) == set(get_data_dependency_users(n)), \
             f"Node {n} dep users incorrect"
-
 
 def _get_viewsrc_node(node: Node) -> Union[Node, None]:
     view_src = get_node_view_src(node)
@@ -230,14 +229,17 @@ def test_data_dependency_nested_call():
     je_inner = cast(JitEngine, inner.forward.__self__)
     assert list(je_inner.read_tensors) == [v]
     assert list(je_inner.write_tensors) == [v]
+    assert je_inner.called_comm_primitive == False
 
     je_intmd = cast(JitEngine, intmd.forward.__self__)
     assert list(je_intmd.read_tensors) == [intmd.r, v]
     assert list(je_intmd.write_tensors) == [intmd.r, v]
+    assert je_intmd.called_comm_primitive == False
 
     je_outer = cast(JitEngine, m.forward.__self__)
     assert list(je_outer.read_tensors) == [v, intmd.r2, intmd.r]
     assert list(je_outer.write_tensors) == [v, intmd.r2, intmd.r]
+    assert je_outer.called_comm_primitive == False
 
     graph = cast(JitEngine, jm.forward.__self__).graph
     get_attr, var_v, \
@@ -282,6 +284,125 @@ def test_data_dependency_nested_call():
         v_view2: [call_intermediate],  # cuz intermediate() writes self.v
         mul: [add_r2_3],
         set_v_2: [v_view2]
+    }, graph.nodes)
+
+
+@pytest.mark.usefixtures('dummy_dist_env')
+def test_data_dependency_nested_communication():
+    v = Tensor(torch.zeros([55, 3]), mode='partition')
+
+    class Inner(esr.Module):
+        def __init__(self):
+            super().__init__()
+            self.v = v
+
+        def forward(self):
+            esr.sum(self.v)
+
+    class Intermediate(esr.Module):
+        def __init__(self):
+            super().__init__()
+            self.r = esr.Tensor(torch.zeros(3, 3), mode='replicate')
+            self.inner = Inner()
+
+        def forward(self):
+            self.r.fill_(9)
+            self.inner()
+
+    class Outer(esr.Module):
+        def __init__(self):
+            super().__init__()
+            self.v = v
+            self.intmd = Intermediate()
+
+        def forward(self):
+            v2 = self.v[:, 1:2]
+            esr.max(self.v)
+            self.intmd()
+            self.v.add_(9)
+            esr.prod(self.v)
+            esr.sum(self.v)
+
+    m = Outer()
+    from easier.core.jit import compile
+    [jm] = compile([m], 'torch')  # type: ignore
+    jm.forward()
+
+    intmd, inner = m.intmd, m.intmd.inner
+
+    je_inner = cast(JitEngine, inner.forward.__self__)
+    assert list(je_inner.read_tensors) == [v]
+    assert list(je_inner.write_tensors) == []
+    assert je_inner.called_comm_primitive == True
+
+    je_intmd = cast(JitEngine, intmd.forward.__self__)
+    assert list(je_intmd.read_tensors) == [intmd.r, v]
+    assert list(je_intmd.write_tensors) == [intmd.r]
+    assert je_intmd.called_comm_primitive == True
+
+    je_outer = cast(JitEngine, m.forward.__self__)
+    assert list(je_outer.read_tensors) == [v, intmd.r]
+    assert list(je_outer.write_tensors) == [v, intmd.r]
+    assert je_outer.called_comm_primitive == True
+
+    graph = cast(JitEngine, jm.forward.__self__).graph
+    get_attr, getitem, \
+        dmax, allgather_max, rmax, \
+        call_intmd, add_, \
+        dprod, allgather_prod, rprod, \
+        dsum, allgather_sum, rsum, \
+        out = graph.nodes
+    
+    assert _get_viewsrc_node(get_attr) == get_attr
+    assert _get_viewsrc_node(getitem) == get_attr
+
+    assert _get_viewsrc_node(dmax) == dmax
+    assert _get_viewsrc_node(allgather_max) == allgather_max
+    assert _get_viewsrc_node(rmax) == rmax
+
+    assert _get_viewsrc_node(call_intmd) == None
+    assert _get_viewsrc_node(add_) == get_attr
+
+    assert _get_viewsrc_node(dprod) == dprod
+    assert _get_viewsrc_node(allgather_prod) == allgather_prod
+    assert _get_viewsrc_node(rprod) == rprod
+
+    assert _get_viewsrc_node(dsum) == dsum
+    assert _get_viewsrc_node(allgather_sum) == allgather_sum
+    assert _get_viewsrc_node(rsum) == rsum
+
+    """
+    get_attr = GET_ATTR["v"]
+    var_v2 = getitem(get_attr, :, 1:2)  # RW v
+
+    dmax = esr.max(get_attr)  # R v
+    allgather_max = all_gather_into_tensor(dmax)  # W distenv
+    rmax = torch.max(allgather_max)
+
+    call_inter = CALL_MODULE["intmd"]  # RW: intmd.r, R v, W distenv
+    add_ = get_attr.add_(9)  # RW v
+
+    dprod = esr.prod(get_attr)  # R v
+    allgather_prod = all_gather_into_tensor(dprod)  # W distenv
+    rprod = torch.prod(allgather_prod)
+
+    dsum = esr.sum(get_attr)  # R v
+    allgather_sum = all_gather_into_tensor(dsum)  # W distenv
+    rsum = torch.sum(allgather_sum)
+    """
+    _assert_deps({
+        dmax: [getitem],
+        call_intmd: [
+            getitem,
+            allgather_max  # cuz comm
+        ],
+        add_: [getitem, dmax, call_intmd],
+
+        dprod: [add_],
+        allgather_prod: [call_intmd],  # cuz comm
+
+        dsum: [add_],
+        allgather_sum: [allgather_prod],  # cuz comm
     }, graph.nodes)
 
 

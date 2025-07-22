@@ -115,25 +115,24 @@ class NodeGrouper(EasierInterpreter):
             self._try_fuse_downstream_groups(self.current_node)
 
 def fuse_dataflow(modules: List[esr.Module], graphs: List[Graph]):
-    with unbalanced_compute_heartbeat("dataflow fusion"):
+    assert len(modules) == len(graphs) == 1
+    m = modules[0]
+    # logger.info(graphs[0])
 
-        m, = modules
-        g, = graphs
-        logger.info(m.__class__.__name__)
-        logger.info(g)
+    with unbalanced_compute_heartbeat(f"dataflow fusion {m.easier_hint_name}"):
 
-        logger.info('Fusion pass is running')
+        logger.info(f'Fusion pass is running for {m.easier_hint_name}')
         NodeGrouper(modules, graphs).run()
         logger.info('Fusion pass has completed')
 
-        ngs = set()
-        for n in g.nodes:
-            ng = get_node_group(n)
-            ngs.add(ng)
+        # ngs = set()
+        # for n in graphs[0].nodes:
+        #     ng = get_node_group(n)
+        #     ngs.add(ng)
 
-        for ng in ngs:
-            if ng.type != GroupType.EXCLUDED:
-                logger.info(ng)
+        # for ng in ngs:
+        #     if ng.type != GroupType.EXCLUDED:
+        #         logger.info(ng)
     
     dump_visualized_fused_groups(modules, graphs)
 
