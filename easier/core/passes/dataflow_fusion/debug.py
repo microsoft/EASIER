@@ -214,7 +214,8 @@ def dump_visualized_fused_groups(
             # maybe ImportError or PermissionError (/bin/dot not found)
             logger.debug(
                 "`apt install graphviz && pip install graphviz`"
-                " to dump PNG fused dataflow graphs"
+                " to dump PNG fused dataflow graphs, or manually run"
+                " `dot module.dot -Tpng -o module.png`"
             )
     
         logger.debug(

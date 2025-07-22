@@ -10,7 +10,7 @@ from torch import nn
 from torch.fx.graph import Graph
 from torch.fx.node import Node
 from easier.core.runtime.metadata import \
-    Role, RuntimeTensorMeta, get_node_meta, collect_meta, \
+    RuntimeTensorMeta, get_node_meta, collect_meta, \
     ViewSrc, get_node_view_src, is_node_skipped
 
 import easier.core.module as esr
@@ -18,6 +18,7 @@ import easier.core.module as esr
 from easier.core.passes.utils import \
     FX, EasierInterpreter, OrderedSet
 from easier.core.runtime.modules import HaloExchanger, all_gather_into_tensor
+from easier.core.runtime.dist_env import get_runtime_dist_env
 
 
 KEY__DATA_DEPENDENCY_INPUTS = 'easier_dataDependency_inputs'
@@ -205,25 +206,51 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         if is_node_skipped(self.current_node):
             return
 
-        if self.current_node.op == FX.GET_ATTR:
-            # GET_ATTR is purely syntactic, its position in IR does not matter.
-            # NOTE However, GET_ATTR Nodes are still used as ViewSrc.
-            #
-            # TODO
-            # Some functions are purely manipulating the views, too, e.g.
-            # `a2 = a[...]; a3 = a[...]`, followed by `a[:] = 42; b = sin(a2)`.
-            # As long as we ensure `a[:] and b` are kept in order,
-            # it's actually safe to move `a2 a3` around.
-            # We might omit adding data dependency edges on them if needed.
-            return
+        self.arg_srcs: List[ViewSrc] = collect_meta(
+            [
+                get_node_view_src(arg)
+                for arg in self.current_node.all_input_nodes
+                if not is_node_skipped(arg)
+            ],
+            leaf_type=ViewSrc
+        )
 
-        arg_srcs = None  # type: ignore
+        # Handle more specific scenarios like nested esr.Module calls
+        # Derived if_xxx handlers may override self.arg_srcs and self.srcs
+        # to provide rule-based, specific and simpler decision on dependency.
+        self.res_srcs: Optional[List[Union[ViewSrc, _DistEnvViewSrc]]] = None
+        super().for_each_node()
 
-        # If getitem is for tuple indexing, which is essentially a syntactic
-        # construct of EASIER IR, R/W relations only cover that specified item,
-        # e.g. svd() returns 3 memory blocks, subsequent dependency edges
-        # must be calculated on individual block, rather than 3 blocks together.
+        for arg_src in self.arg_srcs:
+            self.add_reader_dependency(arg_src)
+
+        # Generally, purely viewing operators like getitem, reshape will
+        # return the argument memory addr, making themselves look like
+        # writers, and leading to extra writer dep barriers and handling.
+        if self.res_srcs is None:
+            res_srcs = collect_meta(
+                get_node_view_src(self.current_node),
+                leaf_type=ViewSrc
+            )
+        else:
+            res_srcs = self.res_srcs
+        for res_src in res_srcs:
+            self.add_writer_dependency(res_src)
+    
+    def if_get_attr(self, submod_path: str, attr_name: str, attr_val):
+        # GET_ATTR is purely syntactic, its position in IR does not matter.
+        # NOTE However, GET_ATTR Nodes are still used as ViewSrc.
+        self.arg_srcs = []
+        self.res_srcs = []
+
+    
+    def if_call_function(self, function) -> None:
         if self.current_node.target == operator.getitem:
+            # If getitem is for tuple indexing -- essentially a syntactic
+            # construct of EASIER IR,
+            # R/W relations only cover that specified item,
+            # e.g. svd() returns 3 memory blocks, subsequent dependency edges
+            # must be calculated on individual mem, rather than all 3 blocks.
             arg0 = self.current_node.all_input_nodes[0]
             assert not is_node_skipped(arg0)
             is_tuple_indexing = not isinstance(
@@ -232,43 +259,31 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             if is_tuple_indexing:
                 tuple_item_index = self.current_node.args[1]
                 assert isinstance(tuple_item_index, int)
-                arg_srcs = collect_meta(
+                
+                # !! Override self.arg_srcs
+                self.arg_srcs = collect_meta(
                     get_node_view_src(arg0)[tuple_item_index],  # type: ignore
                     leaf_type=ViewSrc
                 )
+            
+            # No matter which kind of getitem, it never writes
+            self.res_srcs = []
 
-        # For all other cases than tuple indexing:
-        if arg_srcs is None:
-            arg_srcs = collect_meta(
-                [
-                    get_node_view_src(arg)
-                    for arg in self.current_node.all_input_nodes
-                    if not is_node_skipped(arg)
-                ],
-                leaf_type=ViewSrc
-            )
+            # TODO
+            # There are more functions are purely manipulating the views.
+            # E.g. in
+            # ```
+            # a2 = a.view(...); x = sin(a); a3 = a.reshape(...), y = cos(a)
+            # ```
+            # as long as we ensure `x y` are kept in order,
+            # it's actually safe to move `a2 a3` around.
+            #
+            # Although we cannot enumerate all cases, a optional filter like
+            # how we do for `getitem` may simplify dependency a lot.
 
-        arg_srcs: List[ViewSrc]
-        for arg_src in arg_srcs:
-            self.add_reader_dependency(arg_src)
-        
 
-        # Generally, purely viewing operators like getitem, reshape will
-        # return the argument memory addr, making themselves look like
-        # writers, and leading to extra writer dep barriers and handling.
-        res_srcs = collect_meta(
-            get_node_view_src(self.current_node),
-            leaf_type=ViewSrc
-        )
-        for res_src in res_srcs:
-            self.add_writer_dependency(res_src)
-
-        # Handle more specific scenarios like nested esr.Module calls
-        super().for_each_node()
-    
-    def if_call_function(self, function) -> None:
-        if function.target is all_gather_into_tensor:
-            self.add_writer_dependency(self._dist_env_viewsrc)
+        elif function is all_gather_into_tensor:
+            self.res_srcs = [self._dist_env_viewsrc]
 
     def if_call_module(self, submod: nn.Module):
         """
@@ -287,21 +302,47 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         if isinstance(submod, esr.Module):
             nested_jit_engine = cast(JitEngine, submod.forward.__self__)
 
+            # !! Override
+            self.arg_srcs = []
+            self.res_srcs = []
+
             for et_read in nested_jit_engine.read_tensors:
-                nested_read = self.et2src.get(et_read, None)
-                if nested_read is not None:
-                    self.add_reader_dependency(nested_read)
+                nested_read_src = self.et2src.get(et_read, None)
+                if nested_read_src is not None:
+                    self.arg_srcs.append(nested_read_src)
 
             for et_write in nested_jit_engine.write_tensors:
-                nested_write = self.et2src.get(et_write, None)
-                if nested_write is not None:
-                    self.add_writer_dependency(nested_write)
+                nested_write_src = self.et2src.get(et_write, None)
+                if nested_write_src is not None:
+                    self.res_srcs.append(nested_write_src)
             
+            # Enforced order of communication
             if nested_jit_engine.called_comm_primitive:
-                self.add_writer_dependency(self._dist_env_viewsrc)
+                self.res_srcs.append(self._dist_env_viewsrc)
+            
 
         if isinstance(submod, HaloExchanger):
-            self.add_writer_dependency(self._dist_env_viewsrc)
+            # Use default arg_srcs decision.
+
+            # But for res_srcs, HaloExchanger may behave as in-place writing,
+            # e.g. when send-only for Selector, it will return the input
+            # tensor. By default this will be treated as writing.
+            # Let's simplify the dependency by treating HaloXchg as read-only.
+            res_src = get_node_view_src(self.current_node)
+            assert isinstance(res_src, ViewSrc)
+
+            # self.arg_srcs may be [] if this HaloXchg is recv-only
+            # i.e. input is skipped
+            if res_src in self.arg_srcs:
+                # !! Override to emphasize HaloXchg is read-only
+                self.res_srcs = []
+            else:
+                self.res_srcs = [res_src]
+            
+            # Enforced order of communication
+            self.res_srcs.append(self._dist_env_viewsrc)
+
+
 
 
 def analyze_data_dependency(modules: List[esr.Module], graphs: List[Graph]):
