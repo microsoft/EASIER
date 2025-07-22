@@ -21,11 +21,6 @@ from easier.core.utils import logger
 import easier.core.module as esr
 
 
-class _NoOpGraphviz:
-    def render(self, *args, **kwargs):
-        pass
-
-
 def _get_callsite_str(n: fx.Node):
     if n.op == FX.GET_ATTR:
         callsite = f'ATTR[{n.target}]'
@@ -35,13 +30,13 @@ def _get_callsite_str(n: fx.Node):
 
         if n.op == FX.CALL_METHOD:
             args = n.args[1:]
-            callsite = f'.{n.target}'
+            callsite = f'.{n.name}'
         elif n.op == FX.CALL_MODULE:
             args = n.args
-            callsite = f'{n.target}'
+            callsite = f'{n.name}'
         else:
             args = n.args
-            callsite = f'{n.target.__name__}' # type: ignore
+            callsite = f'{n.name}'
         
         const_num = 0
 
@@ -90,12 +85,6 @@ def dump_visualized_fused_groups(
     if logger.level > logging.DEBUG:
         return
 
-    try:
-        import graphviz
-    except ImportError:
-        logger.debug("`pip install graphviz` to dump fused dataflow graphs")
-        graphviz = _NoOpGraphviz()
-    
     # TODO dump_dir can be written by other loggings, maybe move this to
     # the utils module, beside easier.logger.
     log_dump_dir = os.environ.get("EASIER_LOG_DUMP_DIR", None)
@@ -107,7 +96,6 @@ def dump_visualized_fused_groups(
 
     # TODO each rank has its own random temp dir, better to collect to rank0?
     log_dump_dir = os.path.expanduser(log_dump_dir)
-    logger.debug(f"Visualize fused dataflow graphs to {log_dump_dir}")
     
     dist_env = get_runtime_dist_env()
     rank = dist_env.rank
@@ -123,7 +111,10 @@ def dump_visualized_fused_groups(
                 ngid2colorid[ng.id] = len(ngid2colorid)
 
         # HSV color space: Hue ~ [0.0, 1.0]
-        per_ng_hue = 1.0 / len(ngid2colorid)
+        if len(ngid2colorid) > 0:
+            per_ng_hue = 1.0 / len(ngid2colorid)
+        else:
+            per_ng_hue = 1.0  # not used
         
         # Shuffle NodeGroup ids to increase the contrast of HSV colors
         # of neighbouring NodeGroups.
@@ -158,10 +149,10 @@ def dump_visualized_fused_groups(
                 # fillcolor with saturation=0.3
             elif ng.type == GroupType.EXCLUDED:
                 # excluded NodeGroup
-                v_line = f'{fx_n.name} [label="{v_callsite}#E"];'
+                v_line = f'{fx_n.name} [label="{v_callsite}Excl"];'
             else:
                 # singleton NodeGroup
-                v_line = f'{fx_n.name} [label="{v_callsite}#{ng.id}"];'
+                v_line = f'{fx_n.name} [label="{v_callsite}S{ng.id}"];'
 
             v_e_lines.append(v_line)
 
@@ -173,13 +164,15 @@ def dump_visualized_fused_groups(
                     e_line = f'{arg_node.name} -> {fx_n.name} ' \
                         f'[color="{hue},1,1"];'
                 else:
-                    e_line = f'{arg_node.name} -> {fx_n.name};'
+                    # Normal dataflow edge
+                    e_line = f'{arg_node.name} -> {fx_n.name} ' \
+                        f'[color=darkgrey];'
                 
                 v_e_lines.append(e_line)
 
             for dep_arg in get_data_dependency_inputs(fx_n):
                 v_e_lines.append(
-                    f'{dep_arg.name} -> {fx_n.name} [style=dashed];'
+                    f'{dep_arg.name} -> {fx_n.name} [color=grey,style=dashed];'
                 )
         
         same_level_nodes.append(cur_level_nodes)
@@ -197,7 +190,6 @@ def dump_visualized_fused_groups(
             # width/height are minimum width/height
             '  node [shape=rect, style=filled, fillcolor=white,' \
                 ' margin=0.05, width=0.1, height=0.1];',
-            '  edge [color=darkgrey]'
         ] + [
             f'  {v_e}' for v_e in v_e_lines
         ] + [
@@ -214,4 +206,17 @@ def dump_visualized_fused_groups(
         with open(dot_src_filepath, 'w') as dot_f:
             dot_f.write('\n'.join(src_lines))
 
-        graphviz.render('dot', 'png', dot_src_filepath)
+
+        try:
+            import graphviz
+            graphviz.render('dot', 'png', dot_src_filepath)
+        except Exception as gv_render_ex:
+            # maybe ImportError or PermissionError (/bin/dot not found)
+            logger.debug(
+                "`apt install graphviz && pip install graphviz`"
+                " to dump PNG fused dataflow graphs"
+            )
+    
+        logger.debug(
+            f"Dump fused {root.easier_hint_name} to {log_dump_dir}"
+        )
