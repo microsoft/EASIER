@@ -774,6 +774,27 @@ class AggregatorMetadataPropagation(NodeHandlerBase):
     """
     Specific propagation for metadata of EASIER aggregators
     in addition to the general FirstRunMetadataPropagation.
+
+    A user program call to EASIER aggregator e.g. `r = esr.sum(x)`
+    in AOT is converted to:
+    ```
+    r1 = esr.sum(x)
+    r2 = runtime.all_gather_into_tensor(r1)
+    r = torch.sum(r2, dim=0, keepdim=True)
+    ```
+
+    `r1 = esr.sum(x)` is special:
+    -   it does NOT do communication.
+        (`r2 = runtime.all_gather_into_tensor(r1)` is purely replicated and
+        doing collective communication)
+
+    -   its input is distributed, its output is replicated;
+
+    -   on some ranks the input `x` to `esr.sum(x)` are skipped, but since
+        its output is replicated and given the overall design of JitEngine
+        that replica Nodes are not skipped, we have to hook on `esr.sum` Node
+        and inject a valid input tensor for it -- the value will be neutral
+        value of the corresponding aggregator.
     """
 
     def preprocess_call_function(
@@ -935,11 +956,18 @@ class AggregatorNeutralInputPreparation(NodeHandlerBase):
     Remarks:
     Instead of directly allocate the neutral tensor to be the result
     like not-full local Reducer,
+    we allocate the INPUT and still RUN the aggregator.
+
     Because PyTorch has the style of converting int32 to int64
     to avoid overflow, unless dtype is explicitly specified.
     So, we allocate the input and run the aggregator to get the real result
     dtype, and in the first run we all set the real result dtype in
     FirstRunAggregatorMetaProp.postprocess().
+
+    TODO consider enforce esr.aggegator to not auto promote dtype like int32,
+    also enforce distpass to insert allgather and replicated sum etc.
+    to use the same non-promoted dtype.
+    By so we can SKPI_EVAL and directly allocate the neutral OUTPUT.
     """
 
     def preprocess_call_function(

@@ -257,11 +257,18 @@ def _infer_group_type(gt: GroupType, nt: NodeType) -> GroupType:
 def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
     # Skip:
     # - JitEngine skipped Nodes, distributed but batchsize==0;
+    #
     # - FX.GET_ATTR, purely syntactic Nodes
+    #
+    # - Aggregator Nodes whose input dist tensors are skipped
+    #   (JitEngine AggregatorNeutralInputPreparation handler is nominated to
+    #   run these Nodes, so we cannot put them into NodeGroups)
+    #
     # - Non-aggregator replica Nodes:
     #   -   Pure replica Nodes
     #   -   nested esr.Module calls, return None -- FX.CALL_MODULE
     #   -   FX.OUTPUT, return None and are purely syntactic
+    #
     # - HaloExchanger Nodes -- FX.CALL_MODULE
     meta: StructuredTensorMeta = get_node_meta(node)
     all_replica = len(
@@ -274,11 +281,15 @@ def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
     if node.op == FX.GET_ATTR:
         return NodeType.EXCLUDED  # skip
 
-    if all_replica:
-        if node.target not in esr.easier_aggregators:
-            return NodeType.EXCLUDED  # skip
+    if node.target in esr.easier_aggregators:
+        aggegator_input = node.all_input_nodes[0]
+        if is_node_skipped(aggegator_input):
+            return NodeType.EXCLUDED
         else:
             return NodeType.AGGREGATOR
+
+    if all_replica:
+        return NodeType.EXCLUDED
     
     if node.op is FX.CALL_MODULE:
         submod = get_called_module(root, node)
