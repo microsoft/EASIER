@@ -16,7 +16,7 @@ from easier.core.runtime.metadata import \
 import easier.core.module as esr
 
 from easier.core.passes.utils import \
-    FX, EasierInterpreter, OrderedSet
+    FX, EasierInterpreter, OrderedSet, get_dag_connectivity_matrix
 from easier.core.runtime.modules import HaloExchanger, all_gather_into_tensor
 from easier.core.runtime.dist_env import get_runtime_dist_env
 
@@ -66,6 +66,8 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
     def __init__(self, modules: Sequence[esr.Module], graphs: Sequence[Graph]):
         assert len(modules) == len(graphs) == 1, \
             "One module/graph at a time, avoid adding dep edges cross graphs"
+        module = modules[0]
+        graph = graphs[0]
         # otherwise, 1) provide multiple stackframes,
         # 2) clear add2readers/write when switching current_graph.
 
@@ -90,19 +92,53 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             OrderedSet[Node]
         ] = {}
 
+        # Even esr.Tensor can have aliases, they will have a unique ViewSrc
+        # (in JitEngine ViewSrcTracker, we decide the ViewSrc by mem addr)
         et2src: Dict[esr.Tensor, ViewSrc] = {}
+        src2et: Dict[ViewSrc, esr.Tensor] = {}
         class _TensorViewSrcCollector(EasierInterpreter):
             def if_get_attr(self, submod_path: str, attr_name: str, attr_val):
                 if is_node_skipped(self.current_node):
                     return
                 if isinstance(attr_val, esr.Tensor):
-                    et2src[attr_val] = get_node_view_src(  # type: ignore
-                        self.current_node
-                    )
+                    etsrc = get_node_view_src(self.current_node)
+                    assert isinstance(etsrc, ViewSrc)
+                    et2src[attr_val] = etsrc
+                    src2et[etsrc] = attr_val
         _TensorViewSrcCollector(modules, graphs).run()
         self.et2src = et2src
+        self.src2et = src2et
 
+        # Create connectivity matrix for dataflow only
+        self._node2id: Dict[Node, int] = {}
+        for nid, n in enumerate(graph.nodes):
+            self._node2id[n] = nid
+        self.df_conn_mat = get_dag_connectivity_matrix(
+            list(graph.nodes), lambda n: n.users, self._node2id.__getitem__
+        )
+
+        # A const "ViewSrc" representing the global network state, causing
+        # all communication calls to be strictly ordered.
         self._dist_env_viewsrc = _DistEnvViewSrc()
+
+        # =======
+        # Runtime information captured for other esr.Modules that call this
+        # esr.Module in a nested call stack:
+
+        # esr.Tensors this Module/JitEngine and its all nested Modules
+        # read/write.
+        # A nested esr.Tensor parameter may be not referenced during execution
+        # of this module, so we don't rely on nn.Module.parameters() to avoid
+        # complicate the dependency.
+        self.read_tensors: OrderedSet[esr.Tensor] = OrderedSet()
+        self.write_tensors: OrderedSet[esr.Tensor] = OrderedSet()
+        
+        # Whether this Module and its all nested Modules call communication
+        # primitives from DistEnv.
+        # If called, the calls of this Module in the surrounding/outer
+        # esr.Module must be ordered with communication calls there.
+        self.called_comm_primitive: bool = False
+
 
     def add_data_dependency_edge(self, src: Node, dst: Node):
         # NOTE only existing dataflow/dependency edges are deduplicated,
@@ -113,9 +149,10 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             # inplace ops may be both reader and writer on the same view src.
             return
 
-        if src in dst.all_input_nodes:
-            # Avoid adding a data dependency edge if a dataflow edge
-            # already exists (between the two Nodes).
+        if self.df_conn_mat[self._node2id[src], self._node2id[dst]] > 0:
+            # Avoid adding a data dependency edge if it's dataflow connected,
+            # NOTE by df_conn_mat we already save a lot redundant dep edges,
+            # no need to update conn_mat to reflect dep edge connectivity.
             return
 
         # Use OrderedSet to deduplicate.
@@ -132,6 +169,8 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
 
         dep_inputs.add(src)
         dep_users.add(dst)
+
+        
 
     def add_reader_dependency(self, arg_src: ViewSrc):
         """
@@ -150,6 +189,9 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         # between these readers we do not need a order.
         readers = self.src2readers.setdefault(arg_src, OrderedSet())
         readers.add(reader)
+
+        if arg_src in self.src2et:
+            self.read_tensors.add(self.src2et[arg_src])
 
     def add_writer_dependency(self, res_src: Union[ViewSrc, _DistEnvViewSrc]):
         """
@@ -194,6 +236,9 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         self.src2writer[res_src] = writer
         self.src2readers[res_src] = OrderedSet()
 
+        if res_src in self.src2et:
+            self.write_tensors.add(self.src2et[res_src])
+
     def for_each_node(self):
         # Some ops may take multiple input writable tensors, and the result
         # will be a tuple of those tensors themselves.
@@ -237,6 +282,40 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         for res_src in res_srcs:
             self.add_writer_dependency(res_src)
     
+
+    def _handle_view_or_allocation(self):
+        """
+        Nodes like getitem, torch.reshape, or esr.HaloExchanger,
+        may be merely _views_ -- read-only -- on the memory of the
+        input Tensor. Or, occasionally they may allocate new output Tensor.
+
+        When such a Node merely returns the input ViewSrc, we can avoid
+        utilizing the general policy that treats the Node as a writer
+        on the returned ViewSrc.
+        (But when a `ViewSrc(current_node)` is returned, it's an allocator,
+        therefore a writer.)
+
+        And unlike the general policy which must be true for all cases,
+        the simplification here may be based on a non-exhaustive set of rules
+        -- the more we handle, the conciser the dependency becomes.
+
+        TODO Currently handle only getitem and HaloExchanger, since they have
+        been identified as special cases for other purposes.
+        TODO In the case of views, Nodes can even be opted out from
+        dependency analysis -- they are neither read nor write.
+        Just like syntactic construct GET_ATTR and self.if_get_attr().
+        """
+        res_src = get_node_view_src(self.current_node)
+        assert isinstance(res_src, ViewSrc), "Handle uni-res op only"
+
+        # If one input ViewSrc is returned, the node is view only
+        if res_src in self.arg_srcs:
+            # !! Override to emphasize the node is read-only
+            self.res_srcs = []
+        else:
+            # The node is an allocator
+            self.res_srcs = [res_src]
+    
     def if_get_attr(self, submod_path: str, attr_name: str, attr_val):
         # GET_ATTR is purely syntactic, its position in IR does not matter.
         # NOTE However, GET_ATTR Nodes are still used as ViewSrc.
@@ -245,7 +324,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
 
     
     def if_call_function(self, function) -> None:
-        if self.current_node.target == operator.getitem:
+        if function is operator.getitem:
             # If getitem is for tuple indexing -- essentially a syntactic
             # construct of EASIER IR,
             # R/W relations only cover that specified item,
@@ -266,24 +345,13 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
                     leaf_type=ViewSrc
                 )
             
-            # No matter which kind of getitem, it never writes
-            self.res_srcs = []
-
-            # TODO
-            # There are more functions are purely manipulating the views.
-            # E.g. in
-            # ```
-            # a2 = a.view(...); x = sin(a); a3 = a.reshape(...), y = cos(a)
-            # ```
-            # as long as we ensure `x y` are kept in order,
-            # it's actually safe to move `a2 a3` around.
-            #
-            # Although we cannot enumerate all cases, a optional filter like
-            # how we do for `getitem` may simplify dependency a lot.
-
+            # No matter which kind of getitem, it's a view
+            self._handle_view_or_allocation()
 
         elif function is all_gather_into_tensor:
             self.res_srcs = [self._dist_env_viewsrc]
+
+            self.called_comm_primitive = True
 
     def if_call_module(self, submod: nn.Module):
         """
@@ -311,14 +379,20 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
                 if nested_read_src is not None:
                     self.arg_srcs.append(nested_read_src)
 
+                    self.read_tensors.add(et_read)
+
             for et_write in nested_jit_engine.write_tensors:
                 nested_write_src = self.et2src.get(et_write, None)
                 if nested_write_src is not None:
                     self.res_srcs.append(nested_write_src)
+
+                    self.write_tensors.add(et_write)
             
             # Enforced order of communication
             if nested_jit_engine.called_comm_primitive:
                 self.res_srcs.append(self._dist_env_viewsrc)
+
+                self.called_comm_primitive = True
             
 
         if isinstance(submod, HaloExchanger):
@@ -328,21 +402,13 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             # e.g. when send-only for Selector, it will return the input
             # tensor. By default this will be treated as writing.
             # Let's simplify the dependency by treating HaloXchg as read-only.
-            res_src = get_node_view_src(self.current_node)
-            assert isinstance(res_src, ViewSrc)
-
-            # self.arg_srcs may be [] if this HaloXchg is recv-only
-            # i.e. input is skipped
-            if res_src in self.arg_srcs:
-                # !! Override to emphasize HaloXchg is read-only
-                self.res_srcs = []
-            else:
-                self.res_srcs = [res_src]
+            self._handle_view_or_allocation()
             
             # Enforced order of communication
+            assert self.res_srcs is not None
             self.res_srcs.append(self._dist_env_viewsrc)
 
-
+            self.called_comm_primitive = True
 
 
 def analyze_data_dependency(modules: List[esr.Module], graphs: List[Graph]):
@@ -373,9 +439,9 @@ def analyze_data_dependency(modules: List[esr.Module], graphs: List[Graph]):
     from easier.core.runtime.jit_engine.jit_engine import JitEngine
     je = cast(JitEngine, m.forward.__self__)
 
-    je.read_tensors = 1
-    je.write_tensors = 1
+    je.read_tensors = dda.read_tensors
+    je.write_tensors = dda.write_tensors
 
-    je.called_comm_primitive = 1
+    je.called_comm_primitive = dda.called_comm_primitive
 
     return modules, graphs

@@ -8,6 +8,7 @@
 from collections import defaultdict
 from typing import Any, Callable, Dict, Generic, Iterable, Iterator, List, \
     Optional, Tuple, Type, Union, MutableSet, Sequence, cast
+import scipy
 from torch.nn.modules import Module
 from typing_extensions import OrderedDict, TypeVar, TypeGuard, TypeAlias
 import string
@@ -832,3 +833,32 @@ class DisjointSet(Generic[_T]):
             x, y = y, x
         self._parent[y] = x
         self._size[x] += self._size[y]
+
+
+def get_dag_connectivity_matrix(
+    dag_vertices: Sequence[_T],
+    get_downstream: Callable[[_T], Iterable[_T]],
+    get_id: Callable[[_T], int]
+):
+    """
+    Args:
+    -   dag_vertices: Sorted by IDs
+    -   get_downstream (_T -> List[_T])
+    -   get_id (_T -> int)
+    """
+    num = len(dag_vertices)
+
+    adjmat = torch.full((num, num), fill_value=0, dtype=torch.int64)
+    for id, dag_vertex in enumerate(dag_vertices):
+        for downstream in get_downstream(dag_vertex):
+            downstream_id = get_id(downstream)
+            adjmat[id][downstream_id] = 1
+        
+    short_distance = scipy.sparse.csgraph.shortest_path(adjmat.numpy())
+
+    conn_mat = torch.from_numpy(
+        short_distance != numpy.inf
+    ).to(torch.int64, copy=True)
+    conn_mat.fill_diagonal_(1)
+
+    return conn_mat

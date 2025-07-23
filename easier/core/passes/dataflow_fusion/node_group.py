@@ -15,7 +15,7 @@ from easier.core.passes.data_dependency_analysis import get_data_dependency_inpu
 from easier.core.runtime.dist_env import get_runtime_dist_env
 from easier.core.runtime.modules import HaloExchanger
 from easier.core.runtime.metadata import Role, collect_meta, get_node_meta, RuntimeTensorMeta, StructuredTensorMeta, is_node_skipped
-from easier.core.passes.utils import FX, OrderedSet, get_called_module
+from easier.core.passes.utils import FX, OrderedSet, get_called_module, get_dag_connectivity_matrix
 from easier.core.utils import EasierJitException, logger
 
 KEY__FUSION_NODE_GROUP = 'easier_fusion_nodeGroup'
@@ -306,7 +306,7 @@ def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
     return NodeType.MAP
 
 
-def init_connectivity(nodes: List[fx.Node], conn_mat: torch.Tensor):
+def get_node_group_connectivity_matrix(ngs: List[NodeGroup]):
     """
     The connectivity matrix is basically a directed acyclic graph (DAG).
 
@@ -314,22 +314,9 @@ def init_connectivity(nodes: List[fx.Node], conn_mat: torch.Tensor):
     conn_mat can temporarily become cyclic, indicating deadlock occurs,
     such temporary states cannot go out of that method scope.
     """
-    num = len(nodes)
-
-    # This adjmat is upper-triangular only
-    adjmat = torch.full((num, num), fill_value=0, dtype=torch.int64)
-    for node in nodes:
-        ng = get_node_group(node)
-        for downstream_ng in _get_downstream(ng):
-            adjmat[ng.id][downstream_ng.id] = 1
-        
     # TODO the distribution of NodeGroup degrees is probably ~ Poisson(1)
     # adjust shortest_path algorithm that most fits the distribution.
-    short_distance = scipy.sparse.csgraph.shortest_path(adjmat.numpy())
-    conn_mat.copy_(
-        torch.from_numpy(short_distance != numpy.inf).to(conn_mat.dtype)
-    )
-    conn_mat.fill_diagonal_(1)
+    return get_dag_connectivity_matrix(ngs, _get_downstream, lambda ng: ng.id)
 
 
 def _get_downstream(ng: NodeGroup) -> Set[NodeGroup]:

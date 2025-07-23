@@ -6,10 +6,10 @@ import numpy
 from torch import fx
 import torch
 from torch.fx.graph import Graph
-import scipy.sparse.csgraph
 
 import easier.core.module as esr
-from easier.core.passes.dataflow_fusion.node_group import GroupType, NodeGroup, get_node_group, set_node_group, fuse_groups_if_no_deadlock, init_connectivity
+from easier.core.passes.dataflow_fusion.node_group import \
+    GroupType, NodeGroup, get_node_group, set_node_group, fuse_groups_if_no_deadlock, get_node_group_connectivity_matrix
 from easier.core.passes.dataflow_fusion.debug import dump_visualized_fused_groups
 from easier.core.passes.dataflow_fusion.fusion_rules import GroupRule, NodeRule, FuseDecision
 import easier.core.passes.dataflow_fusion.fusion_rules as rules
@@ -43,14 +43,15 @@ class NodeGrouper(EasierInterpreter):
         # Init NodeGroup for each Node, as NodeGroup.ctor will calculate
         # downstream NodeGroups, we need to traverse in the reversed list.
         nodes = list(graph.nodes)
-        num = len(nodes)
-        self.conn_mat = torch.full((num, num), fill_value=0, dtype=torch.int64)
-
-        for id, n in reversed(list(enumerate(nodes))):
+        ngs = []
+        for rev_id, n in reversed(list(enumerate(nodes))):
+            id = len(nodes) - rev_id - 1
             ng = NodeGroup(root, [n], id, self.conn_mat)
             set_node_group(n, ng)
-        
-        init_connectivity(nodes, self.conn_mat)
+            ngs.append(ng)  # reversed!
+        ngs.reverse()
+
+        self.conn_mat = get_node_group_connectivity_matrix(ngs)
         
 
     def _check_rules(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:

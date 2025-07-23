@@ -911,40 +911,6 @@ class ReducerMetadataPropagation(NodeHandlerBase):
         return PreprocessDecision.CONTINUE
 
 
-class CommunicationPrimitiveRecorder(NodeHandlerBase):
-    """
-    Given that in certain cases HaloExchanger/Aggregator execution handlers
-    will cause JitEngine to skip following NodeHandlers, this Recorder may be
-    registered before those communication primitive execution handlers.
-    """
-    def __init__(
-        self, module: esr.Module, stackframe: Dict[Node, RuntimeValue],
-        jit_engine: 'JitEngine'
-    ):
-        super().__init__(module, stackframe)
-
-        self.jit_engine = jit_engine
-
-        jit_engine.called_comm_primitive = False
-        
-    def postprocess(
-        self, current_node: Node, res: RuntimeValue, args, kwargs
-    ) -> RuntimeValue:
-        if current_node.target is all_gather_into_tensor:
-            self.jit_engine.called_comm_primitive = True
-        
-        elif current_node.op == FX.CALL_MODULE:
-            submod = get_called_module(self.current_module, current_node)
-            if isinstance(submod, HaloExchanger):
-                self.jit_engine.called_comm_primitive = True
-            
-            if isinstance(submod, esr.Module):
-                nested_jit_engine = cast(JitEngine, submod.forward.__self__)
-                if nested_jit_engine.called_comm_primitive:
-                    self.jit_engine.called_comm_primitive = True
-        
-        return res
-    
 
 class AggregatorNeutralInputPreparation(NodeHandlerBase):
     """
@@ -1104,83 +1070,6 @@ class NotFullReducerOutputAllocation(NodeHandlerBase):
         return out
 
 
-class AttrTensorAccessRecorder(NodeHandlerBase):
-    """
-    Given the fact esr.Module calls can be nested, we must inspect through the
-    call stack to check which esr.Tensors are really read/written.
-
-    In the first run and in the postprocess(), we can easily ensure
-    JitEngine/esr.Module in the whole call stack have been inspected.
-
-    NOTE
-    -   esr.Tensors will not share storage.
-
-    -   Except the syntactic GET_ATTR, we cannot tell if the esr.Tensor is
-        really written (e.g. getitem, reshape etc. returns the same address).
-        We have to treat all ops returning the address as writers.
-
-    -   Skipped esr.Tensors (shape[0] == 0) are not recorded.
-    """
-    def __init__(
-        self, module: esr.Module, stackframe: Dict[Node, RuntimeValue],
-        jit_engine: 'JitEngine'
-    ):
-        super().__init__(module, stackframe)
-
-        self.jit_engine = jit_engine
-
-        jit_engine.read_tensors = OrderedSet()
-        jit_engine.write_tensors = OrderedSet()
-
-        self.addr2tensor: Dict[int, esr.Tensor] = {}
-
-    def postprocess(
-        self, current_node: Node, res: RuntimeValue, args, kwargs
-    ) -> RuntimeValue:
-        res_siaddr: StructuredIndexedAddr = get_indexed_addr(res)
-
-        if current_node.op == FX.GET_ATTR:
-            # the same Tensor may be GET_ATTR multi times i.e. aliases
-            assert isinstance(res, esr.Tensor)
-            assert isinstance(res_siaddr, IndexedAddr)
-            self.addr2tensor[res_siaddr.addr] = res
-        
-        else:  # OK for CALL_MODULE to appear again, since it has no returns.
-            arg_item_iaddrs = collect_meta(
-                list(map(
-                    get_indexed_addr, itertools.chain(args, kwargs.values())
-                )),
-                leaf_type=IndexedAddr
-            )
-            for arg_item_iaddr in arg_item_iaddrs:
-                t = self.addr2tensor.get(arg_item_iaddr.addr, None)
-                if t is not None:
-                    self.jit_engine.read_tensors.add(t)
-
-            res_item_iaddrs = collect_meta(res_siaddr, leaf_type=IndexedAddr)
-            for res_item_iaddr in res_item_iaddrs:
-                t = self.addr2tensor.get(res_item_iaddr.addr, None)
-                if t is not None:
-                    self.jit_engine.write_tensors.add(t)
-
-        if current_node.op == FX.CALL_MODULE:
-            submod = get_called_module(self.current_module, current_node)
-            if isinstance(submod, esr.Module):
-                # nested_jit_engine has been run
-                # (and probably been run for multi times),
-                # its `accessed_tensors` has been calculated.
-                nested_jit_engine = cast(JitEngine, submod.forward.__self__)
-
-                for nested_read in nested_jit_engine.read_tensors:
-                    self.jit_engine.read_tensors.add(nested_read)
-                for nested_write in nested_jit_engine.write_tensors:
-                    self.jit_engine.write_tensors.add(nested_write)
-
-        return res
-
-
-
-
 class JitEngine:
     def __init__(self, module: esr.Module, graph: Graph) -> None:
         self.module = module
@@ -1231,10 +1120,6 @@ class JitEngine:
             # <-
             ReducerMetadataPropagation(self.module, stackframe),
 
-            # # ->
-            # # <- Record self calls comm APIs; merge nested esr.Module records
-            # CommunicationPrimitiveRecorder(self.module, stackframe, self),
-
             # -> Prepares neutral input to esr.sum etc.: GOTO_EVAL --\------
             # <------------------------------------------------------/------
             AggregatorNeutralInputPreparation(self.module, stackframe),
@@ -1245,11 +1130,6 @@ class JitEngine:
             # <---- Allocates zero-ed output _________/
             # <--else --------------------------------------------------
             NotFullReducerOutputAllocation(self.module, stackframe),
-
-            # # ->
-            # # <- if GET_ATTR, record the esr.Tensor;
-            # #    if nested esr.Module calls, merge the records ---------
-            # AttrTensorAccessRecorder(self.module, stackframe, self),
         ]
         return first_run_handlers
 

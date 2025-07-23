@@ -40,17 +40,25 @@ def _get_callsite_str(n: fx.Node):
         
         const_num = 0
 
-        arg_s = []
-        for arg in args:
-            if isinstance(arg, (int, float, bool, slice)) or arg is Ellipsis:
-                arg_s.append(str(arg))
+        def _arg_str(x):
+            nonlocal const_num
+            if x == slice(None, None, None) or x is Ellipsis:
                 const_num += 1
-            elif isinstance(arg, str):
-                arg_s.append("'" + arg + "'")
+                return ":"
+            if isinstance(x, (int, float, bool, slice)):
                 const_num += 1
-            else:
+                return str(x)
+            elif isinstance(x, str):
+                const_num += 1
+                return "'" + x + "'"
+            elif isinstance(x, fx.Node):
                 # Node or Node list, see from dataflow edges.
-                arg_s.append('_')
+                return '_'
+            else:
+                # tuple or list
+                return '(' + ','.join(map(_arg_str, x)) + ')'
+            
+        arg_s = _arg_str(args)
 
         kv_s = []
         for k, v in n.kwargs.items():
@@ -64,16 +72,6 @@ def _get_callsite_str(n: fx.Node):
             callsite += ','.join(kv_s)
             callsite += ')'
 
-        if n.op == FX.CALL_FUNCTION and n.target == operator.getitem:
-            arg0 = n.all_input_nodes[0]
-            is_tuple_indexing = not isinstance(
-                get_node_meta(arg0), RuntimeTensorMeta
-            )
-            if is_tuple_indexing:
-                tuple_item_index = n.args[1]
-                assert isinstance(tuple_item_index, int)
-                callsite = f'[{tuple_item_index}]'
-    
     return callsite
 
 def dump_visualized_fused_groups(
@@ -145,7 +143,7 @@ def dump_visualized_fused_groups(
             if _renderable(ng):
                 hue = ngid2colorid[ng.id] * per_ng_hue
                 v_line = f'{fx_n.name} [label="{v_callsite}@{ng.id}", ' \
-                    f'color="{hue},1,1", fillcolor="{hue},0.3,1"];'
+                    f'color="{hue},1,0.8", fillcolor="{hue},0.3,1"];'
                 # fillcolor with saturation=0.3
             elif ng.type == GroupType.EXCLUDED:
                 # excluded NodeGroup
@@ -162,7 +160,7 @@ def dump_visualized_fused_groups(
                 if arg_ng is ng:
                     # If both IO are in the same NodeGroup, colorize edges too
                     e_line = f'{arg_node.name} -> {fx_n.name} ' \
-                        f'[color="{hue},1,1"];'
+                        f'[color="{hue},1,0.8"];'
                 else:
                     # Normal dataflow edge
                     e_line = f'{arg_node.name} -> {fx_n.name} ' \
