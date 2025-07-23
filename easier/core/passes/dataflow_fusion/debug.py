@@ -261,7 +261,7 @@ def dump_visualized_fused_groups(
 
             elif ng.type == GroupType.EXCLUDED:
                 # excluded NodeGroup
-                v_line = f'{fx_n.name} [label={_label("!")}];'
+                v_line = f'{fx_n.name} [label={_label(f"!{ng.id}")}];'
             else:
                 # singleton NodeGroup
                 v_line = f'{fx_n.name} [label={_label(f"/{ng.id}")}];'

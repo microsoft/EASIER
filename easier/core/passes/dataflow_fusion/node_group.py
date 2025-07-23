@@ -93,20 +93,6 @@ class NodeGroup:
         else:
             return False
     
-    # def __lt__(self, other: 'NodeGroup') -> bool:
-    #     if self.conn_mat[other.id, self.id] > 0:
-    #         return False
-    #     else:
-    #         # self is topologically upstream or in parallel
-    #         return True
-
-    # def __gt__(self, other: 'NodeGroup') -> bool:
-    #     if self.conn_mat[self.id, other.id] > 0:
-    #         return False
-    #     else:
-    #         # self is topologically downstream or in parallel
-    #         return True
-    
     def __repr__(self) -> str:
         """
         E.g.
@@ -326,25 +312,6 @@ def _get_downstream(ng: NodeGroup) -> Set[NodeGroup]:
         ).difference(ng.nodes):
             ret.add(get_node_group(usr))
     return ret
-
-
-# def sort_node_groups(groups: List[NodeGroup]):
-#     if len(groups) <= 1:
-#         return groups
-
-#     pivot = groups[len(groups) // 2]
-#     left = []
-#     right = []
-#     middle = []
-#     for group in groups:
-#         if group == pivot:
-#             middle.append(group)
-#         elif group > pivot:
-#             right.append(group)
-#         elif group < pivot:
-#             left.append(group)
-
-#     return sort_node_groups(left) + middle + sort_node_groups(right)
 
 
 def fuse_groups_if_no_deadlock(
