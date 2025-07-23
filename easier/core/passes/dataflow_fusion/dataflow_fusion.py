@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import logging
 from typing import List, Sequence, Set
 import numpy
 from torch import fx
@@ -13,7 +14,7 @@ from easier.core.passes.dataflow_fusion.node_group import \
 from easier.core.passes.dataflow_fusion.debug import dump_visualized_fused_groups
 from easier.core.passes.dataflow_fusion.fusion_rules import GroupRule, NodeRule, FuseDecision
 import easier.core.passes.dataflow_fusion.fusion_rules as rules
-from easier.core.passes.utils import EasierInterpreter
+from easier.core.passes.utils import EasierInterpreter, OrderedSet
 from easier.core.utils import logger
 from easier.core.runtime.dist_env import get_runtime_dist_env, unbalanced_compute_heartbeat
 
@@ -46,7 +47,7 @@ class NodeGrouper(EasierInterpreter):
         ngs = []
         for rev_id, n in reversed(list(enumerate(nodes))):
             id = len(nodes) - rev_id - 1
-            ng = NodeGroup(root, [n], id, self.conn_mat)
+            ng = NodeGroup(root, [n], id)
             set_node_group(n, ng)
             ngs.append(ng)  # reversed!
         ngs.reverse()
@@ -126,15 +127,16 @@ def fuse_dataflow(modules: List[esr.Module], graphs: List[Graph]):
         NodeGrouper(modules, graphs).run()
         logger.info('Fusion pass has completed')
 
-        # ngs = set()
-        # for n in graphs[0].nodes:
-        #     ng = get_node_group(n)
-        #     ngs.add(ng)
+        ngs: OrderedSet[NodeGroup] = OrderedSet()
+        for n in graphs[0].nodes:
+            ng = get_node_group(n)
+            ngs.add(ng)
 
-        # for ng in ngs:
-        #     if ng.type != GroupType.EXCLUDED:
-        #         logger.info(ng)
+        for ng in ngs:
+            if ng.type != GroupType.EXCLUDED and len(ng.nodes):
+                logger.info(ng)
     
-    dump_visualized_fused_groups(modules, graphs)
+    if logger.level <= logging.DEBUG:
+        dump_visualized_fused_groups(modules, graphs)
 
     return modules, graphs

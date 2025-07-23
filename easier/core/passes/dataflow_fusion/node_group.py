@@ -38,11 +38,10 @@ class GroupType(Enum):
     AGGREGATOR = auto()
 
 class NodeGroup:
-    def __init__(self, root: esr.Module, nodes: Sequence[fx.Node], id: int, conn_mat: torch.Tensor) -> None:
+    def __init__(self, root: esr.Module, nodes: Sequence[fx.Node], id: int) -> None:
         self.root = root
         self.nodes = OrderedSet(nodes)
         self.id = id
-        self.conn_mat = conn_mat
 
         # NOTE if Reducer is skipped by JitEngine, its group is EXCLUDED
         # and won't have this field.
@@ -61,7 +60,6 @@ class NodeGroup:
         self.root = other.root
         self.nodes = OrderedSet(other.nodes)
         self.id = other.id
-        self.conn_mat = other.conn_mat  # always reference, don't clone
 
         self.representative_reduces = None
         if other.representative_reduces is not None:
@@ -95,19 +93,19 @@ class NodeGroup:
         else:
             return False
     
-    def __lt__(self, other: 'NodeGroup') -> bool:
-        if self.conn_mat[other.id, self.id] > 0:
-            return False
-        else:
-            # self is topologically upstream or in parallel
-            return True
+    # def __lt__(self, other: 'NodeGroup') -> bool:
+    #     if self.conn_mat[other.id, self.id] > 0:
+    #         return False
+    #     else:
+    #         # self is topologically upstream or in parallel
+    #         return True
 
-    def __gt__(self, other: 'NodeGroup') -> bool:
-        if self.conn_mat[self.id, other.id] > 0:
-            return False
-        else:
-            # self is topologically downstream or in parallel
-            return True
+    # def __gt__(self, other: 'NodeGroup') -> bool:
+    #     if self.conn_mat[self.id, other.id] > 0:
+    #         return False
+    #     else:
+    #         # self is topologically downstream or in parallel
+    #         return True
     
     def __repr__(self) -> str:
         """
@@ -282,6 +280,7 @@ def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
         return NodeType.EXCLUDED  # skip
 
     if node.target in esr.easier_aggregators:
+        #TODO will esr.norm(x, p=p) have its nodes[0] be a replicated `p`?
         aggegator_input = node.all_input_nodes[0]
         if is_node_skipped(aggegator_input):
             return NodeType.EXCLUDED
@@ -291,7 +290,7 @@ def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
     if all_replica:
         return NodeType.EXCLUDED
     
-    if node.op is FX.CALL_MODULE:
+    if node.op == FX.CALL_MODULE:
         submod = get_called_module(root, node)
 
         if isinstance(submod, HaloExchanger):
@@ -329,23 +328,23 @@ def _get_downstream(ng: NodeGroup) -> Set[NodeGroup]:
     return ret
 
 
-def sort_node_groups(groups: List[NodeGroup]):
-    if len(groups) <= 1:
-        return groups
+# def sort_node_groups(groups: List[NodeGroup]):
+#     if len(groups) <= 1:
+#         return groups
 
-    pivot = groups[len(groups) // 2]
-    left = []
-    right = []
-    middle = []
-    for group in groups:
-        if group == pivot:
-            middle.append(group)
-        elif group > pivot:
-            right.append(group)
-        elif group < pivot:
-            left.append(group)
+#     pivot = groups[len(groups) // 2]
+#     left = []
+#     right = []
+#     middle = []
+#     for group in groups:
+#         if group == pivot:
+#             middle.append(group)
+#         elif group > pivot:
+#             right.append(group)
+#         elif group < pivot:
+#             left.append(group)
 
-    return sort_node_groups(left) + middle + sort_node_groups(right)
+#     return sort_node_groups(left) + middle + sort_node_groups(right)
 
 
 def fuse_groups_if_no_deadlock(
@@ -375,16 +374,9 @@ def fuse_groups_if_no_deadlock(
     when they enter this method.
     """
     assert ng1.root is ng2.root
-    tmp1 = NodeGroup(ng1.root, [], ng1.id, conn_mat).copy_(ng1)
-    tmp2 = NodeGroup(ng1.root, [], ng2.id, conn_mat).copy_(ng2)
+    tmp1 = NodeGroup(ng1.root, [], ng1.id).copy_(ng1)
+    tmp2 = NodeGroup(ng1.root, [], ng2.id).copy_(ng2)
     tmpmat = conn_mat.clone()
-
-    # NOTE we never call `set_node_group(..., fused)` to associate
-    # temporary NodeGroup instance `fused` to the graph,
-    # so we cannot do checks e.g. `get_node_group(...) is not fused`.
-    fused = NodeGroup(ng1.root, list(ng1.nodes) + list(ng2.nodes), ng1.id, conn_mat)
-    ng1.copy_(fused)
-    ng2.copy_(fused)
 
     assert torch.all(conn_mat.diag() == 1), \
         "connectivity matrix always has diagonal"
@@ -398,15 +390,17 @@ def fuse_groups_if_no_deadlock(
     # After fusion we have only NodeGroup id=P and discard id=Q:
     # - forall NodeGroup U->P, add       U->Y1,Y2,...
     # - forall NodeGroup V->Q, add V->P, V->X1,X2,...
-
     U_mask = conn_mat[:, ng1.id] > 0
     V_mask = conn_mat[:, ng2.id] > 0
-    assert U_mask[ng1.id] == True
-    assert V_mask[ng2.id] == True
-
     fused_row = conn_mat[ng1.id] + conn_mat[ng2.id]
-    assert fused_row[ng1.id] >= 1
-    assert fused_row[ng2.id] >= 1
+
+    # NOTE we never call `set_node_group(..., fused)` to associate
+    # temporary NodeGroup instance `fused` to the graph,
+    # so we cannot do checks e.g. `get_node_group(...) is not fused`.
+    fused = NodeGroup(ng1.root, list(ng1.nodes) + list(ng2.nodes), ng1.id)
+    ng1.copy_(fused)
+    ng2.copy_(fused)
+
 
     conn_mat[U_mask, :] += fused_row
     conn_mat[V_mask, :] += fused_row
