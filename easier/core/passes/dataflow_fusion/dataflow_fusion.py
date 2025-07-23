@@ -45,8 +45,7 @@ class NodeGrouper(EasierInterpreter):
         # downstream NodeGroups, we need to traverse in the reversed list.
         nodes = list(graph.nodes)
         ngs = []
-        for rev_id, n in reversed(list(enumerate(nodes))):
-            id = len(nodes) - rev_id - 1
+        for id, n in reversed(list(enumerate(nodes))):
             ng = NodeGroup(root, [n], id)
             set_node_group(n, ng)
             ngs.append(ng)  # reversed!

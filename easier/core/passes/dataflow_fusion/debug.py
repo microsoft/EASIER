@@ -147,7 +147,7 @@ def dump_visualized_fused_groups(
         # Divide HSV color space: Hue ~ [0.0, 1.0]
         hue_margin_nkind = 5
         hue_kind_weight = 0.5
-        per_nodekind_hue = 1.0 / (
+        per_nodekind_hue = 1.0 / ((
             sum(
                 # weighted to further distinguish too-many-users Nodes
                 nkind * (1 + hue_kind_weight * (nkind - 1))
@@ -155,7 +155,7 @@ def dump_visualized_fused_groups(
             ) + (
                 len(pmngid2numnodekinds)  # margin between NodeGroups
             ) * hue_margin_nkind
-        )
+        ) or 1.0)  # at the beginning, all groups are singletons
 
         hue_offset = 0.0
         for pmngid, nkind in pmngid2numnodekinds.items():
@@ -222,7 +222,7 @@ def dump_visualized_fused_groups(
                 ] + [
                     f'<TD PORT="u{i_user}" COLSPAN="{
                         t_user_colspan if i_user + 1 < t_n_users
-                        else t_user_colspan + t_arg_colspan_rem
+                        else t_user_colspan + t_user_colspan_rem
                     }"></TD>'
                     for i_user in range(t_n_users)
                 ] + [
@@ -251,12 +251,14 @@ def dump_visualized_fused_groups(
                     ng_node_kind = 0
                     node_hue_offset = 0.0
 
-                hue = huebase + node_hue_offset
-                val = 0.8 - (0.3 / n_kind) * ng_node_kind
+                border_hue = huebase + node_hue_offset
+                border_val = 0.8 - (0.3 / n_kind) * ng_node_kind
 
                 v_line = f'{fx_n.name} [label={_label(f"@{ng.id}")}, ' \
-                    f'color="{hue},1,{val}", fillcolor="{hue},0.3,{val}"];'
+                    f'color="{border_hue},1,{border_val}", ' \
+                    f'fillcolor="{huebase},0.3,0.8"];'
                 # fillcolor with saturation=0.3
+
             elif ng.type == GroupType.EXCLUDED:
                 # excluded NodeGroup
                 v_line = f'{fx_n.name} [label={_label("!")}];'
@@ -278,13 +280,14 @@ def dump_visualized_fused_groups(
                 if user_ng is ng:
                     # If both IO are in the same NodeGroup, colorize edges too
                     if ng_node_kind > 0:
-                        ewidth = 1 + ng_node_kind * 0.5
+                        ewidth = 1 + ng_node_kind
                         e_line += \
-                            f' [color="{hue},1,{val}", penwidth="{ewidth}",' \
+                            f' [color="{border_hue},1,{border_val}",' \
+                            f' penwidth="{ewidth}",' \
                             f' headlabel="{headlabel}"];'
                     else:
                         e_line += \
-                            f' [color="{hue},1,{val}",' \
+                            f' [color="{border_hue},1,{border_val}",' \
                             f' headlabel="{headlabel}"];'
                 else:
                     # Normal dataflow edge

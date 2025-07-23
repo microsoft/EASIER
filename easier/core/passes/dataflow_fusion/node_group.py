@@ -374,12 +374,12 @@ def fuse_groups_if_no_deadlock(
     when they enter this method.
     """
     assert ng1.root is ng2.root
+    assert torch.all(conn_mat.diag() == 1), \
+        "connectivity matrix always has diagonal"
+
     tmp1 = NodeGroup(ng1.root, [], ng1.id).copy_(ng1)
     tmp2 = NodeGroup(ng1.root, [], ng2.id).copy_(ng2)
     tmpmat = conn_mat.clone()
-
-    assert torch.all(conn_mat.diag() == 1), \
-        "connectivity matrix always has diagonal"
 
     # create a temporary conn_mat to determine if fusing the two NodeGroups
     # causes deadlock, conn_mat is still directed, but now it may have loops:
@@ -388,11 +388,17 @@ def fuse_groups_if_no_deadlock(
     #   id=P with downstream edges P->X1,X2,... and id=Q with Q->Y1,Y2,...
     #   (downstream edges are between NodeGroups)
     # After fusion we have only NodeGroup id=P and discard id=Q:
-    # - forall NodeGroup U->P, add       U->Y1,Y2,...
-    # - forall NodeGroup V->Q, add V->P, V->X1,X2,...
+    # - forall NodeGroup U->P, add U->Y1,Y2,...    (Q discarded)
+    # - forall NodeGroup V->Q, add V->X1,X2,..., V->P
     U_mask = conn_mat[:, ng1.id] > 0
     V_mask = conn_mat[:, ng2.id] > 0
     fused_row = conn_mat[ng1.id] + conn_mat[ng2.id]
+
+    assert fused_row[ng1.id] > 0
+
+    conn_mat[U_mask, :] += fused_row
+    conn_mat[V_mask, :] += fused_row
+    conn_mat.clamp_max_(1)
 
     # NOTE we never call `set_node_group(..., fused)` to associate
     # temporary NodeGroup instance `fused` to the graph,
@@ -400,12 +406,6 @@ def fuse_groups_if_no_deadlock(
     fused = NodeGroup(ng1.root, list(ng1.nodes) + list(ng2.nodes), ng1.id)
     ng1.copy_(fused)
     ng2.copy_(fused)
-
-
-    conn_mat[U_mask, :] += fused_row
-    conn_mat[V_mask, :] += fused_row
-
-    conn_mat.clamp_max_(1)
 
     for usr in _get_downstream(ng1):
         # If a dataflow/data-dependency user Node of the whole ng1 (fused),
