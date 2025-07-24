@@ -283,33 +283,75 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             self.add_writer_dependency(res_src)
     
 
-    def _handle_view_or_allocation(self):
+    def _handle_readonly_or_allocation(self):
         """
-        Nodes like getitem, torch.reshape, or esr.HaloExchanger,
-        may be merely _views_ -- read-only -- on the memory of the
-        input Tensor. Or, occasionally they may allocate new output Tensor.
+        Given a Tensor instance and its underlying memory, an operator may
+        behave in one or multiple following ways:
 
-        When such a Node merely returns the input ViewSrc, we can avoid
-        utilizing the general policy that treats the Node as a writer
-        on the returned ViewSrc.
-        (But when a `ViewSrc(current_node)` is returned, it's an allocator,
-        therefore a writer.)
+        -   view:
+            The operator manipulates `Tensor.strides` etc. without touching
+            the memory.
 
-        And unlike the general policy which must be true for all cases,
-        the simplification here may be based on a non-exhaustive set of rules
-        -- the more we handle, the conciser the dependency becomes.
+        -   read:
+            The contents of the memory is read.
+        
+        -   write:
+            The contents of the memory is modified.
+        
+        -   allocate:
+            The operator allocates a new memory and a new Tensor.
+            Generally followed by a write.
 
+        P.S. the original Tensor-memory binding cannot be changed,
+        e.g. `Tensor.set_()` is not supported by EASIER.
+        
+        If we were careful enough and checked down to the essentials
+        -- which the current implementation of EASIER did not --
+        we might find:
+        -   `operator.getitem, torch.view` are view-only ops.
+
+            View-only ops are neither read nor write, and are meaningless
+            beyond dataflow (where Tensor.strides matter), i.e. the execution
+            time of these ops can arbitarily moved around, as long as not
+            breaking dataflow.
+
+        -   `torch.reshape` is a view or an allocator.
+        
+        -   `easier.runtime.HaloExchanger` is read-only or an allocator.
+            (when a HaloExchanger is for Selector and send-only, it returns
+            the input Tensor as well as copying some of its contents)
+        
+        However, in order to get free from checking operator one-by-one,
+        EASIER by default has policies:
+
+        -   The operator is treated as a writer on all memory blocks
+            it returns:
+            a.  `operator.setitem, torch.fill_` are purely writers;
+            b.  `torch.add(a,b), torch.svd()` are allocators,
+                writing the newly allocated memory blocks;
+            c.  `torch.view` is classfied as writers -- by the default policy.
+        
+        -   This method, _handle_readonly_or_allocation(),
+                         ********************************
+            can be used, in an allow-list manner, to specifically
+            mark and handle an operator as a reader or a allocator,
+            e.g. `operator.getitem, HaloExchanger`.
+
+        Additionally, for the sake of simplicity, EASIER treats
+        views as reads, view-only as read-only.
+        For example, if we want to use this method to eliminate the
+        "mis-classification" of `torch.view` in the case (c) above,
+        we still have to treat it as read-only, rather than pure view.
+        
         TODO Currently handle only getitem and HaloExchanger, since they have
         been identified as special cases for other purposes.
-        TODO In the case of views, Nodes can even be opted out from
-        dependency analysis -- they are neither read nor write.
-        Just like syntactic construct GET_ATTR and self.if_get_attr().
+        TODO Handle pure views, just like syntactic construct GET_ATTR.
         """
         res_src = get_node_view_src(self.current_node)
         assert isinstance(res_src, ViewSrc), "Handle uni-res op only"
 
-        # If one input ViewSrc is returned, the node is view only
         if res_src in self.arg_srcs:
+            # If one input ViewSrc is returned, the node is read-only
             # !! Override to emphasize the node is read-only
             self.res_srcs = []
         else:
@@ -346,7 +388,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
                 )
             
             # No matter which kind of getitem, it's a view
-            self._handle_view_or_allocation()
+            self._handle_readonly_or_allocation()
 
         elif function is all_gather_into_tensor:
             self.res_srcs = [self._dist_env_viewsrc]
@@ -402,7 +444,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             # e.g. when send-only for Selector, it will return the input
             # tensor. By default this will be treated as writing.
             # Let's simplify the dependency by treating HaloXchg as read-only.
-            self._handle_view_or_allocation()
+            self._handle_readonly_or_allocation()
             
             # Enforced order of communication
             assert self.res_srcs is not None
