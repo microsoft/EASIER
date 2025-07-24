@@ -148,87 +148,6 @@ def get_meta_role_size(meta: StructuredTensorMeta) -> Tuple[Role, int]:
         return replica
 
 
-def get_indexed_addr(
-    val: RuntimeValue,
-    *,
-    _rec_depth=0  # debug-only
-) -> StructuredIndexedAddr:
-    """
-    An IndexedAddr is an addr int with either
-    a) None, b) an index within multi-result.
-
-    A typical use case is:
-    When the ref count is increased 0 -> 1, we know the addr is allocated
-    by current_node, and we map
-    IndexedAddr(addr:int, index:int|None) |-> ViewSrc(current_node, index)
-
-    Otherwise, although we have an index, it's irrelevant, because the addr
-    with refcount > 0 indicates the memory was allocated earlier.
-
-    Args:
-    -   val: A RuntimeValue that's possiby a Tensor,
-            not necessary to be `res` arg of `postprocess()`,
-            may be an item in `args` too.
-    
-    Returns:
-    -   A structure of possibly nested IndexAddr, e.g.
-        `IndexAddr(addr, index=None)` or `None`,
-
-    -   When it's really nested, its leaf item can be None, e.g.
-        `[None, IndexAddr(addr, index=1), None]`
-    """
-    if isinstance(val, torch.Tensor):
-        item_iaddr = val.untyped_storage().data_ptr()
-        return IndexedAddr(item_iaddr, None)
-
-    elif isinstance(val, (tuple, list)):
-        if _rec_depth > 0:
-            # TODO there exist multi-res torch ops whose rec_depth > 1, e.g.
-            # `torch.histogramdd() -> (Tensor, Tensor[])`
-            # for which we may change IndexedAddr.index to List[int].
-            # And this would simplify handling of the args list.
-            raise EasierJitException(
-                "Unexpected nested result with nested depth > 1"
-            )
-
-        indexed_addrs = []
-        for i, item in enumerate(val):
-            item_iaddr = get_indexed_addr(
-                item, _rec_depth=_rec_depth+1
-            )
-
-            if isinstance(item_iaddr, IndexedAddr):
-                # So far, if the recursive item is IndexedAddr,
-                # it must have a single addr int.
-                assert item_iaddr.index is None
-                indexed_addr = IndexedAddr(item_iaddr.addr, i)
-            else:
-                assert item_iaddr is None
-                indexed_addr = None
-
-            indexed_addrs.append(indexed_addr)
-
-        return indexed_addrs
-
-    elif val is None:
-        # Besides resultant None of esr.Module calls, None can also be used
-        # as tensor index e.g. `getitem(x, [:, 1, None])` to unsqueeze dims.
-        return None
-
-    elif val is jit_skipped:
-        assert _rec_depth == 0, "jit_skipped is always not nested"
-        return None
-    
-    elif val is Ellipsis or isinstance(val, (int, float, bool, str, slice)):
-        # rec_depth can > 0
-        # e.g. in `getitem(input=x, position=[:, slice, 5, tensoridx])`
-        # argument `position` will result in `[None, None, None, IndexAddr()]`
-        return None
-
-    else:
-        raise EasierJitException(
-            f"Unexpected runtime value {val} or nested structure"
-        )
 
 
 class StackframeManager(NodeHandlerBase):
@@ -347,6 +266,93 @@ class ViewSrcTrackerBase(NodeHandlerBase):
         # their storage be changed? We can detect the change and decr refcount
         # before resetting and incr refcount of the shared storage.
 
+    def _get_indexed_addr(
+        self, iaddr_node: Node, val: RuntimeValue,
+        *,
+        _rec_depth=0  # debug-only
+    ) -> StructuredIndexedAddr:
+        """
+        An IndexedAddr is an addr int with either
+        a) None, b) an index within multi-result.
+
+        A typical use case is:
+        When the ref count is increased 0 -> 1, we know the addr is allocated
+        by current_node, and we map
+        IndexedAddr(addr:int, index:int|None) |-> ViewSrc(current_node, index)
+
+        Otherwise, although we have an index, it's irrelevant, because the addr
+        with refcount > 0 indicates the memory was allocated earlier.
+
+        Args:
+        -   iaddr_node: The Node whose items' addresses will be checked,
+                not necessary to be `current_node`
+        -   val: A RuntimeValue that's possiby a Tensor,
+                not necessary to be `res` arg of `postprocess()`,
+                may be an item in `args` too.
+        
+        Returns:
+        -   A structure of possibly nested IndexAddr, e.g.
+            `IndexAddr(addr, index=None)` or `None`,
+
+        -   When it's really nested, its leaf item can be None, e.g.
+            `[None, IndexAddr(addr, index=1), None]`
+        """
+        if isinstance(val, torch.Tensor):
+            item_iaddr = val.untyped_storage().data_ptr()
+            return IndexedAddr(item_iaddr, None)
+
+        elif isinstance(val, (tuple, list)):
+            if _rec_depth > 0:
+                # TODO there exist multi-res torch ops whose rec_depth > 1, e.g.
+                # `torch.histogramdd() -> (Tensor, Tensor[])`
+                # for which we may change IndexedAddr.index to List[int].
+                # And this would simplify handling of the args list.
+                raise EasierJitException(
+                    "Unexpected nested result with nested depth > 1 from"
+                    f" {iaddr_node.format_node()}"
+                )
+
+            indexed_addrs = []
+            for i, item in enumerate(val):
+                item_iaddr = self._get_indexed_addr(
+                    iaddr_node, item,
+                    _rec_depth=_rec_depth+1
+                )
+
+                if isinstance(item_iaddr, IndexedAddr):
+                    # So far, if the recursive item is IndexedAddr,
+                    # it must have a single addr int.
+                    assert item_iaddr.index is None
+                    indexed_addr = IndexedAddr(item_iaddr.addr, i)
+                else:
+                    assert item_iaddr is None
+                    indexed_addr = None
+
+                indexed_addrs.append(indexed_addr)
+
+            return indexed_addrs
+
+        elif val is None:
+            # Besides resultant None of esr.Module calls, None can also be used
+            # as tensor index e.g. `getitem(x, [:, 1, None])` to unsqueeze dims.
+            return None
+
+        elif val is jit_skipped:
+            assert _rec_depth == 0, "jit_skipped is always not nested"
+            return None
+        
+        elif val is Ellipsis or isinstance(val, (int, float, bool, str, slice)):
+            # rec_depth can > 0
+            # e.g. in `getitem(input=x, position=[:, slice, 5, tensoridx])`
+            # argument `position` will result in `[None, None, None, IndexAddr()]`
+            return None
+
+        else:
+            raise EasierJitException(
+                f"Unexpected runtime value {val} or nested structure"
+            )
+
+
 
     def postprocess(
         self, current_node: Node, res: RuntimeValue, args, kwargs
@@ -355,7 +361,9 @@ class ViewSrcTrackerBase(NodeHandlerBase):
         # Increase ref count;
         # If previous ref count is 0, set current_node as ViewSrc.
         #
-        res_siaddr: StructuredIndexedAddr = get_indexed_addr(res)
+        res_siaddr: StructuredIndexedAddr = self._get_indexed_addr(
+            current_node, res
+        )
 
         def _to_view_src(
             res_item_iaddr: Optional[IndexedAddr]
@@ -430,7 +438,9 @@ class ViewSrcTrackerBase(NodeHandlerBase):
             # NOTE currently for the sake of simplicity _get_indexed_addr()
             # cannot handle nester layer > 1, so we cannot concat `env_val`s
             # into a list first.
-            end_siaddr: StructuredIndexedAddr = get_indexed_addr(end_val)
+            end_siaddr: StructuredIndexedAddr = self._get_indexed_addr(
+                node_ends_here, end_val
+            )
             end_item_iaddrs: List[IndexedAddr] = collect_meta(
                 end_siaddr, leaf_type=IndexedAddr
             )
@@ -1120,11 +1130,11 @@ class JitEngine:
             # <-
             ReducerMetadataPropagation(self.module, stackframe),
 
-            # -> Prepares neutral input to esr.sum etc.: GOTO_EVAL --\------
-            # <------------------------------------------------------/------
+            # -> Prepares neutral input to esr.sum etc. and GOTO_EVAL
+            # <-
             AggregatorNeutralInputPreparation(self.module, stackframe),
-            # -> Prepares input to HaloExchanger: GOTO_EVAL ---------\------
-            # <------------------------------------------------------/------
+            # -> Prepares input to HaloExchanger and GOTO_EVAL
+            # <-
             HaloExchangerZeroLengthInputPreparation(self.module, stackframe),
             # -> if input is zero-length: SKIP_EVAL --\-----------------
             # <---- Allocates zero-ed output _________/
@@ -1163,24 +1173,17 @@ class JitEngine:
             # <--else --------------------------------------------------
             NotFullReducerOutputAllocation(self.module, stackframe),
         ]
-
-        runtime_handlers: List[NodeHandlerBase] = [
-            # -> Loads arguments from stackframe
-            # <- Stores result into stackframe, releases unused tensors
-            StackframeManager(self.module, stackframe),
-        ]
-
         return runtime_handlers
 
     def compile_after_first_run(self):
         ms, gs = [self.module], [self.graph]
 
+        # passes.analyze_data_dpendnecy() must be run after the 1st run,
+        # as it generates info of nested esr.Module calls for outer JIT runs.
         ms, gs = passes.analyze_data_dependency(ms, gs)
+
         ms, gs = passes.fuse_dataflow(ms, gs)
         # ms, gs = passes.codegen(ms, gs)
-        # TODO only analyze_data_dpendnecy must be run after 1st run,
-        # as it generates nested info for outer JIT run
-        # but fuse and codegen and be moved to before 2nd run.
 
         [self.module], [self.graph] = ms, gs
 

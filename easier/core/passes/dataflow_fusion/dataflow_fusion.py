@@ -188,7 +188,6 @@ def node_groups_to_graph_modules(
     for ng in groups:
         ng: NodeGroup
 
-
         if len(ng.nodes) > 1:
 
             kernel_g = fx.Graph()
@@ -197,6 +196,7 @@ def node_groups_to_graph_modules(
                 ph = kernel_g.placeholder(raw_in.name)
                 kernel_node_dict[raw_in] = ph
             
+            # Sort the inner Nodes into the original order
             ng_raw_nodes = sorted(ng.nodes, key=raw_node_ids.__getitem__)
             for raw_node in ng_raw_nodes:
                 # the 2nd callable `Node -> object` of `.node_copy` will
@@ -260,25 +260,41 @@ def node_groups_to_graph_modules(
     return module, outer_g
 
 
+from easier.core.passes.life_range_analysis import set_nodes_end_at, get_nodes_end_at
+
 class NodeMetaCopier(EasierInterpreter):
     """
-    Some kinds of Node.meta will be validated by JitEngine,
-    after fusing `graph`, we'll use simple rule-based methods to adjust
-    Node.meta to ensure the semantic consistency before/after dataflow fusion.
-    (Rather than rerun the related passes.)
+    Some kinds of Node.meta in the new, outer Graph
+    will be validated by JitEngine.
 
-    life_range_analysis.get_nodes_end_at()
-    -   On CALL_MODULE, U{ get_nodes_end_at(ng_n) for ng_n in ng.nodes }.
+    Rather than rerun the related passes, after fusing `graph`,
+    we'll adjust Node.meta, based on simple rules.
+    In this way, we can ensure the semantic consistency before/after
+    dataflow fusion.
 
-    ViewSrc(node, index)
-    -   If `node` is outside any NodeGroup, it remains (mapped to new Nodes).
-        Otherwise, the whole ViewSrc is changed to the GraphModel (allocator).
+    Basically, the rules are:
+
+    -   life_range_analysis.get_nodes_end_at()
+        -   On CALL_MODULE, U{ get_nodes_end_at(ng_n) for ng_n in ng.nodes }.
+
+    -   ViewSrc(node, index)
+        -   If `node` is outside any NodeGroup, its ViewSrc remains unchanged
+            (mapped to new Node instacnes).
+            I.e. if originally the same memory is in and then out,
+            we don't expect codegen to allocate a new memory and replace it.
+
+            Otherwise, the whole ViewSrc is changed to the GraphModel Node
+            (the allocator).
+
+        -   ViewSrc that's totally within the kernel Graph is no longer used.
+            (let codegen to handle the memory lifetime)
     
-    TensorMeta
-    -   Simply copy.
+    -   TensorMeta
+        -   Simply copied.
 
-    get_data_dependency_inputs()/users()
-    -   Not copied.
+    -   get_data_dependency_inputs()/users()
+        -   Not copied.
+
     """
     def __init__(
         self, modules: Sequence[esr.Module], graphs: Sequence[fx.Graph],
@@ -289,15 +305,24 @@ class NodeMetaCopier(EasierInterpreter):
         self.outer_node_dict = outer_node_dict
 
     def for_each_node(self):
-        from easier.core.passes.life_range_analysis import set_nodes_end_at, get_nodes_end_at
 
-        set_nodes_end_at(self.current_node, [])
+        handled = super().for_each_node()
+        if handled == True:
+            return
         
-        return super().for_each_node()
+
+
+        
     
     def if_call_module(self, submod: torch.nn.Module):
-        if isinstance(submod, fx.GraphModule):
-            ng = get_graph_module_node_group(submod)
+        if not isinstance(submod, fx.GraphModule):
+            return False
+
+        ng = get_graph_module_node_group(submod)
+
+
+        # Only this branch returns True, otherwise it's None/False.
+        return True
 
 
 def fuse_dataflow(modules: List[esr.Module], graphs: List[fx.Graph]):
