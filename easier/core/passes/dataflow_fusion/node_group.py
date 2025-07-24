@@ -397,3 +397,11 @@ def get_node_group(node: fx.Node) -> NodeGroup:
 
 def set_node_group(node: fx.Node, ng: NodeGroup):
     node.meta[KEY__FUSION_NODE_GROUP] = ng
+
+
+def get_graph_module_node_group(gm: fx.GraphModule) -> NodeGroup:
+    return getattr(gm, KEY__FUSION_NODE_GROUP)
+
+
+def set_graph_module_node_group(gm: fx.GraphModule, ng: NodeGroup):
+    setattr(gm, KEY__FUSION_NODE_GROUP, ng)

@@ -2,29 +2,30 @@
 # Licensed under the MIT License.
 
 import logging
+import operator
 import networkx
 from typing import Dict, List, Sequence, Set
 import scipy
 from torch import fx
 import torch
-from torch.fx.graph import Graph
 
 import easier.core.module as esr
 from easier.core.passes.dataflow_fusion.node_group import \
     NodeGroup, get_node_group, set_node_group, fuse_groups_if_no_deadlock, \
-    get_node_group_connectivity_matrix
+    get_node_group_connectivity_matrix, \
+    set_graph_module_node_group, get_graph_module_node_group
 from easier.core.passes.dataflow_fusion.debug import \
     dump_visualized_fused_groups
 from easier.core.passes.dataflow_fusion.fusion_rules import \
     GroupRule, NodeRule, FuseDecision
 import easier.core.passes.dataflow_fusion.fusion_rules as rules
-from easier.core.passes.utils import EasierInterpreter, SubmodNameAllocator
+from easier.core.passes.utils import FX, EasierInterpreter, SubmodNameAllocator, tree_map
 from easier.core.utils import logger
-from easier.core.runtime.dist_env import unbalanced_compute_heartbeat
+from easier.core.runtime.dist_env import get_runtime_dist_env, unbalanced_compute_heartbeat
 
 
 class NodeGrouper(EasierInterpreter):
-    def __init__(self, modules: Sequence[esr.Module], graphs: Sequence[Graph]):
+    def __init__(self, modules: Sequence[esr.Module], graphs: Sequence[fx.Graph]):
         assert len(modules) == len(graphs) == 1
         super().__init__(modules, graphs)
 
@@ -123,7 +124,7 @@ class NodeGrouper(EasierInterpreter):
 
 
 def node_groups_to_graph_modules(
-    ng_conn_mat: torch.Tensor, module: esr.Module, graph: Graph
+    ng_conn_mat: torch.Tensor, module: esr.Module, graph: fx.Graph
 ):
     """
     Given NodeGroup(nodes=[..., n{j}, ...]) and
@@ -156,57 +157,150 @@ def node_groups_to_graph_modules(
         so that JitEngine can still validate it?
     3.  copy Node.meta to new Nodes -- how about dep edges?
     """
+    raw_node_ids: Dict[fx.Node, int] = dict(
+        (n, i) for i, n in enumerate(graph.nodes)
+    )
+    
     ngs: List[NodeGroup] = list(set(map(get_node_group, graph.nodes)))
     ngids = [ng.id for ng in ngs]
     assert len(set(ngids)) == len(ngids)
 
     ids_tensor = torch.tensor(ngids)
-    active_ng_conn_mat = ng_conn_mat[ids_tensor, ids_tensor]
+    active_ng_conn_mat = ng_conn_mat[ids_tensor][:, ids_tensor]
 
     dag = networkx.DiGraph()
     dag.add_nodes_from(range(len(ngids)))
 
     for rowid, src_ngid in enumerate(ngids):
         for colid in active_ng_conn_mat[rowid].argwhere().ravel().tolist():
-            dag.add_edge(rowid, colid)
-    
-    topo_rowids: List[int] = list(networkx.topological_sort(dag))
+            # networkx topo sort disallows self-self edge
+            if rowid != colid:
+                dag.add_edge(rowid, colid)
+            
+    # TODO Alternative: networkx.lexicographical_topological_sort() 
+    # which can also maintain the original Node order.
+    groups = [ngs[rowid] for rowid in networkx.topological_sort(dag)]
 
-    raw_node_ids: Dict[fx.Node, int] = dict(
-        (n, i) for i, n in enumerate(graph.nodes)
-    )
+    outer_g = fx.Graph()
+    gm_name_allocator = SubmodNameAllocator('easier')
+    outer_node_dict: Dict[fx.Node, fx.Node] = {}
 
-    fused_g = Graph()
-    gm_name_allocator = SubmodNameAllocator('easier_kernel')
-    node_env: Dict[fx.Node, fx.Node] = {}
+    for ng in groups:
+        ng: NodeGroup
 
-    for rowid in topo_rowids:
-        ng = ngs[rowid]
 
         if len(ng.nodes) > 1:
 
-            gm_node_env: Dict[fx.Node, fx.Node] = {}
-            for in_node in ng.all_input_nodes():
-
-
+            kernel_g = fx.Graph()
+            kernel_node_dict: Dict[fx.Node, fx.Node] = {}
+            for raw_in in ng.all_input_nodes():
+                ph = kernel_g.placeholder(raw_in.name)
+                kernel_node_dict[raw_in] = ph
+            
             ng_raw_nodes = sorted(ng.nodes, key=raw_node_ids.__getitem__)
+            for raw_node in ng_raw_nodes:
+                # the 2nd callable `Node -> object` of `.node_copy` will
+                # only do the transformation on Node instances,
+                # and recursively on the input structures.
+                # Other values will be intact.
+                kernel_node = kernel_g.node_copy(
+                    raw_node, kernel_node_dict.__getitem__
+                )
+                kernel_node_dict[raw_node] = kernel_node
+            
+            output = []
+            for out_node_raw in ng.all_output_nodes():
+                out_item = kernel_node_dict[out_node_raw]
+                output.append(out_item)
+            
+            kernel_g.output(output)
 
-            # e.g. easier_kernel3_select_reduce
+            # Take the same root module to ensure CALL_MODULE on
+            # Selectors/Reducers within the kernel reference the instances.
+            gm = fx.GraphModule(module, kernel_g)
+            set_graph_module_node_group(gm, ng)
+
+            # e.g. easier3_select_reduce
             gm_name = gm_name_allocator.alloc_name(
                 module, f"_{ng.type.name.lower()}"
             )
-            module.add_module(gm_name, )
+            module.add_module(gm_name, gm)
 
-            for raw_n in ng.nodes:
-                node_env[raw_n] = 1
+            # Modify the outer graph:
+            # - CALL_MODULE `gm_name`
+            # - Unpack output item and bind to raw Nodes
+            kernel_args = tuple(
+                outer_node_dict[raw_in] for raw_in in ng.all_input_nodes()
+            )
+            call_kernel = outer_g.call_module(gm_name, kernel_args)
+
+            for i, raw_out in enumerate(ng.all_output_nodes()):
+                outer_out_item = outer_g.create_node(
+                    FX.CALL_FUNCTION, operator.getitem, (call_kernel, i),
+                    name=raw_out.name
+                )
+                outer_node_dict[raw_out] = outer_out_item                
+
         else:
             raw_n, = ng.nodes
-            new_n = fused_g.node_copy(raw_n, node_env.__getitem__)
-            node_env[raw_n] = new_n
 
-    return module, fused_g
+            # the 2nd callable `Node -> object` of `.node_copy` will
+            # only do the transformation on Node instances,
+            # and recursively on the input structures.
+            # Other values will be intact.
+            new_n = outer_g.node_copy(raw_n, outer_node_dict.__getitem__)
+            outer_node_dict[raw_n] = new_n
+        # end if len(ng.nodes) > 1
+    # end for ng in groups
 
-def fuse_dataflow(modules: List[esr.Module], graphs: List[Graph]):
+    outer_g.output(None)
+
+    NodeMetaCopier([module], [outer_g], outer_node_dict).run()
+
+    return module, outer_g
+
+
+class NodeMetaCopier(EasierInterpreter):
+    """
+    Some kinds of Node.meta will be validated by JitEngine,
+    after fusing `graph`, we'll use simple rule-based methods to adjust
+    Node.meta to ensure the semantic consistency before/after dataflow fusion.
+    (Rather than rerun the related passes.)
+
+    life_range_analysis.get_nodes_end_at()
+    -   On CALL_MODULE, U{ get_nodes_end_at(ng_n) for ng_n in ng.nodes }.
+
+    ViewSrc(node, index)
+    -   If `node` is outside any NodeGroup, it remains (mapped to new Nodes).
+        Otherwise, the whole ViewSrc is changed to the GraphModel (allocator).
+    
+    TensorMeta
+    -   Simply copy.
+
+    get_data_dependency_inputs()/users()
+    -   Not copied.
+    """
+    def __init__(
+        self, modules: Sequence[esr.Module], graphs: Sequence[fx.Graph],
+        outer_node_dict: Dict[fx.Node, fx.Node]
+    ):
+        super().__init__(modules, graphs)
+        
+        self.outer_node_dict = outer_node_dict
+
+    def for_each_node(self):
+        from easier.core.passes.life_range_analysis import set_nodes_end_at, get_nodes_end_at
+
+        set_nodes_end_at(self.current_node, [])
+        
+        return super().for_each_node()
+    
+    def if_call_module(self, submod: torch.nn.Module):
+        if isinstance(submod, fx.GraphModule):
+            ng = get_graph_module_node_group(submod)
+
+
+def fuse_dataflow(modules: List[esr.Module], graphs: List[fx.Graph]):
     assert len(modules) == len(graphs) == 1
     m = modules[0]
     g = graphs[0]
@@ -220,5 +314,7 @@ def fuse_dataflow(modules: List[esr.Module], graphs: List[Graph]):
     if logger.level <= logging.DEBUG:
         dump_visualized_fused_groups(modules, graphs)
     
-    m, g = node_groups_to_graph_modules(grouper.conn_mat, m, g)
-    return [m], [g]
+    m, new_g = node_groups_to_graph_modules(grouper.conn_mat, m, g)
+
+    
+    return [m], [new_g]

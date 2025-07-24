@@ -284,8 +284,6 @@ def assemble_shallow_water(mesh: str, shallow_water: str, device='cpu'):
     initializer: ShallowWaterInitializer
     initializer()
 
-    exit(0)
-
     initializer.x.save(shallow_water, 'x')
     initializer.y.save(shallow_water, 'y')
     initializer.area.save(shallow_water, 'area')

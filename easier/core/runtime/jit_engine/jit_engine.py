@@ -1163,6 +1163,13 @@ class JitEngine:
             # <--else --------------------------------------------------
             NotFullReducerOutputAllocation(self.module, stackframe),
         ]
+
+        runtime_handlers: List[NodeHandlerBase] = [
+            # -> Loads arguments from stackframe
+            # <- Stores result into stackframe, releases unused tensors
+            StackframeManager(self.module, stackframe),
+        ]
+
         return runtime_handlers
 
     def compile_after_first_run(self):

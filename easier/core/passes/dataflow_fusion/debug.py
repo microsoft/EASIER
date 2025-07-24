@@ -5,7 +5,7 @@ import logging
 import operator
 import os
 import tempfile
-from typing import Dict, List
+from typing import Dict, List, Optional
 import html
 
 from torch import fx
@@ -43,10 +43,12 @@ def _get_callsite_str(n: fx.Node) -> str:
 
         def _arg_str(x):
             nonlocal const_num
-            if x == slice(None, None, None) or x is Ellipsis:
+            if x == slice(None, None, None):
                 const_num += 1
                 return ":"
-            if isinstance(x, (int, float, bool, slice)):
+            elif x is Ellipsis:
+                return '...'
+            elif isinstance(x, (int, float, bool, slice)):
                 const_num += 1
                 return str(x)
             elif isinstance(x, str):
@@ -55,9 +57,10 @@ def _get_callsite_str(n: fx.Node) -> str:
             elif isinstance(x, fx.Node):
                 # Node or Node list, see from dataflow edges.
                 return '_'
-            else:
-                # tuple or list
+            elif isinstance(x, (tuple, list)):
                 return '(' + ','.join(map(_arg_str, x)) + ')'
+            else:
+                return str(x)
             
         arg_s = list(map(_arg_str, args))
 
@@ -77,15 +80,17 @@ def _get_callsite_str(n: fx.Node) -> str:
     return callsite
 
 def dump_visualized_fused_groups(
-    modules: List[esr.Module], graphs: List[fx.Graph],
-    log_dump_dir=None
+    modules: List[esr.Module],
+    graphs: List[fx.Graph],
+    log_dump_dir: Optional[str]=None,
+    session_name: Optional[str]=None  # only alphadigits are allowed
 ):
     """
     Dump the fused NodeGroups to graph diagrams if EASIER_LOG_LEVEL==DEBUG.
 
     During debugging at a breakpoint, developers can call this function
-    manually in the debug console, with a specific `log_dump_dir` to dump
-    intermediate fusion state on the fly:
+    manually in the debug console, with a specific `log_dump_dir/session_name`
+    to dump intermediate fusion state on the fly:
     -   NOTE the output dot/png file names will be the same, be careful
         with overwriting;
     -   Debugger may assert functions run in the console to take less than
@@ -115,34 +120,36 @@ def dump_visualized_fused_groups(
     for root, fx_g in zip(modules, graphs):
         ngs = set(map(get_node_group, fx_g.nodes))
 
+        cont_ngids: Dict[NodeGroup, int] = dict(zip(
+            ngs,  # NodeGroup.id not continuous
+            range(len(ngs))
+        ))
+
         #
         # Color schemes
         #
 
         # Shuffle NodeGroup ids to increase the contrast of HSV colors
         # of neighbouring NodeGroups.
-        perm_ngids: Dict[NodeGroup, int] = dict(zip(
-            ngs,  # NodeGroup.id not continuous
-            torch.randperm(len(ngs)).tolist()
-        ))
+        perm_ngids = torch.randperm(len(ngs)).tolist()
 
-        pmngid2hueoffset: Dict[int, float] = {}
+        contid2hueoffset: Dict[int, float] = {}
 
         # A Node with too many users forms a dedicated kind
-        pmngid2numnodekinds: Dict[int, int] = {}
+        contid2numnodekinds: Dict[int, int] = {}
         ub_toomany = 5
 
         for fx_n in fx_g.nodes:
             ng = get_node_group(fx_n)
-            pmngid = perm_ngids[ng]
-            if _renderable(ng) and pmngid not in pmngid2numnodekinds:
+            cont_id = cont_ngids[ng]
+            if _renderable(ng) and cont_id not in contid2numnodekinds:
                 # NodeGroup having Node-with-too-many-users first meet
                 # Offsets start from 1, i.e. 0 is for common Nodes.
-                pmngid2numnodekinds[pmngid] = 1
+                contid2numnodekinds[cont_id] = 1
 
                 for ng_n in ng.nodes:
                     if len(ng_n.users) > ub_toomany:
-                        pmngid2numnodekinds[pmngid] += 1
+                        contid2numnodekinds[cont_id] += 1
         
         # Divide HSV color space: Hue ~ [0.0, 1.0]
         hue_margin_nkind = 5
@@ -151,19 +158,21 @@ def dump_visualized_fused_groups(
             sum(
                 # weighted to further distinguish too-many-users Nodes
                 nkind * (1 + hue_kind_weight * (nkind - 1))
-                for nkind in pmngid2numnodekinds.values()
+                for nkind in contid2numnodekinds.values()
             ) + (
-                len(pmngid2numnodekinds)  # margin between NodeGroups
+                len(contid2numnodekinds)  # margin between NodeGroups
             ) * hue_margin_nkind
         ) or 1.0)  # at the beginning, all groups are singletons
 
         hue_offset = 0.0
-        for pmngid, nkind in pmngid2numnodekinds.items():
-            pmngid2hueoffset[pmngid] = hue_offset
-            hue_offset += (
-                nkind * (1 + hue_kind_weight * (nkind - 1)) \
-                + hue_margin_nkind
-            ) * per_nodekind_hue
+        for perm_id in perm_ngids:
+            if perm_id in contid2numnodekinds:
+                nkind = contid2numnodekinds[perm_id]
+                contid2hueoffset[perm_id] = hue_offset
+                hue_offset += (
+                    nkind * (1 + hue_kind_weight * (nkind - 1)) \
+                    + hue_margin_nkind
+                ) * per_nodekind_hue
 
 
         same_level_nodes: List[List[fx.Node]] = []
@@ -194,7 +203,7 @@ def dump_visualized_fused_groups(
             # Draw node
             v_callsite = _get_callsite_str(fx_n)
             ng = get_node_group(fx_n)
-            pmngid = perm_ngids[ng]
+            cont_id = cont_ngids[ng]
 
             # "t_" means TABLE
             t_n_args = max(len(fx_n.all_input_nodes), 1)
@@ -232,17 +241,17 @@ def dump_visualized_fused_groups(
                 return ''.join(label_defs)
 
             if _renderable(ng):
-                n_kind = pmngid2numnodekinds[pmngid]
-                huebase = pmngid2hueoffset[pmngid]
+                n_kind = contid2numnodekinds[cont_id]
+                huebase = contid2hueoffset[cont_id]
 
                 # Adjust color hue for Nodes with too many users, otherwise
                 # all edges are mixed together, it's impossible to figure out
                 # the dataflow.
                 if len(fx_n.users) > ub_toomany:
                     ng_node_kind = offset_toomany_users.setdefault(
-                        pmngid, 1
+                        cont_id, 1
                     )
-                    offset_toomany_users[pmngid] += 1
+                    offset_toomany_users[cont_id] += 1
 
                     node_hue_offset = ng_node_kind * (
                         1 + hue_kind_weight * (nkind - 1)
@@ -261,10 +270,10 @@ def dump_visualized_fused_groups(
 
             elif ng.type == GroupType.EXCLUDED:
                 # excluded NodeGroup
-                v_line = f'{fx_n.name} [label={_label(f"!{ng.id}")}];'
+                v_line = f'{fx_n.name} [label={_label(f"E{ng.id}")}];'
             else:
                 # singleton NodeGroup
-                v_line = f'{fx_n.name} [label={_label(f"/{ng.id}")}];'
+                v_line = f'{fx_n.name} [label={_label(f"U{ng.id}")}];'
 
             v_e_lines.append(v_line)
 
@@ -325,14 +334,21 @@ def dump_visualized_fused_groups(
             '}'
         ] 
 
+        if session_name is not None:
+            import string
+            chars = string.ascii_letters + string.digits + "_"
+            session_name = ''.join(filter(chars.__contains__, session_name))
+            session_name = f'_{session_name}'
+        else:
+            session_name = ''
+
         dot_src_filepath = os.path.join(
-                # m.easier_hint_name contains chars like ':' which may be
-                # disallowed as path, use class name as filename only.
-                log_dump_dir, f'{root.__class__.__name__}_{rank}.dot'
-            )
+            # m.easier_hint_name contains chars like ':' which may be
+            # disallowed as path, use class name as filename only.
+            log_dump_dir, f'{root.__class__.__name__}_{rank}{session_name}.dot'
+        )
         with open(dot_src_filepath, 'w') as dot_f:
             dot_f.write('\n'.join(src_lines))
-
 
         try:
             import graphviz
@@ -346,5 +362,5 @@ def dump_visualized_fused_groups(
             )
     
         logger.debug(
-            f"Dump fused {root.easier_hint_name} to {log_dump_dir}"
+            f"Dump fused {root.easier_hint_name} to {dot_src_filepath}"
         )

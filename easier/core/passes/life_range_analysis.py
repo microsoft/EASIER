@@ -21,7 +21,6 @@ def get_last_user(node: Node) -> Optional[Node]:
     """
     return node.meta[KEY__LAST_USER]
 
-
 def get_nodes_end_at(node: Node) -> List[Node]:
     """
     Get Nodes whose life ranges end at the specified `node`, including:
@@ -33,6 +32,9 @@ def get_nodes_end_at(node: Node) -> List[Node]:
     (this does not mean the underlying tensor memory is freed too).
     """
     return node.meta[KEY__NODES_END_HERE]
+
+def set_nodes_end_at(node: Node, ends: List[Node]):
+    node.meta[KEY__NODES_END_HERE] = ends
 
 
 class LifeRangeAnalyzer(EasierInterpreter):
