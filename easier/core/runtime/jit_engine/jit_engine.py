@@ -2,11 +2,12 @@
 # Licensed under the MIT License.
 
 import itertools
-from typing import Dict, Final, List, Tuple, cast, Optional
+from typing import Dict, Final, List, Tuple, Union, cast, Optional
 
 import torch
 from torch.fx.node import Node
 from torch.fx.graph import Graph
+from torch import fx
 
 import easier as esr
 from easier.core import passes
@@ -15,7 +16,7 @@ from easier.core.passes.life_range_analysis import get_nodes_end_at
 from easier.core.passes.utils import \
     FX, OrderedSet, tree_map, normalize_reducer_call_into_args, \
     get_called_module, get_attr_value, get_easier_tensors
-from easier.core.utils import EasierJitException
+from easier.core.utils import EasierJitException, logger
 from easier.core.runtime.dist_env import \
     get_default_dist_env, get_runtime_dist_env
 from easier.core.runtime.modules import HaloExchanger, all_gather_into_tensor
@@ -46,8 +47,56 @@ jit_skipped_meta = RuntimeTensorMeta(
 )
 
 
-def get_value_runtime_metadata(
-    node: Node, role: Role, val,
+def get_value_shape_dtype(
+    node: Node, val,
+    *,
+    _rec_depth=0  # debug-only
+):  # result may be nested
+    if isinstance(val, torch.Tensor):
+        return tuple(val.shape), val.dtype
+
+    elif val is None:
+        return replica_none_meta.shape, replica_none_meta.dtype
+
+    elif val is jit_skipped:
+        assert _rec_depth == 0, "jit_skipped is always not nested"
+        return jit_skipped_meta.shape, jit_skipped_meta.dtype
+
+    elif isinstance(val, (tuple, list)):
+        n_items = len(val)
+        item_metas = []
+
+        if _rec_depth > 0:
+            # TODO if any such ops, we need View=(Node, List[int]) for
+            # arbitrary nested structures and depths.
+            raise EasierJitException(
+                "Unexpected nested result with nested depth > 1 from"
+                f" {node.format_node()}"
+            )
+
+        for i in range(n_items):
+            item = val[i]
+            item_meta = get_value_shape_dtype(
+                node, item,
+                _rec_depth=_rec_depth+1
+            )
+
+            # assume being only one level nested.
+            assert isinstance(item, torch.Tensor)
+            item_metas.append(item_meta)
+
+        item_metas = type(val)(item_metas)  # tuple or list
+        return item_metas
+
+    else:
+        # Scalar cases may happen for `t.item()` that returns the scalar
+        # Python object for singleton tensors.
+        scalar_meta = get_runtime_metadata_from_scalar(val)
+        return scalar_meta.shape, scalar_meta.dtype
+
+
+def get_static_single_role_value_meta(
+    root: esr.Module, node: Node, role: Role, val,
     *,
     _rec_depth=0  # debug-only
 ) -> StructuredTensorMeta:
@@ -58,6 +107,12 @@ def get_value_runtime_metadata(
     Such a value is normally the result of evaluating `current_node`
     or jit_skipped.
 
+    This method can only be used on value that expected to have a single Role:
+    -   All PyTorch ops (EASIER assumes this is true)
+    -   EASIER primitives, Selector/Reducer/aggregator
+
+    -   NOTE a fused GraphModule is NOT!
+
     Args:
     -   node
     -   role:
@@ -66,6 +121,12 @@ def get_value_runtime_metadata(
             the runtime value, will be recursively inspected if there is a
             nested structure.
     """
+    assert not (
+        node.op == FX.CALL_MODULE and isinstance(
+            get_called_module(root, node), fx.GraphModule
+        )
+    ), 'Fused GraphModule calls do not always have a single role'
+
     if isinstance(val, torch.Tensor):
         tensor_runtime_meta = RuntimeTensorMeta(
             role, tuple(val.shape), val.dtype
@@ -97,8 +158,8 @@ def get_value_runtime_metadata(
 
         for i in range(n_items):
             item = val[i]
-            item_meta = get_value_runtime_metadata(
-                node, role, item,
+            item_meta = get_static_single_role_value_meta(
+                root, node, role, item,
                 _rec_depth=_rec_depth+1
             )
 
@@ -481,16 +542,20 @@ class ViewSrcValidation(ViewSrcTrackerBase):
 
 
 
-class MetadataValidation(NodeHandlerBase):
+class ShapeDtypeValidation(NodeHandlerBase):
     """
     Postprocess-only.
 
-    This validates if the shape/dtype/view_info of immediate results
+    This validates if the shape/dtype of immediate results
     are *strictly equal* (current requirement) during all forward() calls. 
 
-    Generally, this should be the last postprocess in runtime.
-    """
+    We don't validate role, because with only runtime value,
+    we can no longer infer role.
+    Then it's meaningless to just assume role does not change.
 
+    P.S. After fusion a GraphModule may return DIST and REPLICA, so the
+    resultant roles are even not unique.
+    """
     def __init__(
         self, module: esr.Module, stackframe: Dict[Node, RuntimeValue]
     ) -> None:
@@ -502,22 +567,14 @@ class MetadataValidation(NodeHandlerBase):
         self, current_node: Node, res: RuntimeValue, args, kwargs
     ) -> RuntimeValue:
         prev_meta = get_node_meta(current_node)
+        def _get_shape_dtype(x):
+            if isinstance(x, RuntimeTensorMeta):
+                return x.shape, x.dtype
+            else:
+                return x
+        prev_s_d = tree_map(prev_meta, _get_shape_dtype)
 
-        def _get_dist_role(x: RuntimeTensorMeta):
-            return x.role
-        dist_roles = set(collect_meta(
-            prev_meta, _get_dist_role, sentinel=Role.REPLICATED
-        ))
-
-        assert len(dist_roles) <= 1
-        if len(dist_roles) == 1:
-            role = Role.DISTRIBUTED
-        else:
-            role = Role.REPLICATED
-
-        result_meta = get_value_runtime_metadata(
-            current_node, role, res
-        )
+        result_s_d = get_value_shape_dtype(current_node, res)
 
         # TODO if we support meta changes on the fly, we can just check
         # if batch sizes change.
@@ -525,11 +582,11 @@ class MetadataValidation(NodeHandlerBase):
         # becomes an allocator Node, as long as it does not break the dep edges
         # of data-dep-analysis. Currently by simply equating two Metas we are
         # enforcing that the view info must be exactly the same.
-        if prev_meta != result_meta:
+        if prev_s_d != result_s_d:
             raise EasierJitException(
-                "The properties of the result value of the operation"
+                "The shape/dtype of the result value of the operation"
                 f" '{current_node.target}' changes:"
-                f" {prev_meta} => {result_meta}"
+                f" {prev_s_d} => {result_s_d}"
             )
 
         return res
@@ -719,8 +776,8 @@ class MetadataPropagation(NodeHandlerBase):
         and runtime, possibly nested, data.
         """
         role = self.expected_role_size[0]
-        runtime_meta = get_value_runtime_metadata(
-            current_node, role, res
+        runtime_meta = get_static_single_role_value_meta(
+            self.current_module, current_node, role, res
         )
 
         # TODO wrong! releasing Node or releasing the tensor don't mean
@@ -1154,8 +1211,8 @@ class JitEngine:
             ViewSrcValidation(self.module, stackframe),
 
             # ->
-            # <- Validates metadata and asserts no changes
-            MetadataValidation(self.module, stackframe),
+            # <- Validates shape/dtype and asserts no changes
+            ShapeDtypeValidation(self.module, stackframe),
 
             # -> if any dist input is zero-length: SKIP_EVAL --\--------
             # <____ res=jit_skipped ___________________________/
@@ -1183,6 +1240,8 @@ class JitEngine:
         ms, gs = passes.analyze_data_dependency(ms, gs)
 
         ms, gs = passes.fuse_dataflow(ms, gs)
+        ms, gs = passes.analyze_life_range(ms, gs)
+
         # ms, gs = passes.codegen(ms, gs)
 
         [self.module], [self.graph] = ms, gs

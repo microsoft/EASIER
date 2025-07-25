@@ -4,8 +4,7 @@
 import logging
 import operator
 import networkx
-from typing import Dict, List, Sequence, Set
-import scipy
+from typing import Dict, Iterable, List, Sequence, Set
 from torch import fx
 import torch
 
@@ -13,19 +12,24 @@ import easier.core.module as esr
 from easier.core.passes.dataflow_fusion.node_group import \
     NodeGroup, get_node_group, set_node_group, fuse_groups_if_no_deadlock, \
     get_node_group_connectivity_matrix, \
-    set_graph_module_node_group, get_graph_module_node_group
+    set_node_group, get_node_group
 from easier.core.passes.dataflow_fusion.debug import \
     dump_visualized_fused_groups
 from easier.core.passes.dataflow_fusion.fusion_rules import \
     GroupRule, NodeRule, FuseDecision
 import easier.core.passes.dataflow_fusion.fusion_rules as rules
-from easier.core.passes.utils import FX, EasierInterpreter, SubmodNameAllocator, tree_map
+from easier.core.passes.utils import \
+    FX, EasierInterpreter, SubmodNameAllocator, get_called_module, tree_map
+from easier.core.runtime.metadata import \
+    get_node_meta, set_node_meta, StructuredTensorMeta, StructuredViewSrc, \
+    get_node_view_src, set_node_view_src, ViewSrc
 from easier.core.utils import logger
-from easier.core.runtime.dist_env import get_runtime_dist_env, unbalanced_compute_heartbeat
 
 
 class NodeGrouper(EasierInterpreter):
-    def __init__(self, modules: Sequence[esr.Module], graphs: Sequence[fx.Graph]):
+    def __init__(
+        self, modules: Sequence[esr.Module], graphs: Sequence[fx.Graph]
+    ):
         assert len(modules) == len(graphs) == 1
         super().__init__(modules, graphs)
 
@@ -123,8 +127,43 @@ class NodeGrouper(EasierInterpreter):
             self._try_fuse_downstream_groups(self.current_node)
 
 
+def topo_sort_node_groups(
+    ng_conn_mat: torch.Tensor, graph: fx.Graph
+) -> List[NodeGroup]:
+    ngs: List[NodeGroup] = list(set(map(get_node_group, graph.nodes)))
+    ngids = [ng.id for ng in ngs]
+    assert len(set(ngids)) == len(ngids)
+
+    ids_tensor = torch.tensor(ngids)
+    active_ng_conn_mat = ng_conn_mat[ids_tensor][:, ids_tensor]
+
+    dag = networkx.DiGraph()
+    dag.add_nodes_from(range(len(ngids)))
+
+    for rowid, src_ngid in enumerate(ngids):
+        for colid in active_ng_conn_mat[rowid].argwhere().ravel().tolist():
+            # networkx topo sort disallows self-self edge
+            if rowid != colid:
+                dag.add_edge(rowid, colid)
+            
+    # TODO Alternative: networkx.lexicographical_topological_sort() 
+    # which can also maintain the original Node order.
+    groups = [ngs[rowid] for rowid in networkx.topological_sort(dag)]
+
+    # Since output NG has 0 IO-degrees, it's put in the middle.
+    # Because of JitEngine, forward() won't exit early, but better to put
+    # it in the correct position, for consistency.
+    for topo_i in range(len(groups)):
+        output_ng = groups[topo_i]
+        if list(output_ng.nodes)[0].op == FX.OUTPUT:
+            break
+    groups.pop(topo_i)
+    groups.append(output_ng)
+
+    return groups
+
 def node_groups_to_graph_modules(
-    ng_conn_mat: torch.Tensor, module: esr.Module, graph: fx.Graph
+    module: esr.Module, graph: fx.Graph, topo_groups: Iterable[NodeGroup]
 ):
     """
     Given NodeGroup(nodes=[..., n{j}, ...]) and
@@ -160,32 +199,17 @@ def node_groups_to_graph_modules(
     raw_node_ids: Dict[fx.Node, int] = dict(
         (n, i) for i, n in enumerate(graph.nodes)
     )
-    
-    ngs: List[NodeGroup] = list(set(map(get_node_group, graph.nodes)))
-    ngids = [ng.id for ng in ngs]
-    assert len(set(ngids)) == len(ngids)
-
-    ids_tensor = torch.tensor(ngids)
-    active_ng_conn_mat = ng_conn_mat[ids_tensor][:, ids_tensor]
-
-    dag = networkx.DiGraph()
-    dag.add_nodes_from(range(len(ngids)))
-
-    for rowid, src_ngid in enumerate(ngids):
-        for colid in active_ng_conn_mat[rowid].argwhere().ravel().tolist():
-            # networkx topo sort disallows self-self edge
-            if rowid != colid:
-                dag.add_edge(rowid, colid)
-            
-    # TODO Alternative: networkx.lexicographical_topological_sort() 
-    # which can also maintain the original Node order.
-    groups = [ngs[rowid] for rowid in networkx.topological_sort(dag)]
 
     outer_g = fx.Graph()
     gm_name_allocator = SubmodNameAllocator('easier')
+
+    # raw Nodes to new, outer Nodes
     outer_node_dict: Dict[fx.Node, fx.Node] = {}
 
-    for ng in groups:
+    # new CALL_MODULE Nodes to inner Node dict
+    kernels_node_dicts: Dict[fx.Node, Dict[fx.Node, fx.Node]] = {}
+
+    for ng in topo_groups:
         ng: NodeGroup
 
         if len(ng.nodes) > 1:
@@ -206,6 +230,8 @@ def node_groups_to_graph_modules(
                 kernel_node = kernel_g.node_copy(
                     raw_node, kernel_node_dict.__getitem__
                 )
+                kernel_node.meta = {}  # node_copy copies meta dict
+
                 kernel_node_dict[raw_node] = kernel_node
             
             output = []
@@ -218,7 +244,7 @@ def node_groups_to_graph_modules(
             # Take the same root module to ensure CALL_MODULE on
             # Selectors/Reducers within the kernel reference the instances.
             gm = fx.GraphModule(module, kernel_g)
-            set_graph_module_node_group(gm, ng)
+            set_node_group(gm, ng)
 
             # e.g. easier3_select_reduce
             gm_name = gm_name_allocator.alloc_name(
@@ -240,8 +266,14 @@ def node_groups_to_graph_modules(
                     name=raw_out.name
                 )
                 outer_node_dict[raw_out] = outer_out_item                
+            
+            kernels_node_dicts[call_kernel] = kernel_node_dict
 
         else:
+            # Copy excluded or singleton NodeGroups, e.g.:
+            # - get_attr
+            # - all_gather_into_tensor, HaloExchanger calls
+            # - output
             raw_n, = ng.nodes
 
             # the 2nd callable `Node -> object` of `.node_copy` will
@@ -249,19 +281,17 @@ def node_groups_to_graph_modules(
             # and recursively on the input structures.
             # Other values will be intact.
             new_n = outer_g.node_copy(raw_n, outer_node_dict.__getitem__)
+            new_n.meta = {}  # node_copy copies meta dict
+
             outer_node_dict[raw_n] = new_n
         # end if len(ng.nodes) > 1
     # end for ng in groups
-
-    outer_g.output(None)
 
     NodeMetaCopier([module], [outer_g], outer_node_dict).run()
 
     return module, outer_g
 
-
-from easier.core.passes.life_range_analysis import set_nodes_end_at, get_nodes_end_at
-
+        
 class NodeMetaCopier(EasierInterpreter):
     """
     Some kinds of Node.meta in the new, outer Graph
@@ -275,7 +305,10 @@ class NodeMetaCopier(EasierInterpreter):
     Basically, the rules are:
 
     -   life_range_analysis.get_nodes_end_at()
-        -   On CALL_MODULE, U{ get_nodes_end_at(ng_n) for ng_n in ng.nodes }.
+        -   Not copied.
+        -   life_range_analysis relies strictly on the original execution
+            order, and we don't insert such control edges for topo sort.
+            So we have to rerun life_range_analysis after fusion.
 
     -   ViewSrc(node, index)
         -   If `node` is outside any NodeGroup, its ViewSrc remains unchanged
@@ -297,31 +330,114 @@ class NodeMetaCopier(EasierInterpreter):
 
     """
     def __init__(
+        # input graph should be the new, outer graph
         self, modules: Sequence[esr.Module], graphs: Sequence[fx.Graph],
         outer_node_dict: Dict[fx.Node, fx.Node]
     ):
         super().__init__(modules, graphs)
-        
-        self.outer_node_dict = outer_node_dict
 
-    def for_each_node(self):
+        self.raw2outer = outer_node_dict
+        self.outer2raw: Dict[fx.Node, fx.Node] = {
+            v: k for k, v in outer_node_dict.items()
+        }
 
+        # A ViewSrc is equal to a constant 2-tuple (time, memory_addr),
+        # P.S. including time to differentiate reused memory.
+        # Given kernel calls will change many original time-addr tuples, we
+        # directly maintain the VS-VS mapping between raw and new Graphs.
+        self.rawsrc2outersrc: Dict[ViewSrc, ViewSrc] = {}
+    
+    def for_each_node(self) -> None:
         handled = super().for_each_node()
         if handled == True:
+            # Only certain specialized branches returns True,
+            # otherwise it's None or False.
             return
-        
 
+        raw_cur_node = self.outer2raw[self.current_node]
 
+        # Only plain data types like shape/dtype
+        set_node_meta(self.current_node, get_node_meta(raw_cur_node))
+
+        def _map_viewsrc(raw_vs):
+            if not isinstance(raw_vs, ViewSrc):
+                # A general Node may have ViewSrc be None.
+                return raw_vs
+
+            if raw_vs.node is raw_cur_node:
+                new_src = ViewSrc(self.current_node, raw_vs.index)
+                self.rawsrc2outersrc[raw_vs] = new_src
+                return new_src
+            else:
+                # Reflecting the progressively updated new ViewSrc.
+                return self.rawsrc2outersrc[raw_vs]
+
+        raw_src: StructuredViewSrc = get_node_view_src(raw_cur_node)
+        new_src = tree_map(raw_src, _map_viewsrc)
+        set_node_view_src(self.current_node, new_src)
         
-    
-    def if_call_module(self, submod: torch.nn.Module):
+    def if_call_function(self, function) -> bool:
+        if function is not operator.getitem:
+            return False
+        call_kernel = self.current_node.args[0]
+        kernel_out_idx = self.current_node.args[1]
+        assert isinstance(call_kernel, fx.Node)
+        if call_kernel.op != FX.CALL_MODULE:
+            return False
+        submod = get_called_module(self.current_module, call_kernel)
         if not isinstance(submod, fx.GraphModule):
             return False
+        assert isinstance(kernel_out_idx, int)
+        ng = get_node_group(submod)
 
-        ng = get_graph_module_node_group(submod)
+        # Since the CALL_MODULE has been handled, we directly pick
+        # element TensorMeta and ViewSrc from it.
+        set_node_meta(
+            self.current_node,
+            get_node_meta(call_kernel)[kernel_out_idx]  # type: ignore
+        )
 
+        new_src: ViewSrc = get_node_view_src(
+            call_kernel
+        )[kernel_out_idx]  # type: ignore
+        set_node_view_src(self.current_node, new_src)
 
-        # Only this branch returns True, otherwise it's None/False.
+        return True
+
+    def if_call_module(self, submod: torch.nn.Module) -> bool:
+        if not isinstance(submod, fx.GraphModule):
+            return False
+        
+        ng = get_node_group(submod)
+        assert self.current_node not in self.outer2raw, \
+            'Kernel calls are not in the original `outer_node_dict`'
+        
+        # concat-ed TensorMeta
+        raw_outputs = list(ng.all_output_nodes())
+
+        metas = list(map(get_node_meta, raw_outputs))
+        set_node_meta(self.current_node, metas)
+
+        # concat-ed ViewSrc
+        def _map_kernel_output_viewsrc(out_idx: int, raw_vs: ViewSrc):
+            if raw_vs.node in ng.nodes:
+                return ViewSrc(self.current_node, out_idx)
+            else:
+                # Reflecting the progressively updated new ViewSrc.
+                return self.rawsrc2outersrc[raw_vs]
+
+        kernel_srcs: List[ViewSrc] = []
+        for i, raw_out in enumerate(raw_outputs):
+            raw_src = get_node_view_src(raw_out)
+            assert isinstance(raw_src, ViewSrc), \
+                'Kernel output item shoud not be further nested'
+            outer_src: ViewSrc = _map_kernel_output_viewsrc(i, raw_src)
+            kernel_srcs.append(outer_src)
+
+            self.rawsrc2outersrc[raw_src] = outer_src
+
+        set_node_view_src(self.current_node, kernel_srcs)
+
         return True
 
 
@@ -330,16 +446,18 @@ def fuse_dataflow(modules: List[esr.Module], graphs: List[fx.Graph]):
     m = modules[0]
     g = graphs[0]
 
-    with unbalanced_compute_heartbeat(f"dataflow fusion {m.easier_hint_name}"):
+    logger.debug(f'Fusion pass is running for {m.easier_hint_name}')
+    grouper = NodeGrouper(modules, graphs).run()
+    logger.info(f'Fusion pass has completed for {m.easier_hint_name}')
 
-        logger.info(f'Fusion pass is running for {m.easier_hint_name}')
-        grouper = NodeGrouper(modules, graphs).run()
-        logger.info('Fusion pass has completed')
-    
     if logger.level <= logging.DEBUG:
         dump_visualized_fused_groups(modules, graphs)
     
-    m, new_g = node_groups_to_graph_modules(grouper.conn_mat, m, g)
+    node_groups = topo_sort_node_groups(grouper.conn_mat, g)
 
+    # NOTE NodeGroup methods like all_output_nodes() rely on the real time
+    # state of the raw Graph.
+    # If the raw Graph `g` is still used elsewhere, don't modify its nodes.
+    m, new_g = node_groups_to_graph_modules(m, g, node_groups)
     
     return [m], [new_g]

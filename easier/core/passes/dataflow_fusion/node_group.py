@@ -391,17 +391,15 @@ def fuse_groups_if_no_deadlock(
     return True
 
 
-def get_node_group(node: fx.Node) -> NodeGroup:
-    return node.meta[KEY__FUSION_NODE_GROUP]
+def get_node_group(node: Union[fx.Node, fx.GraphModule]) -> NodeGroup:
+    if isinstance(node, fx.GraphModule):
+        return getattr(node, KEY__FUSION_NODE_GROUP)
+    else:
+        return node.meta[KEY__FUSION_NODE_GROUP]
 
 
-def set_node_group(node: fx.Node, ng: NodeGroup):
-    node.meta[KEY__FUSION_NODE_GROUP] = ng
-
-
-def get_graph_module_node_group(gm: fx.GraphModule) -> NodeGroup:
-    return getattr(gm, KEY__FUSION_NODE_GROUP)
-
-
-def set_graph_module_node_group(gm: fx.GraphModule, ng: NodeGroup):
-    setattr(gm, KEY__FUSION_NODE_GROUP, ng)
+def set_node_group(node: Union[fx.Node, fx.GraphModule], ng: NodeGroup):
+    if isinstance(node, fx.GraphModule):
+        setattr(node, KEY__FUSION_NODE_GROUP, ng)
+    else:
+        node.meta[KEY__FUSION_NODE_GROUP] = ng
