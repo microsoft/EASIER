@@ -18,6 +18,8 @@ from easier.core.passes.dataflow_fusion.debug import \
 from easier.core.passes.dataflow_fusion.fusion_rules import \
     GroupRule, NodeRule, FuseDecision
 import easier.core.passes.dataflow_fusion.fusion_rules as rules
+from easier.core.passes.life_range_analysis import \
+    get_nodes_end_at, set_nodes_end_at
 from easier.core.passes.utils import \
     FX, EasierInterpreter, SubmodNameAllocator, get_called_module, tree_map
 from easier.core.runtime.metadata import \
@@ -130,10 +132,21 @@ class NodeGrouper(EasierInterpreter):
 def topo_sort_node_groups(
     ng_conn_mat: torch.Tensor, graph: fx.Graph
 ) -> List[NodeGroup]:
+    raw_node_ids: Dict[fx.Node, int] = dict(
+        (n, i) for i, n in enumerate(graph.nodes)
+    )
     ngs: List[NodeGroup] = list(set(map(get_node_group, graph.nodes)))
     ngids = [ng.id for ng in ngs]
     assert len(set(ngids)) == len(ngids)
 
+    def _get_raw_graph_offset(rowid: int):
+        ng = ngs[rowid]
+        if len(ng.nodes) == 1:
+            n, = ng.nodes
+            return raw_node_ids[n]
+        else:
+            return 0
+        
     ids_tensor = torch.tensor(ngids)
     active_ng_conn_mat = ng_conn_mat[ids_tensor][:, ids_tensor]
 
@@ -146,9 +159,22 @@ def topo_sort_node_groups(
             if rowid != colid:
                 dag.add_edge(rowid, colid)
             
-    # TODO Alternative: networkx.lexicographical_topological_sort() 
-    # which can also maintain the original Node order.
-    groups = [ngs[rowid] for rowid in networkx.topological_sort(dag)]
+    # TODO currently we must use lexicographically topo sort
+    # (it firstly guarantees topo sort, and secondly recover the original
+    # Node order in the raw Graph).
+    # TODO passes.analyze_life_range seems to only work AOT, but not JIT.
+    #
+    # Because AOT life range analysis is strictly based execution order, and
+    # we didn't insert control edges for it.
+    # The subsequence is, if we merely do topo sort without recovering Node
+    # order, a Node/Tensor may be released too early, and it will break
+    # runtime stakcframe.
+    groups = [
+        ngs[rowid] for rowid in networkx.lexicographical_topological_sort(
+            dag, key=_get_raw_graph_offset
+        )
+    ]
+    # groups = [ngs[rowid] for rowid in networkx.topological_sort(dag)]
 
     # Since output NG has 0 IO-degrees, it's put in the middle.
     # Because of JitEngine, forward() won't exit early, but better to put
@@ -356,6 +382,13 @@ class NodeMetaCopier(EasierInterpreter):
 
         raw_cur_node = self.outer2raw[self.current_node]
 
+        # life range
+        outer_ends = list(map(
+            self.raw2outer.__getitem__,
+            get_nodes_end_at(raw_cur_node)
+        ))
+        set_nodes_end_at(self.current_node, outer_ends)
+
         # Only plain data types like shape/dtype
         set_node_meta(self.current_node, get_node_meta(raw_cur_node))
 
@@ -376,6 +409,7 @@ class NodeMetaCopier(EasierInterpreter):
         new_src = tree_map(raw_src, _map_viewsrc)
         set_node_view_src(self.current_node, new_src)
         
+        
     def if_call_function(self, function) -> bool:
         if function is not operator.getitem:
             return False
@@ -389,6 +423,12 @@ class NodeMetaCopier(EasierInterpreter):
             return False
         assert isinstance(kernel_out_idx, int)
         ng = get_node_group(submod)
+
+        # life range
+        if kernel_out_idx + 1 == len(ng.all_output_nodes()):
+            set_nodes_end_at(self.current_node, [call_kernel])
+        else:
+            set_nodes_end_at(self.current_node, [])
 
         # Since the CALL_MODULE has been handled, we directly pick
         # element TensorMeta and ViewSrc from it.
@@ -411,7 +451,23 @@ class NodeMetaCopier(EasierInterpreter):
         ng = get_node_group(submod)
         assert self.current_node not in self.outer2raw, \
             'Kernel calls are not in the original `outer_node_dict`'
-        
+
+        # life range
+        ng_raw_ending_nodes: Set[fx.Node] = set()
+        for raw_n in ng.nodes:
+            raw_nodes_ending_in_ng = get_nodes_end_at(raw_n)
+            ng_raw_ending_nodes.update(raw_nodes_ending_in_ng)
+
+        # outer_node_dict.keys() contains raw Nodes that are
+        # also ng.all_output_nodes().
+        ng_raw_ending_nodes.intersection_update(
+            self.raw2outer.keys()
+        )
+        set_nodes_end_at(
+            self.current_node,
+            list(map(self.raw2outer.__getitem__, ng_raw_ending_nodes))
+        )
+
         # concat-ed TensorMeta
         raw_outputs = list(ng.all_output_nodes())
 

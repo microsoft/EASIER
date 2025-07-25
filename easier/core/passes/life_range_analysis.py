@@ -10,16 +10,7 @@ import easier.core.module as esr
 from easier.core.passes.utils import EasierInterpreter
 
 
-KEY__LAST_USER = 'easier_lifeRange_lastUser'
 KEY__NODES_END_HERE = 'easier_lifeRange_nodesEndHere'
-
-
-def get_last_user(node: Node) -> Optional[Node]:
-    """
-    Get the last user Node for the input `node`.
-    If `node` has no user, returns None.
-    """
-    return node.meta[KEY__LAST_USER]
 
 
 def get_nodes_end_at(node: Node) -> List[Node]:
@@ -33,6 +24,10 @@ def get_nodes_end_at(node: Node) -> List[Node]:
     (this does not mean the underlying tensor memory is freed too).
     """
     return node.meta[KEY__NODES_END_HERE]
+
+
+def set_nodes_end_at(node: Node, ends: List[Node]):
+    node.meta[KEY__NODES_END_HERE] = ends
 
 
 class LifeRangeAnalyzer(EasierInterpreter):
@@ -53,8 +48,6 @@ class LifeRangeAnalyzer(EasierInterpreter):
         self.current_node.meta.setdefault(KEY__NODES_END_HERE, [])
 
         if len(self.current_node.users) == 0:
-            self.current_node.meta[KEY__LAST_USER] = None
-
             # no users, life range ends immediately.
             range_end = self.current_node
 
@@ -66,8 +59,6 @@ class LifeRangeAnalyzer(EasierInterpreter):
                 ],
                 key=lambda uo: uo[1]
             )
-
-            self.current_node.meta[KEY__LAST_USER] = range_end
 
         range_end.meta.setdefault(
             KEY__NODES_END_HERE, []
