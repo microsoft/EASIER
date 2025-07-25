@@ -51,7 +51,6 @@ P.S. the N% below are taken from a certain experiment and are reference-only.
     any properties the input ElemPart has.
 """
 
-
 def broadcast_elempart(src: int, elempart: ElemPart) -> ElemPart:
     dist_env = get_runtime_dist_env()
 
