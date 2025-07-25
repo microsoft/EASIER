@@ -1,8 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-import itertools
-from typing import Dict, Final, List, Tuple, Union, cast, Optional
+from typing import Dict, Final, List, Tuple, cast, Optional
 
 import torch
 from torch.fx.node import Node
@@ -16,10 +15,10 @@ from easier.core.passes.life_range_analysis import get_nodes_end_at
 from easier.core.passes.utils import \
     FX, OrderedSet, tree_map, normalize_reducer_call_into_args, \
     get_called_module, get_attr_value, get_easier_tensors
-from easier.core.utils import EasierJitException, logger
+from easier.core.utils import EasierJitException
 from easier.core.runtime.dist_env import \
     get_default_dist_env, get_runtime_dist_env
-from easier.core.runtime.modules import HaloExchanger, all_gather_into_tensor
+from easier.core.runtime.modules import HaloExchanger
 from easier.core.runtime.metadata import \
     RuntimeTensorMeta, StructuredTensorMeta, Role, ViewSrc, \
     get_node_meta, set_node_meta, get_runtime_metadata_from_scalar, \

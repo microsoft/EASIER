@@ -16,9 +16,8 @@ from easier.core.runtime.metadata import \
 import easier.core.module as esr
 
 from easier.core.passes.utils import \
-    FX, EasierInterpreter, OrderedSet, get_dag_connectivity_matrix
+    EasierInterpreter, OrderedSet, get_dag_connectivity_matrix
 from easier.core.runtime.modules import HaloExchanger, all_gather_into_tensor
-from easier.core.runtime.dist_env import get_runtime_dist_env
 
 
 KEY__DATA_DEPENDENCY_INPUTS = 'easier_dataDependency_inputs'

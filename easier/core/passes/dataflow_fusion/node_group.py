@@ -1,22 +1,22 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-import itertools
 from typing import List, Sequence, Set, Tuple, Union, cast, Self
 from enum import Enum, auto
 from typing import Optional
-import numpy
-import scipy
 from torch import fx
 import torch
 
 import easier.core.module as esr
-from easier.core.passes.data_dependency_analysis import get_data_dependency_inputs, get_data_dependency_users
-from easier.core.runtime.dist_env import get_runtime_dist_env
+from easier.core.passes.data_dependency_analysis import \
+    get_data_dependency_users
 from easier.core.runtime.modules import HaloExchanger
-from easier.core.runtime.metadata import Role, collect_meta, get_node_meta, RuntimeTensorMeta, StructuredTensorMeta, is_node_skipped
-from easier.core.passes.utils import FX, OrderedSet, get_called_module, get_dag_connectivity_matrix
-from easier.core.utils import EasierJitException, logger
+from easier.core.runtime.metadata import \
+    Role, collect_meta, get_node_meta, StructuredTensorMeta, is_node_skipped
+from easier.core.passes.utils import \
+    FX, OrderedSet, get_called_module, get_dag_connectivity_matrix
+from easier.core.utils import EasierJitException
+
 
 KEY__FUSION_NODE_GROUP = 'easier_fusion_nodeGroup'
 
@@ -38,7 +38,7 @@ class GroupType(Enum):
     AGGREGATOR = auto()
 
 class NodeGroup:
-    def __init__(self, root: esr.Module, nodes: Sequence[fx.Node], id: int) -> None:
+    def __init__(self, root: esr.Module, nodes: Sequence[fx.Node], id: int):
         self.root = root
         self.nodes = OrderedSet(nodes)
         self.id = id
@@ -68,7 +68,8 @@ class NodeGroup:
 
         self.representative_aggregators = None
         if other.representative_aggregators is not None:
-            self.representative_aggregators = other.representative_aggregators.copy()
+            self.representative_aggregators = \
+                other.representative_aggregators.copy()
 
         self.type = other.type
 
@@ -193,7 +194,8 @@ class NodeGroup:
 
 
 def _infer_group_type(gt: GroupType, nt: NodeType) -> GroupType:
-    # TODO many checks are duplicated with NdoeGroup.infer, can these methods be merged?
+    # TODO many checks are duplicated with NdoeGroup.infer,
+    # can these methods be merged?
     assert nt is not NodeType.EXCLUDED, \
         "EXCLUDED Nodes are never grouped together"
 

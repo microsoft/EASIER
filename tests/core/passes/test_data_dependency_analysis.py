@@ -184,15 +184,31 @@ def test_data_dependency_nested_call():
     variables share the same dep path.
     """
     v = Tensor(torch.zeros([55, 3]), mode='partition')
+    pure_inner = Tensor(torch.zeros([55, 3]), mode='partition')
 
     class Inner(esr.Module):
         def __init__(self):
             super().__init__()
             self.v = v
+            self.pure_inner = pure_inner
 
         def forward(self):
             a = self.v[:]
             a[:] += 1
+            self.pure_inner[:] = 1
+    
+
+    class Inner2(esr.Module):
+        def __init__(self):
+            super().__init__()
+            self.v = v
+            self.pure_inner = pure_inner
+
+        def forward(self):
+            a = self.v[:]
+            a[:] += 1
+            self.pure_inner[:] = 1
+
 
     class Intermediate(esr.Module):
         def __init__(self):
@@ -205,11 +221,13 @@ def test_data_dependency_nested_call():
             self.r.fill_(9)
             self.inner()
 
+
     class Outer(esr.Module):
         def __init__(self):
             super().__init__()
             self.v = v
             self.intmd = Intermediate()
+            self.inner2 = Inner()
 
         def forward(self):
             v = self.v[:]
@@ -219,12 +237,17 @@ def test_data_dependency_nested_call():
             self.intmd()
             v[:] *= r2
 
+            # both inner1 and inner2 write pure_inner, even this Tensor
+            # is not referenced in Outer, there must be a dep edge between
+            # .intmd() and .inner2()
+            self.inner2()
+
     m = Outer()
     from easier.core.jit import compile
     [jm] = compile([m], 'torch')  # type: ignore
     jm.forward()
 
-    intmd, inner = m.intmd, m.intmd.inner
+    intmd, inner, inner2 = m.intmd, m.intmd.inner, m.inner2
 
     je_inner = cast(JitEngine, inner.forward.__self__)
     assert list(je_inner.read_tensors) == [v]
@@ -240,6 +263,11 @@ def test_data_dependency_nested_call():
     assert list(je_outer.read_tensors) == [v, intmd.r2, intmd.r]
     assert list(je_outer.write_tensors) == [v, intmd.r2, intmd.r]
     assert je_outer.called_comm_primitive == False
+
+    je_inner2 = cast(JitEngine, inner2.forward.__self__)
+    assert list(je_inner2.read_tensors) == [v]
+    assert list(je_inner2.write_tensors) == [v]
+    assert je_inner2.called_comm_primitive == False
 
     graph = cast(JitEngine, jm.forward.__self__).graph
     get_attr, var_v, \

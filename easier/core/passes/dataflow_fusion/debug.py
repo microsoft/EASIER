@@ -1,8 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-import logging
-import operator
 import os
 import tempfile
 from typing import Dict, List, Optional
@@ -12,12 +10,11 @@ from torch import fx
 import torch
 
 from easier.core.passes.data_dependency_analysis import \
-    get_data_dependency_inputs, get_data_dependency_users
+    get_data_dependency_users
 from easier.core.passes.dataflow_fusion.node_group import \
     GroupType, NodeGroup, get_node_group
 from easier.core.passes.utils import FX
 from easier.core.runtime.dist_env import get_runtime_dist_env
-from easier.core.runtime.metadata import RuntimeTensorMeta, get_node_meta
 from easier.core.utils import logger
 import easier.core.module as esr
 

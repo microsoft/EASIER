@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-from unittest.mock import patch
 import pytest
 import torch
 
@@ -10,7 +9,7 @@ from easier.core import passes
 from easier.core.jit import EasierTracer, _fully_load_data_backend_none
 from easier.core.passes.data_dependency_analysis import get_data_dependency_inputs
 from easier.core.passes.dataflow_fusion.dataflow_fusion import node_groups_to_graph_modules
-from easier.core.passes.dataflow_fusion.node_group import GroupType, NodeGroup, NodeType, get_node_group, set_node_group
+from easier.core.passes.dataflow_fusion.node_group import GroupType, NodeGroup, get_node_group, set_node_group
 from easier.core.passes.life_range_analysis import analyze_life_range, get_nodes_end_at
 from easier.core.passes.utils import FX, OrderedSet
 from easier.core.runtime.jit_engine.jit_engine import JitEngine as _orig_JE

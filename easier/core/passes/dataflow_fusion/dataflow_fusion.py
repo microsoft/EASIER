@@ -21,7 +21,7 @@ import easier.core.passes.dataflow_fusion.fusion_rules as rules
 from easier.core.passes.utils import \
     FX, EasierInterpreter, SubmodNameAllocator, get_called_module, tree_map
 from easier.core.runtime.metadata import \
-    get_node_meta, set_node_meta, StructuredTensorMeta, StructuredViewSrc, \
+    get_node_meta, set_node_meta, StructuredViewSrc, \
     get_node_view_src, set_node_view_src, ViewSrc
 from easier.core.utils import logger
 
@@ -307,8 +307,9 @@ class NodeMetaCopier(EasierInterpreter):
     -   life_range_analysis.get_nodes_end_at()
         -   Not copied.
         -   life_range_analysis relies strictly on the original execution
-            order, and we don't insert such control edges for topo sort.
-            So we have to rerun life_range_analysis after fusion.
+            order, and we didn't insert such control edges, so life range
+            won't be correctly preserved during toposort.
+            We have to rerun life_range_analysis after fusion.
 
     -   ViewSrc(node, index)
         -   If `node` is outside any NodeGroup, its ViewSrc remains unchanged
@@ -327,7 +328,6 @@ class NodeMetaCopier(EasierInterpreter):
 
     -   get_data_dependency_inputs()/users()
         -   Not copied.
-
     """
     def __init__(
         # input graph should be the new, outer graph
@@ -431,6 +431,7 @@ class NodeMetaCopier(EasierInterpreter):
             raw_src = get_node_view_src(raw_out)
             assert isinstance(raw_src, ViewSrc), \
                 'Kernel output item shoud not be further nested'
+
             outer_src: ViewSrc = _map_kernel_output_viewsrc(i, raw_src)
             kernel_srcs.append(outer_src)
 
