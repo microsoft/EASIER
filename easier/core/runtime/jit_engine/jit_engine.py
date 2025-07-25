@@ -208,8 +208,6 @@ def get_meta_role_size(meta: StructuredTensorMeta) -> Tuple[Role, int]:
         return replica
 
 
-
-
 class StackframeManager(NodeHandlerBase):
     """
     StackframeManager essentially plays the role like how Python interpreter,
@@ -222,11 +220,12 @@ class StackframeManager(NodeHandlerBase):
     -   Original function scopes of users' EASIER Python programs are totally
         inlined, due to FX tracing mechanism.
         Function-scope GC is no longer achievable.
-    
+
     -   The timing when to release a value relies on the calculation of
         life_range_analysis AOT pass, which would be more aggressive than
         Python-built-in function-scope GC.
     """
+
     def preprocess(
         self,
         current_node: Node,
@@ -349,7 +348,7 @@ class ViewSrcTrackerBase(NodeHandlerBase):
         -   val: A RuntimeValue that's possiby a Tensor,
                 not necessary to be `res` arg of `postprocess()`,
                 may be an item in `args` too.
-        
+
         Returns:
         -   A structure of possibly nested IndexAddr, e.g.
             `IndexAddr(addr, index=None)` or `None`,
@@ -400,7 +399,7 @@ class ViewSrcTrackerBase(NodeHandlerBase):
         elif val is jit_skipped:
             assert _rec_depth == 0, "jit_skipped is always not nested"
             return None
-        
+
         elif val is Ellipsis or isinstance(val, (int, float, bool, str, slice)):
             # rec_depth can > 0
             # e.g. in `getitem(input=x, position=[:, slice, 5, tensoridx])`
@@ -411,8 +410,6 @@ class ViewSrcTrackerBase(NodeHandlerBase):
             raise EasierJitException(
                 f"Unexpected runtime value {val} or nested structure"
             )
-
-
 
     def postprocess(
         self, current_node: Node, res: RuntimeValue, args, kwargs
@@ -540,7 +537,6 @@ class ViewSrcValidation(ViewSrcTrackerBase):
             )
 
 
-
 class ShapeDtypeValidation(NodeHandlerBase):
     """
     Postprocess-only.
@@ -555,6 +551,7 @@ class ShapeDtypeValidation(NodeHandlerBase):
     P.S. After fusion a GraphModule may return DIST and REPLICA, so the
     resultant roles are even not unique.
     """
+
     def __init__(
         self, module: esr.Module, stackframe: Dict[Node, RuntimeValue]
     ) -> None:
@@ -566,6 +563,7 @@ class ShapeDtypeValidation(NodeHandlerBase):
         self, current_node: Node, res: RuntimeValue, args, kwargs
     ) -> RuntimeValue:
         prev_meta = get_node_meta(current_node)
+
         def _get_shape_dtype(x):
             if isinstance(x, RuntimeTensorMeta):
                 return x.shape, x.dtype
@@ -975,7 +973,6 @@ class ReducerMetadataPropagation(NodeHandlerBase):
                 set_node_meta(current_node, reducer_out_meta)
 
         return PreprocessDecision.CONTINUE
-
 
 
 class AggregatorNeutralInputPreparation(NodeHandlerBase):

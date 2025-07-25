@@ -37,6 +37,7 @@ class GroupType(Enum):
     SELECT_REDUCE = auto()
     AGGREGATOR = auto()
 
+
 class NodeGroup:
     def __init__(self, root: esr.Module, nodes: Sequence[fx.Node], id: int):
         self.root = root
@@ -48,7 +49,7 @@ class NodeGroup:
         self.representative_reduces: Optional[
             Tuple[esr.Reducer, List[fx.Node]]
         ] = None
-        
+
         # Aggregators, AKA allreduces, can be grouped regardless of
         # the allreduce op (SUM PROD etc.) or the input TensorGroup.
         self.representative_aggregators: Optional[List[fx.Node]] = None
@@ -74,7 +75,7 @@ class NodeGroup:
         self.type = other.type
 
         return self
-    
+
     def __hash__(self) -> int:
         ret = 0
         for node in self.nodes:
@@ -93,7 +94,7 @@ class NodeGroup:
             return True
         else:
             return False
-    
+
     def __repr__(self) -> str:
         """
         E.g.
@@ -114,8 +115,6 @@ class NodeGroup:
 
         return f'NodeGroup@{self.id}({type_name}, {node_names},' \
             f' downstream={downstream_names})'
-    
-
 
     def _infer_type(self) -> GroupType:
         res = GroupType.MAP
@@ -146,23 +145,23 @@ class NodeGroup:
                             "Only one Reducer instance in a REDUCE NodeGroup"
                         )
                     reduce_nodes.append(node)
-            
+
             if nt is NodeType.AGGREGATOR:
                 if self.representative_reduces is not None:
                     raise EasierJitException(
                         "REDUCE NodeGroup cannot have aggregators"
                     )
-                
+
                 if self.representative_aggregators is None:
                     self.representative_aggregators = [node]
                 else:
                     self.representative_aggregators.append(node)
 
             res = _infer_group_type(res, nt)
-        
+
         self.type = res
         return res
-    
+
     def all_input_nodes(self) -> OrderedSet[fx.Node]:
         """
         Get Nodes that are inputs to inner Nodes and not in this NodeGroup.
@@ -209,7 +208,7 @@ def _infer_group_type(gt: GroupType, nt: NodeType) -> GroupType:
         else:
             assert nt in [NodeType.MAP]
             return GroupType.MAP
-    
+
     elif gt is GroupType.SELECT:
         if nt is NodeType.REDUCE:
             return GroupType.SELECT_REDUCE
@@ -218,7 +217,7 @@ def _infer_group_type(gt: GroupType, nt: NodeType) -> GroupType:
         else:
             assert nt in [NodeType.MAP, NodeType.SELECT]
             return GroupType.SELECT
-    
+
     elif gt in [GroupType.REDUCE, GroupType.SELECT_REDUCE]:
         if nt is NodeType.SELECT:
             return GroupType.SELECT_REDUCE
@@ -227,17 +226,16 @@ def _infer_group_type(gt: GroupType, nt: NodeType) -> GroupType:
         else:
             assert nt in [NodeType.MAP, NodeType.REDUCE]
             return gt
-    
+
     elif gt is GroupType.AGGREGATOR:
         if nt is NodeType.REDUCE:
             raise EasierJitException("REDUCE and AGGREGATOR cannot be grouped")
         else:
             assert nt in [NodeType.MAP, NodeType.SELECT, NodeType.AGGREGATOR]
             return GroupType.AGGREGATOR
-    
+
     else:
         raise EasierJitException(f"Unknown GroupType {gt}")
-
 
 
 def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
@@ -268,7 +266,7 @@ def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
         return NodeType.EXCLUDED  # skip
 
     if node.target in esr.easier_aggregators:
-        #TODO will esr.norm(x, p=p) have its nodes[0] be a replicated `p`?
+        # TODO will esr.norm(x, p=p) have its nodes[0] be a replicated `p`?
         aggegator_input = node.all_input_nodes[0]
         if is_node_skipped(aggegator_input):
             return NodeType.EXCLUDED
@@ -277,7 +275,7 @@ def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
 
     if all_replica:
         return NodeType.EXCLUDED
-    
+
     if node.op == FX.CALL_MODULE:
         submod = get_called_module(root, node)
 
@@ -289,7 +287,7 @@ def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
             return NodeType.SELECT
         else:
             raise EasierJitException(f'Unsupported CALL_MODULE {submod}')
-    
+
     return NodeType.MAP
 
 

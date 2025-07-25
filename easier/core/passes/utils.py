@@ -853,7 +853,7 @@ def get_dag_connectivity_matrix(
         for downstream in get_downstream(dag_vertex):
             downstream_id = get_id(downstream)
             adjmat[id][downstream_id] = 1
-        
+
     short_distance = scipy.sparse.csgraph.shortest_path(adjmat.numpy())
 
     conn_mat = torch.from_numpy(

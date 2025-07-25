@@ -46,7 +46,7 @@ def _assert_deps(inputs: Dict[Node, List[Node]], nodes: Iterable[Node]):
         for arg in v:
             users: Set[Node] = users_sets.setdefault(arg, set())
             users.add(k)
-    
+
     for n in nodes:
         if n.op == FX.OUTPUT:
             continue
@@ -56,6 +56,7 @@ def _assert_deps(inputs: Dict[Node, List[Node]], nodes: Iterable[Node]):
             f"Node {n} dep inputs incorrect"
         assert users_sets.get(n, _es) == set(get_data_dependency_users(n)), \
             f"Node {n} dep users incorrect"
+
 
 def _get_viewsrc_node(node: Node) -> Union[Node, None]:
     view_src = get_node_view_src(node)
@@ -196,7 +197,6 @@ def test_data_dependency_nested_call():
         def forward(self):
             a = self.v[:]
             a[:] += self.pure_inner
-    
 
     class Inner2(esr.Module):
         def __init__(self):
@@ -205,7 +205,6 @@ def test_data_dependency_nested_call():
 
         def forward(self):
             self.pure_inner[:] = 1
-
 
     class Intermediate(esr.Module):
         def __init__(self):
@@ -217,7 +216,6 @@ def test_data_dependency_nested_call():
         def forward(self):
             self.r.fill_(9)
             self.inner()
-
 
     class Outer(esr.Module):
         def __init__(self):
@@ -386,7 +384,7 @@ def test_data_dependency_nested_communication():
         dprod, allgather_prod, rprod, \
         dsum, allgather_sum, rsum, \
         out = graph.nodes
-    
+
     assert _get_viewsrc_node(get_attr) == get_attr
     assert _get_viewsrc_node(getitem) == get_attr
 
@@ -478,7 +476,7 @@ def test_multi_res_separated_dep_subgraphs():
                 return neg, torch.zeros_like(neg), torch.ones_like(neg)
             else:
                 return res
-                
+
     class _TestCaseJitEngine(JitEngine):
         def create_first_run_handlers(self, stackframe):
             handlers = super().create_first_run_handlers(stackframe)

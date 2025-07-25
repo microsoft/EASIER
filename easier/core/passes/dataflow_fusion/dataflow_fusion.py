@@ -63,7 +63,6 @@ class NodeGrouper(EasierInterpreter):
         ngs.reverse()
 
         self.conn_mat = get_node_group_connectivity_matrix(ngs)
-        
 
     def _check_rules(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:
         """
@@ -121,9 +120,9 @@ class NodeGrouper(EasierInterpreter):
                 # - NodeGroup instance `ng` is in-place expanded;
                 # - All Nodes in the fused group are bound to
                 #   NodeGroup instance `ng`.
-        
+
         return ng
-    
+
     def for_each_node(self):
         if self.current_node not in self.visited:
             self._try_fuse_downstream_groups(self.current_node)
@@ -146,7 +145,7 @@ def topo_sort_node_groups(
             return raw_node_ids[n]
         else:
             return 0
-        
+
     ids_tensor = torch.tensor(ngids)
     active_ng_conn_mat = ng_conn_mat[ids_tensor][:, ids_tensor]
 
@@ -158,7 +157,7 @@ def topo_sort_node_groups(
             # networkx topo sort disallows self-self edge
             if rowid != colid:
                 dag.add_edge(rowid, colid)
-            
+
     # TODO currently we must use lexicographically topo sort
     # (it firstly guarantees topo sort, and secondly recover the original
     # Node order in the raw Graph).
@@ -187,6 +186,7 @@ def topo_sort_node_groups(
     groups.append(output_ng)
 
     return groups
+
 
 def node_groups_to_graph_modules(
     module: esr.Module, graph: fx.Graph, topo_groups: Iterable[NodeGroup]
@@ -245,7 +245,7 @@ def node_groups_to_graph_modules(
             for raw_in in ng.all_input_nodes():
                 ph = kernel_g.placeholder(raw_in.name)
                 kernel_node_dict[raw_in] = ph
-            
+
             # Sort the inner Nodes into the original order
             ng_raw_nodes = sorted(ng.nodes, key=raw_node_ids.__getitem__)
             for raw_node in ng_raw_nodes:
@@ -259,12 +259,12 @@ def node_groups_to_graph_modules(
                 kernel_node.meta = {}  # node_copy copies meta dict
 
                 kernel_node_dict[raw_node] = kernel_node
-            
+
             output = []
             for out_node_raw in ng.all_output_nodes():
                 out_item = kernel_node_dict[out_node_raw]
                 output.append(out_item)
-            
+
             kernel_g.output(output)
 
             # Take the same root module to ensure CALL_MODULE on
@@ -291,8 +291,8 @@ def node_groups_to_graph_modules(
                     FX.CALL_FUNCTION, operator.getitem, (call_kernel, i),
                     name=raw_out.name
                 )
-                outer_node_dict[raw_out] = outer_out_item                
-            
+                outer_node_dict[raw_out] = outer_out_item
+
             kernels_node_dicts[call_kernel] = kernel_node_dict
 
         else:
@@ -317,7 +317,7 @@ def node_groups_to_graph_modules(
 
     return module, outer_g
 
-        
+
 class NodeMetaCopier(EasierInterpreter):
     """
     Some kinds of Node.meta in the new, outer Graph
@@ -331,11 +331,17 @@ class NodeMetaCopier(EasierInterpreter):
     Basically, the rules are:
 
     -   life_range_analysis.get_nodes_end_at()
-        -   Not copied.
-        -   life_range_analysis relies strictly on the original execution
-            order, and we didn't insert such control edges, so life range
-            won't be correctly preserved during toposort.
-            We have to rerun life_range_analysis after fusion.
+        -   Union { nodes_end_at(n) for n in ng.nodes  }
+
+            NOTE this only works if we *lexicographically topo sort*
+            NodeGroups, because AOT life range data strictly relies on
+            original execution order, and we didn't insert such control edges.
+
+            Alternative it's to re-run life range analysis.
+            This would be acceptable as it's only for GC and less related
+            to semantics.
+            TODO but AOT life_range_analysis does not work within JitEngine,
+            maybe jit_skipped must be handled?
 
     -   ViewSrc(node, index)
         -   If `node` is outside any NodeGroup, its ViewSrc remains unchanged
@@ -348,13 +354,14 @@ class NodeMetaCopier(EasierInterpreter):
 
         -   ViewSrc that's totally within the kernel Graph is no longer used.
             (let codegen to handle the memory lifetime)
-    
+
     -   TensorMeta
         -   Simply copied.
 
     -   get_data_dependency_inputs()/users()
         -   Not copied.
     """
+
     def __init__(
         # input graph should be the new, outer graph
         self, modules: Sequence[esr.Module], graphs: Sequence[fx.Graph],
@@ -372,7 +379,7 @@ class NodeMetaCopier(EasierInterpreter):
         # Given kernel calls will change many original time-addr tuples, we
         # directly maintain the VS-VS mapping between raw and new Graphs.
         self.rawsrc2outersrc: Dict[ViewSrc, ViewSrc] = {}
-    
+
     def for_each_node(self) -> None:
         handled = super().for_each_node()
         if handled == True:
@@ -408,8 +415,7 @@ class NodeMetaCopier(EasierInterpreter):
         raw_src: StructuredViewSrc = get_node_view_src(raw_cur_node)
         new_src = tree_map(raw_src, _map_viewsrc)
         set_node_view_src(self.current_node, new_src)
-        
-        
+
     def if_call_function(self, function) -> bool:
         if function is not operator.getitem:
             return False
@@ -447,7 +453,7 @@ class NodeMetaCopier(EasierInterpreter):
     def if_call_module(self, submod: torch.nn.Module) -> bool:
         if not isinstance(submod, fx.GraphModule):
             return False
-        
+
         ng = get_node_group(submod)
         assert self.current_node not in self.outer2raw, \
             'Kernel calls are not in the original `outer_node_dict`'
@@ -505,12 +511,12 @@ def fuse_dataflow(modules: List[esr.Module], graphs: List[fx.Graph]):
 
     if logger.level <= logging.DEBUG:
         dump_visualized_fused_groups(modules, graphs)
-    
+
     node_groups = topo_sort_node_groups(grouper.conn_mat, g)
 
     # NOTE NodeGroup methods like all_output_nodes() rely on the real time
     # state of the raw Graph.
     # If the raw Graph `g` is still used elsewhere, don't modify its nodes.
     m, new_g = node_groups_to_graph_modules(m, g, node_groups)
-    
+
     return [m], [new_g]

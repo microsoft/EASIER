@@ -4,7 +4,8 @@
 import dataclasses
 import itertools
 import operator
-from typing import Dict, Iterable, List, Optional, Sequence, TypeAlias, Union, cast
+from typing import \
+    Dict, Iterable, List, Optional, Sequence, TypeAlias, Union, cast
 
 from torch import nn
 import torch
@@ -146,13 +147,12 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         # complicate the dependency.
         self.read_tensors: OrderedSet[esr.Tensor] = OrderedSet()
         self.write_tensors: OrderedSet[esr.Tensor] = OrderedSet()
-        
+
         # Whether this Module and its all nested Modules call communication
         # primitives from DistEnv.
         # If called, the calls of this Module in the surrounding/outer
         # esr.Module must be ordered with communication calls there.
         self.called_comm_primitive: bool = False
-
 
     def add_data_dependency_edge(self, src: Node, dst: Node):
         # NOTE only existing dataflow/dependency edges are deduplicated,
@@ -184,8 +184,6 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         dep_inputs.add(src)
         dep_users.add(dst)
 
-        
-
     def add_reader_dependency(self, arg_src: _TViewSrc):
         """
         Add the current node as a reader to the memory at `arg_src`.
@@ -195,7 +193,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         latest_writer = self.src2writer.get(arg_src, None)
         if latest_writer is not None:
             # If the Tensor is read-only (args of matmul etc.) it has no
-            # previous writers. 
+            # previous writers.
             self.add_data_dependency_edge(latest_writer, reader)
 
         # Other readers in the same barrier-barrier region.
@@ -295,7 +293,6 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             res_srcs = self.res_srcs
         for res_src in res_srcs:
             self.add_writer_dependency(res_src)
-    
 
     def _handle_readonly_or_allocation(self):
         """
@@ -308,17 +305,17 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
 
         -   read:
             The contents of the memory is read.
-        
+
         -   write:
             The contents of the memory is modified.
-        
+
         -   allocate:
             The operator allocates a new memory and a new Tensor.
             Generally followed by a write.
 
         P.S. the original Tensor-memory binding cannot be changed,
         e.g. `Tensor.set_()` is not supported by EASIER.
-        
+
         If we were careful enough and checked down to the essentials
         -- which the current implementation of EASIER did not --
         we might find:
@@ -330,11 +327,11 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             breaking dataflow.
 
         -   `torch.reshape` is a view or an allocator.
-        
+
         -   `easier.runtime.HaloExchanger` is read-only or an allocator.
             (when a HaloExchanger is for Selector and send-only, it returns
             the input Tensor as well as copying some of its contents)
-        
+
         However, in order to get free from checking operator one-by-one,
         EASIER by default has policies:
 
@@ -344,7 +341,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             b.  `torch.add(a,b), torch.svd()` are allocators,
                 writing the newly allocated memory blocks;
             c.  `torch.view` is classfied as writers -- by the default policy.
-        
+
         -   This method, _handle_readonly_or_allocation(),
                          ********************************
             can be used, in an allow-list manner, to specifically
@@ -356,7 +353,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         For example, if we want to use this method to eliminate the
         "mis-classification" of `torch.view` in the case (c) above,
         we still have to treat it as read-only, rather than pure view.
-        
+
         TODO Currently handle only getitem and HaloExchanger, since they have
         been identified as special cases for other purposes.
         TODO Handle pure views, just like syntactic construct GET_ATTR.
@@ -371,14 +368,13 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         else:
             # The node is an allocator
             self.res_srcs = [res_src]
-    
+
     def if_get_attr(self, submod_path: str, attr_name: str, attr_val):
         # GET_ATTR is purely syntactic, its position in IR does not matter.
         # NOTE However, GET_ATTR Nodes are still used as ViewSrc.
         self.arg_srcs = []
         self.res_srcs = []
 
-    
     def if_call_function(self, function) -> None:
         if function is operator.getitem:
             # If getitem is for tuple indexing -- essentially a syntactic
@@ -394,13 +390,13 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             if is_tuple_indexing:
                 tuple_item_index = self.current_node.args[1]
                 assert isinstance(tuple_item_index, int)
-                
+
                 # !! Override self.arg_srcs
                 self.arg_srcs = collect_meta(
                     get_node_view_src(arg0)[tuple_item_index],  # type: ignore
                     leaf_type=ViewSrc
                 )
-            
+
             # No matter which kind of getitem, it's a view
             self._handle_readonly_or_allocation()
 
@@ -412,7 +408,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
     def if_call_module(self, submod: nn.Module):
         """
         `submod` may be:
-        
+
         -   A nested esr.Module call has no input/output, data dependency
             may occur through:
             -   esr.Tensor instances the inner Module shares/writes.
@@ -449,13 +445,12 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
 
                 # Recursively tell outer Module/JitEngine
                 self.write_tensors.add(nested_et_write)
-            
+
             # Enforced order of communication
             if nested_jit_engine.called_comm_primitive:
                 self.res_srcs.append(self._dist_env_viewsrc)
 
                 self.called_comm_primitive = True
-            
 
         if isinstance(submod, HaloExchanger):
             # Use default arg_srcs decision.
@@ -465,7 +460,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             # tensor. By default this will be treated as writing.
             # Let's simplify the dependency by treating HaloXchg as read-only.
             self._handle_readonly_or_allocation()
-            
+
             # Enforced order of communication
             assert self.res_srcs is not None
             self.res_srcs.append(self._dist_env_viewsrc)

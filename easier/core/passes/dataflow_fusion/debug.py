@@ -35,7 +35,7 @@ def _get_callsite_str(n: fx.Node) -> str:
         else:
             args = n.args
             callsite = f'{n.name}'
-        
+
         const_num = 0
 
         def _arg_str(x):
@@ -58,7 +58,7 @@ def _get_callsite_str(n: fx.Node) -> str:
                 return '(' + ','.join(map(_arg_str, x)) + ')'
             else:
                 return str(x)
-            
+
         arg_s = list(map(_arg_str, args))
 
         kv_s = []
@@ -76,11 +76,12 @@ def _get_callsite_str(n: fx.Node) -> str:
 
     return callsite
 
+
 def dump_visualized_fused_groups(
     modules: List[esr.Module],
     graphs: List[fx.Graph],
-    log_dump_dir: Optional[str]=None,
-    session_name: Optional[str]=None  # only alphadigits are allowed
+    log_dump_dir: Optional[str] = None,
+    session_name: Optional[str] = None  # only alphadigits are allowed
 ):
     """
     Dump the fused NodeGroups to graph diagrams if EASIER_LOG_LEVEL==DEBUG.
@@ -107,7 +108,7 @@ def dump_visualized_fused_groups(
     # TODO each rank has its own random temp dir, better to collect to rank0?
     log_dump_dir = os.path.expanduser(log_dump_dir)
     os.makedirs(log_dump_dir, exist_ok=True)
-    
+
     dist_env = get_runtime_dist_env()
     rank = dist_env.rank
 
@@ -147,7 +148,7 @@ def dump_visualized_fused_groups(
                 for ng_n in ng.nodes:
                     if len(ng_n.users) > ub_toomany:
                         contid2numnodekinds[cont_id] += 1
-        
+
         # Divide HSV color space: Hue ~ [0.0, 1.0]
         hue_margin_nkind = 5
         hue_kind_weight = 0.5
@@ -167,10 +168,9 @@ def dump_visualized_fused_groups(
                 nkind = contid2numnodekinds[perm_id]
                 contid2hueoffset[perm_id] = hue_offset
                 hue_offset += (
-                    nkind * (1 + hue_kind_weight * (nkind - 1)) \
+                    nkind * (1 + hue_kind_weight * (nkind - 1))
                     + hue_margin_nkind
                 ) * per_nodekind_hue
-
 
         same_level_nodes: List[List[fx.Node]] = []
         cur_level_nodes: List[fx.Node] = []
@@ -196,7 +196,7 @@ def dump_visualized_fused_groups(
                 #     )
 
                 cur_level_nodes.append(fx_n)
-            
+
             # Draw node
             v_callsite = _get_callsite_str(fx_n)
             ng = get_node_group(fx_n)
@@ -298,38 +298,38 @@ def dump_visualized_fused_groups(
                 else:
                     # Normal dataflow edge
                     e_line += f'[color=darkgrey, headlabel="{headlabel}"];'
-                
+
                 v_e_lines.append(e_line)
 
             for dep_user in get_data_dependency_users(fx_n):
                 v_e_lines.append(
-                    f'{fx_n.name} -> {dep_user.name} ' \
-                        '[color=grey, style=dashed];'
+                    f'{fx_n.name} -> {dep_user.name} '
+                    '[color=grey, style=dashed];'
                 )
-        
+
         same_level_nodes.append(cur_level_nodes)
 
         same_level_lines = [
-            '  { rank=same; ' \
-                + '; '.join(lv_n.name for lv_n in same_level) \
-                + '; }'
+            '  { rank=same; '
+            + '; '.join(lv_n.name for lv_n in same_level)
+            + '; }'
             for same_level in same_level_nodes
             if len(same_level) > 0
         ]
-        
+
         src_lines = [
             f'digraph \"{root.easier_hint_name}_{rank}\"' + ' {',
             '  splines=true;'
             # width/height are minimum width/height
-            '  node [shape=plaintext, style=filled, fillcolor=white,' \
-                ' margin=0, width=0.1, height=0.1];',
+            '  node [shape=plaintext, style=filled, fillcolor=white,'
+            ' margin=0, width=0.1, height=0.1];',
         ] + [
             f'  {v_e}' for v_e in v_e_lines
         ] + [
             ''
         ] + same_level_lines + [
             '}'
-        ] 
+        ]
 
         if session_name is not None:
             import string
@@ -357,7 +357,7 @@ def dump_visualized_fused_groups(
                 " to dump PNG fused dataflow graphs, or manually run"
                 " `dot module.dot -Tpng -o module.png`"
             )
-    
+
         logger.debug(
             f"Dump fused {root.easier_hint_name} to {dot_src_filepath}"
         )

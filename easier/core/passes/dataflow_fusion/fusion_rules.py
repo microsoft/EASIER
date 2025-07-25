@@ -24,6 +24,7 @@ class NodeRule(ABC):
     def check(self, arg: fx.Node, user: fx.Node) -> FuseDecision:
         pass
 
+
 class GroupingEndsBeforeSelector(NodeRule):
     def check(self, arg: fx.Node, user: fx.Node) -> FuseDecision:
         user_ng = get_node_group(user)
@@ -45,6 +46,7 @@ class GroupingEndsAfterAggregator(NodeRule):
         else:
             return FuseDecision.PASS
 
+
 class GroupingEndsAfterReducer(NodeRule):
     # TODO this rule and EndsAfterAggregator rule can be seen as
     # GroupRule (or Group-Node rule), which can be checked faster by
@@ -58,7 +60,6 @@ class GroupingEndsAfterReducer(NodeRule):
             return FuseDecision.REJECT
         else:
             return FuseDecision.PASS
-
 
 
 class GroupRule(ABC):
@@ -80,6 +81,7 @@ class RejectExcludedGroup(GroupRule):
     -   HaloExchanger
     -   non-aggregator replica, e.g. pure replica and esr.Module calls.
     """
+
     def check(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:
         if ng1.type == GroupType.EXCLUDED or ng2.type == GroupType.EXCLUDED:
             return FuseDecision.REJECT
@@ -108,7 +110,7 @@ class ReducerAggregatorGroupsConflict(GroupRule):
 class ReducerInstancesConflict(GroupRule):
     def check(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:
         if ng1.representative_reduces is not None \
-        and ng2.representative_reduces is not None:
+                and ng2.representative_reduces is not None:
             r1 = ng1.representative_reduces[0]
             r2 = ng2.representative_reduces[0]
             if r1 is not r2:
@@ -135,6 +137,7 @@ class UnifyReducerScheduling(GroupRule):
     -   Two Reducer calls writing the same memory block, the execution of which
         can possibly be serialized, won't be grouped together.
     """
+
     def check(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:
         if self._reject(ng1, ng2) or self._reject(ng2, ng1):
             return FuseDecision.REJECT

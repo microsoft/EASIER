@@ -21,6 +21,7 @@ from easier.core.runtime.jit_engine.jit_engine import JitEngine as _orig_JE
 from easier.core.runtime.metadata import \
     Role, ViewSrc, get_node_meta, RuntimeTensorMeta, get_node_view_src
 
+
 class JitEngine(_orig_JE):
     """
     After 1st run, do data dependency analysis and dataflow fusion only.
@@ -31,6 +32,7 @@ class JitEngine(_orig_JE):
         ms, gs = passes.analyze_data_dependency(ms, gs)
         ms, gs = passes.fuse_dataflow(ms, gs)
         [self.module], [self.graph] = ms, gs
+
 
 @pytest.mark.usefixtures('dummy_dist_env')
 def test_cycle():
@@ -55,7 +57,7 @@ def test_cycle():
             mul = add * add_1
             mul_1 = mul * r1
             self.d[:] = mul_1
-    
+
     m = Model()
     m.easier_hint_name = 'ROOT'
     _fully_load_data_backend_none([m], 'cpu')
@@ -72,11 +74,11 @@ def test_cycle():
     ng_map_nodes = OrderedSet([mul, mul_1, setitem])
     for n in ng_map_nodes:
         assert get_node_group(n).nodes == ng_map_nodes
-    
+
     ng_sr_nodes = OrderedSet([s1, add_1, r1])
     for n in ng_sr_nodes:
         assert get_node_group(n).nodes == ng_sr_nodes
-    
+
     assert get_node_group(get_d).type == GroupType.EXCLUDED  # type: ignore
     assert get_node_group(out).type == GroupType.EXCLUDED  # type: ignore
 
@@ -122,7 +124,7 @@ def test_inplace_reducer():
     ng_map_nodes = OrderedSet([mul, mul_1, setitem])
     for n in ng_map_nodes:
         assert get_node_group(n).nodes == ng_map_nodes
-    
+
     ng_sr_nodes = OrderedSet([s1, add_1, r1a])
     for n in ng_sr_nodes:
         ng = get_node_group(n)
@@ -132,9 +134,10 @@ def test_inplace_reducer():
     ng_r_nodes = OrderedSet([r1b])
     for n in ng_r_nodes:
         assert get_node_group(n).nodes == ng_r_nodes
-    
+
     assert get_node_group(get_d).type == GroupType.EXCLUDED  # type: ignore
     assert get_node_group(out).type == GroupType.EXCLUDED  # type: ignore
+
 
 @pytest.mark.usefixtures('dummy_dist_env')
 def test_data_dependency():
@@ -172,6 +175,7 @@ def test_data_dependency():
     for n in ng3_nodes:
         assert get_node_group(n).nodes == ng3_nodes
 
+
 @pytest.mark.usefixtures('dummy_dist_env')
 def test_replica():
     class Model(esr.Module):
@@ -204,11 +208,11 @@ def test_replica():
 
     d, add, s1, add_s1, sum_1, exp, add_1, r1, mul, mul_1, setd, out = \
         graph.nodes
-    
+
     ng_map_add_nodes = OrderedSet([add])
     for n in ng_map_add_nodes:
         assert get_node_group(n).nodes == ng_map_add_nodes
-    
+
     ng_agg_nodes = OrderedSet([s1, add_s1, sum_1])
     for n in ng_agg_nodes:
         assert get_node_group(n).nodes == ng_agg_nodes
@@ -216,11 +220,11 @@ def test_replica():
     ng_replica_nodes = OrderedSet([exp])
     for n in ng_replica_nodes:
         assert get_node_group(n).nodes == ng_replica_nodes
-    
+
     ng_r_nodes = OrderedSet([add_1, r1])
     for n in ng_r_nodes:
         assert get_node_group(n).nodes == ng_r_nodes
-    
+
     ng_map_nodes = OrderedSet([mul, mul_1, setd])
     for n in ng_map_nodes:
         assert get_node_group(n).nodes == ng_map_nodes
@@ -243,15 +247,15 @@ def test_subgraph_node_metas():
             v3 = torch.add(v, 99)
             v4 = torch.add(v, 99)
 
-            c0 = torch.concat([v0,v1,v2,v3,v4], dim=1)
-            c1 = torch.concat([v1,v2,v3,v4], dim=1)
-            c2 = torch.concat([v2,v3,v4], dim=1)
+            c0 = torch.concat([v0, v1, v2, v3, v4], dim=1)
+            c1 = torch.concat([v1, v2, v3, v4], dim=1)
+            c2 = torch.concat([v2, v3, v4], dim=1)
             end_self = c2.fill_(345)
             c3 = v3.copy_(v3)  # reuse ViewSrc(v3)
             c4 = torch.concat([v4], dim=1)
 
-            d0 = torch.concat([v0,v1,v2,v3,v4], dim=1)
-            d1 = torch.concat([v1,v2,v3,v4], dim=1)
+            d0 = torch.concat([v0, v1, v2, v3, v4], dim=1)
+            d1 = torch.concat([v1, v2, v3, v4], dim=1)
             d2 = c1.copy_(c1)  # reuse ViewSrc(call_ker_c, 0)
             end_self = d2.fill_(345)
             d3 = c3.copy_(c3)  # reuse ViewSrc(v3), further indirectly from c3
@@ -262,9 +266,9 @@ def test_subgraph_node_metas():
             d3_b = d3.fill_(1)
 
             v[:, 1] = torch.concat([
-                c0,c1,c2,c3,c4,d0,d1,d2,d3,d4
+                c0, c1, c2, c3, c4, d0, d1, d2, d3, d4
             ], dim=1).sum(dim=1)
-    
+
     m = Model()
     m.easier_hint_name = 'ROOT'
     tracer = EasierTracer()

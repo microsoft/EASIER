@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Sequence
 
 from torch.fx.graph import Graph
 from torch.fx.node import Node
