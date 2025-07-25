@@ -458,11 +458,7 @@ class NodeMetaCopier(EasierInterpreter):
             raw_nodes_ending_in_ng = get_nodes_end_at(raw_n)
             ng_raw_ending_nodes.update(raw_nodes_ending_in_ng)
 
-        # outer_node_dict.keys() contains raw Nodes that are
-        # also ng.all_output_nodes().
-        ng_raw_ending_nodes.intersection_update(
-            self.raw2outer.keys()
-        )
+        ng_raw_ending_nodes.intersection_update(self.raw2outer.keys())
         set_nodes_end_at(
             self.current_node,
             list(map(self.raw2outer.__getitem__, ng_raw_ending_nodes))

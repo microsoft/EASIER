@@ -6,14 +6,20 @@ import torch
 
 import easier as esr
 from easier.core import passes
-from easier.core.jit import EasierTracer, _fully_load_data_backend_none
-from easier.core.passes.data_dependency_analysis import get_data_dependency_inputs
-from easier.core.passes.dataflow_fusion.dataflow_fusion import node_groups_to_graph_modules
-from easier.core.passes.dataflow_fusion.node_group import GroupType, NodeGroup, get_node_group, set_node_group
-from easier.core.passes.life_range_analysis import analyze_life_range, get_nodes_end_at
+from easier.core.jit import \
+    EasierTracer, _fully_load_data_backend_none
+from easier.core.passes.data_dependency_analysis import \
+    get_data_dependency_inputs
+from easier.core.passes.dataflow_fusion.dataflow_fusion import \
+    node_groups_to_graph_modules
+from easier.core.passes.dataflow_fusion.node_group import \
+    GroupType, NodeGroup, get_node_group, set_node_group
+from easier.core.passes.life_range_analysis import \
+    analyze_life_range, get_nodes_end_at
 from easier.core.passes.utils import FX, OrderedSet
 from easier.core.runtime.jit_engine.jit_engine import JitEngine as _orig_JE
-from easier.core.runtime.metadata import Role, ViewSrc, get_node_meta, RuntimeTensorMeta, get_node_view_src
+from easier.core.runtime.metadata import \
+    Role, ViewSrc, get_node_meta, RuntimeTensorMeta, get_node_view_src
 
 class JitEngine(_orig_JE):
     """
@@ -27,17 +33,19 @@ class JitEngine(_orig_JE):
         [self.module], [self.graph] = ms, gs
 
 @pytest.mark.usefixtures('dummy_dist_env')
-def test_excluded():
-    pass
-
-@pytest.mark.usefixtures('dummy_dist_env')
 def test_cycle():
     class Model(esr.Module):
         def __init__(self):
             super().__init__()
-            self.d = esr.Tensor(torch.rand((5)), mode='partition')
-            self.s1 = esr.Selector(torch.tensor([1, 2, 3, 4, 0], dtype=torch.int64))
-            self.r1 = esr.Reducer(torch.tensor([2, 2, 1, 0, 0], dtype=torch.int64), n=5)
+            self.d = esr.Tensor(
+                torch.rand((5)), mode='partition'
+            )
+            self.s1 = esr.Selector(
+                torch.tensor([1, 2, 3, 4, 0], dtype=torch.int64)
+            )
+            self.r1 = esr.Reducer(
+                torch.tensor([2, 2, 1, 0, 0], dtype=torch.int64), n=5
+            )
 
         def forward(self):
             add = self.d + self.d
@@ -49,6 +57,7 @@ def test_cycle():
             self.d[:] = mul_1
     
     m = Model()
+    m.easier_hint_name = 'ROOT'
     _fully_load_data_backend_none([m], 'cpu')
     graph = EasierTracer().trace(m)
     passes.analyze_life_range([m], [graph])
@@ -56,17 +65,17 @@ def test_cycle():
 
     get_d, add, s1, add_1, r1, mul, mul_1, setitem, out = graph.nodes
 
-    assert get_data_dependency_inputs(setitem) == [add]
+    assert get_data_dependency_inputs(setitem) == []
 
     assert get_node_group(add).nodes == OrderedSet([add])  # type: ignore
 
-    ng_map = NodeGroup(m, [mul, mul_1, setitem])
-    for n in ng_map.nodes:
-        assert get_node_group(n) == ng_map
+    ng_map_nodes = OrderedSet([mul, mul_1, setitem])
+    for n in ng_map_nodes:
+        assert get_node_group(n).nodes == ng_map_nodes
     
-    ng_sr = NodeGroup(m, [s1, add_1, r1])
-    for n in ng_sr.nodes:
-        assert get_node_group(n) == ng_sr
+    ng_sr_nodes = OrderedSet([s1, add_1, r1])
+    for n in ng_sr_nodes:
+        assert get_node_group(n).nodes == ng_sr_nodes
     
     assert get_node_group(get_d).type == GroupType.EXCLUDED  # type: ignore
     assert get_node_group(out).type == GroupType.EXCLUDED  # type: ignore
@@ -95,6 +104,7 @@ def test_inplace_reducer():
             self.d[:] = mul_1
 
     m = Model()
+    m.easier_hint_name = 'ROOT'
     _fully_load_data_backend_none([m], 'cpu')
     graph = EasierTracer().trace(m)
     passes.analyze_life_range([m], [graph])
@@ -102,20 +112,26 @@ def test_inplace_reducer():
 
     get_d, add, s1, add_1, r1a, r1b, mul, mul_1, setitem, out = graph.nodes
 
-    assert get_data_dependency_inputs(r1a) == [add]
+    assert get_data_dependency_inputs(r1a) == []
     assert get_data_dependency_inputs(r1b) == [r1a]
     assert get_data_dependency_inputs(mul_1) == [r1b]
     assert get_data_dependency_inputs(setitem) == [r1b]  # mul_1 already in DF
 
     assert get_node_group(add).nodes == OrderedSet([add])  # type: ignore
 
-    ng_map = NodeGroup(m, [mul, mul_1, setitem])
-    for n in ng_map.nodes:
-        assert get_node_group(n) == ng_map
+    ng_map_nodes = OrderedSet([mul, mul_1, setitem])
+    for n in ng_map_nodes:
+        assert get_node_group(n).nodes == ng_map_nodes
     
-    ng_sr = NodeGroup(m, [s1, add_1, r1a])
-    for n in ng_sr.nodes:
-        assert get_node_group(n) == ng_sr
+    ng_sr_nodes = OrderedSet([s1, add_1, r1a])
+    for n in ng_sr_nodes:
+        ng = get_node_group(n)
+        assert ng.nodes == ng_sr_nodes
+        assert add_1 in ng.all_output_nodes()
+
+    ng_r_nodes = OrderedSet([r1b])
+    for n in ng_r_nodes:
+        assert get_node_group(n).nodes == ng_r_nodes
     
     assert get_node_group(get_d).type == GroupType.EXCLUDED  # type: ignore
     assert get_node_group(out).type == GroupType.EXCLUDED  # type: ignore
@@ -135,9 +151,26 @@ def test_data_dependency():
             self.b[:] = mul
 
     m = Model()
-    tracer = EasierTracer()
-    graph = tracer.trace(m)
+    m.easier_hint_name = 'ROOT'
+    _fully_load_data_backend_none([m], 'cpu')
+    graph = EasierTracer().trace(m)
+    passes.analyze_life_range([m], [graph])
+    JitEngine(m, graph).forward()
 
+    a, b, mul, exp, seta, setb, out = graph.nodes
+
+    ng1_nodes = OrderedSet([mul, setb])
+    for n in ng1_nodes:
+        assert get_node_group(n).nodes == ng1_nodes
+
+    # If fusing exp and a[:], it deadlocks with ng1
+    ng2_nodes = OrderedSet([exp])
+    for n in ng2_nodes:
+        assert get_node_group(n).nodes == ng2_nodes
+
+    ng3_nodes = OrderedSet([seta])
+    for n in ng3_nodes:
+        assert get_node_group(n).nodes == ng3_nodes
 
 @pytest.mark.usefixtures('dummy_dist_env')
 def test_replica():
@@ -163,8 +196,34 @@ def test_replica():
             self.d[:] = mul_1
 
     m = Model()
-    tracer = EasierTracer()
-    graph = tracer.trace(m)
+    m.easier_hint_name = 'ROOT'
+    _fully_load_data_backend_none([m], 'cpu')
+    graph = EasierTracer().trace(m)
+    passes.analyze_life_range([m], [graph])
+    JitEngine(m, graph).forward()
+
+    d, add, s1, add_s1, sum_1, exp, add_1, r1, mul, mul_1, setd, out = \
+        graph.nodes
+    
+    ng_map_add_nodes = OrderedSet([add])
+    for n in ng_map_add_nodes:
+        assert get_node_group(n).nodes == ng_map_add_nodes
+    
+    ng_agg_nodes = OrderedSet([s1, add_s1, sum_1])
+    for n in ng_agg_nodes:
+        assert get_node_group(n).nodes == ng_agg_nodes
+
+    ng_replica_nodes = OrderedSet([exp])
+    for n in ng_replica_nodes:
+        assert get_node_group(n).nodes == ng_replica_nodes
+    
+    ng_r_nodes = OrderedSet([add_1, r1])
+    for n in ng_r_nodes:
+        assert get_node_group(n).nodes == ng_r_nodes
+    
+    ng_map_nodes = OrderedSet([mul, mul_1, setd])
+    for n in ng_map_nodes:
+        assert get_node_group(n).nodes == ng_map_nodes
 
 
 @pytest.mark.usefixtures('dummy_dist_env')
@@ -207,6 +266,7 @@ def test_subgraph_node_metas():
             ], dim=1).sum(dim=1)
     
     m = Model()
+    m.easier_hint_name = 'ROOT'
     tracer = EasierTracer()
     g = tracer.trace(m)
     _fully_load_data_backend_none([m], 'cpu')
