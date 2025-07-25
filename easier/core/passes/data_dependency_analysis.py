@@ -4,9 +4,10 @@
 import dataclasses
 import itertools
 import operator
-from typing import Dict, Iterable, List, Optional, Sequence, Union, cast
+from typing import Dict, Iterable, List, Optional, Sequence, TypeAlias, Union, cast
 
 from torch import nn
+import torch
 from torch.fx.graph import Graph
 from torch.fx.node import Node
 from easier.core.runtime.metadata import \
@@ -37,6 +38,14 @@ def get_data_dependency_users(node: Node) -> List[Node]:
 @dataclasses.dataclass(frozen=True, eq=True)
 class _DistEnvViewSrc:
     pass
+
+
+@dataclasses.dataclass(frozen=True, eq=True)
+class _ExternalTensorViewSrc:
+    tensor: torch.Tensor
+
+
+_TViewSrc: TypeAlias = Union[ViewSrc, _DistEnvViewSrc, _ExternalTensorViewSrc]
 
 
 class DataDependencyAnalyzer(EasierInterpreter[None]):
@@ -81,21 +90,27 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         # in dataflow, it will still be added to src2writer,
         # but may not be touched anymore, e.g. no more writers/readers torch
         # the same view source of `out=x`.
-        self.src2writer: Dict[
-            Union[ViewSrc, _DistEnvViewSrc],
-            Node
-        ] = {}
+        self.src2writer: Dict[_TViewSrc, Node] = {}
 
-        self.src2readers: Dict[
-            Union[ViewSrc, _DistEnvViewSrc],
-            OrderedSet[Node]
-        ] = {}
+        self.src2readers: Dict[_TViewSrc, OrderedSet[Node]] = {}
 
+        # Key esr.Tensors include:
+        # - esr.Tensor referenced by this esr.Module
+        # - esr.Tensor only referenced by nested esr.Module, reading/writing
+        #   those Tensors will form dependency between nested Module calls.
+        et2src: Dict[esr.Tensor, _TViewSrc] = {}
+
+        # Only includes esr.Tensors referenced by this Module.
+        nodesrc2et: Dict[ViewSrc, esr.Tensor] = {}
+
+        # Collect ViewSrc for esr.Tensors referenced by this Module first.
+        # For such Tensors, we prefer ViewSrc rather than _ExternalViewSrc.
+        #
+        # In case of get_attr appears later, we need to collect them first.
+        #
         # Even esr.Tensor can have aliases, they will have a unique ViewSrc
         # (in JitEngine ViewSrcTracker, we decide the ViewSrc by mem addr)
-        et2src: Dict[esr.Tensor, ViewSrc] = {}
-        src2et: Dict[ViewSrc, esr.Tensor] = {}
-        class _TensorViewSrcCollector(EasierInterpreter):
+        class _SelfTensorViewSrcCollector(EasierInterpreter):
             def if_get_attr(self, submod_path: str, attr_name: str, attr_val):
                 if is_node_skipped(self.current_node):
                     return
@@ -103,10 +118,10 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
                     etsrc = get_node_view_src(self.current_node)
                     assert isinstance(etsrc, ViewSrc)
                     et2src[attr_val] = etsrc
-                    src2et[etsrc] = attr_val
-        _TensorViewSrcCollector(modules, graphs).run()
+                    nodesrc2et[etsrc] = attr_val
+        _SelfTensorViewSrcCollector(modules, graphs).run()
         self.et2src = et2src
-        self.src2et = src2et
+        self.nodesrc2et = nodesrc2et
 
         # Create connectivity matrix for dataflow only
         self._node2id: Dict[Node, int] = {}
@@ -171,7 +186,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
 
         
 
-    def add_reader_dependency(self, arg_src: ViewSrc):
+    def add_reader_dependency(self, arg_src: _TViewSrc):
         """
         Add the current node as a reader to the memory at `arg_src`.
         """
@@ -189,10 +204,10 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         readers = self.src2readers.setdefault(arg_src, OrderedSet())
         readers.add(reader)
 
-        if arg_src in self.src2et:
-            self.read_tensors.add(self.src2et[arg_src])
+        if arg_src in self.nodesrc2et:
+            self.read_tensors.add(self.nodesrc2et[arg_src])
 
-    def add_writer_dependency(self, res_src: Union[ViewSrc, _DistEnvViewSrc]):
+    def add_writer_dependency(self, res_src: _TViewSrc):
         """
         Add the current node as a writer on the memory at `res_src`.
 
@@ -235,8 +250,8 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         self.src2writer[res_src] = writer
         self.src2readers[res_src] = OrderedSet()
 
-        if res_src in self.src2et:
-            self.write_tensors.add(self.src2et[res_src])
+        if res_src in self.nodesrc2et:
+            self.write_tensors.add(self.nodesrc2et[res_src])
 
     def for_each_node(self):
         # Some ops may take multiple input writable tensors, and the result
@@ -250,7 +265,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         if is_node_skipped(self.current_node):
             return
 
-        self.arg_srcs: List[ViewSrc] = collect_meta(
+        self.arg_srcs: List[_TViewSrc] = collect_meta(
             [
                 get_node_view_src(arg)
                 for arg in self.current_node.all_input_nodes
@@ -262,7 +277,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         # Handle more specific scenarios like nested esr.Module calls
         # Derived if_xxx handlers may override self.arg_srcs and self.srcs
         # to provide rule-based, specific and simpler decision on dependency.
-        self.res_srcs: Optional[List[Union[ViewSrc, _DistEnvViewSrc]]] = None
+        self.res_srcs: Optional[List[_TViewSrc]] = None
         super().for_each_node()
 
         for arg_src in self.arg_srcs:
@@ -415,19 +430,25 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             self.arg_srcs = []
             self.res_srcs = []
 
-            for et_read in nested_jit_engine.read_tensors:
-                nested_read_src = self.et2src.get(et_read, None)
-                if nested_read_src is not None:
-                    self.arg_srcs.append(nested_read_src)
+            for nested_et_read in nested_jit_engine.read_tensors:
+                # Add _ExternalViewSrc only if the Tensor is not referenced
+                # by this Module.
+                nested_read_src = self.et2src.setdefault(
+                    nested_et_read, _ExternalTensorViewSrc(nested_et_read)
+                )
+                self.arg_srcs.append(nested_read_src)
 
-                    self.read_tensors.add(et_read)
+                # Recursively tell outer Module/JitEngine
+                self.read_tensors.add(nested_et_read)
 
-            for et_write in nested_jit_engine.write_tensors:
-                nested_write_src = self.et2src.get(et_write, None)
-                if nested_write_src is not None:
-                    self.res_srcs.append(nested_write_src)
+            for nested_et_write in nested_jit_engine.write_tensors:
+                nested_write_src = self.et2src.setdefault(
+                    nested_et_write, _ExternalTensorViewSrc(nested_et_write)
+                )
+                self.res_srcs.append(nested_write_src)
 
-                    self.write_tensors.add(et_write)
+                # Recursively tell outer Module/JitEngine
+                self.write_tensors.add(nested_et_write)
             
             # Enforced order of communication
             if nested_jit_engine.called_comm_primitive:

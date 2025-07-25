@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 from typing import Dict, Iterable, List, Set, Union, cast
+from unittest.mock import patch
 import pytest
 import torch
 
@@ -194,19 +195,15 @@ def test_data_dependency_nested_call():
 
         def forward(self):
             a = self.v[:]
-            a[:] += 1
-            self.pure_inner[:] = 1
+            a[:] += self.pure_inner
     
 
     class Inner2(esr.Module):
         def __init__(self):
             super().__init__()
-            self.v = v
             self.pure_inner = pure_inner
 
         def forward(self):
-            a = self.v[:]
-            a[:] += 1
             self.pure_inner[:] = 1
 
 
@@ -227,7 +224,7 @@ def test_data_dependency_nested_call():
             super().__init__()
             self.v = v
             self.intmd = Intermediate()
-            self.inner2 = Inner()
+            self.inner2 = Inner2()
 
         def forward(self):
             v = self.v[:]
@@ -244,29 +241,30 @@ def test_data_dependency_nested_call():
 
     m = Outer()
     from easier.core.jit import compile
-    [jm] = compile([m], 'torch')  # type: ignore
+    with patch(f'{compile.__module__}.JitEngine', new=JitEngine):
+        [jm] = compile([m], 'torch')  # type: ignore
     jm.forward()
 
     intmd, inner, inner2 = m.intmd, m.intmd.inner, m.inner2
 
     je_inner = cast(JitEngine, inner.forward.__self__)
-    assert list(je_inner.read_tensors) == [v]
+    assert list(je_inner.read_tensors) == [v, pure_inner]
     assert list(je_inner.write_tensors) == [v]
     assert je_inner.called_comm_primitive == False
 
     je_intmd = cast(JitEngine, intmd.forward.__self__)
-    assert list(je_intmd.read_tensors) == [intmd.r, v]
+    assert list(je_intmd.read_tensors) == [intmd.r, v, pure_inner]
     assert list(je_intmd.write_tensors) == [intmd.r, v]
     assert je_intmd.called_comm_primitive == False
 
     je_outer = cast(JitEngine, m.forward.__self__)
-    assert list(je_outer.read_tensors) == [v, intmd.r2, intmd.r]
-    assert list(je_outer.write_tensors) == [v, intmd.r2, intmd.r]
+    assert list(je_outer.read_tensors) == [v, intmd.r2, intmd.r, pure_inner]
+    assert list(je_outer.write_tensors) == [v, intmd.r2, intmd.r, pure_inner]
     assert je_outer.called_comm_primitive == False
 
     je_inner2 = cast(JitEngine, inner2.forward.__self__)
-    assert list(je_inner2.read_tensors) == [v]
-    assert list(je_inner2.write_tensors) == [v]
+    assert list(je_inner2.read_tensors) == [pure_inner]
+    assert list(je_inner2.write_tensors) == [pure_inner]
     assert je_inner2.called_comm_primitive == False
 
     graph = cast(JitEngine, jm.forward.__self__).graph
@@ -274,24 +272,26 @@ def test_data_dependency_nested_call():
         v_view, add, set_v, \
         get_attr_r2,  add_r2_3, \
         call_intermediate, \
-        v_view2, mul, set_v_2, output \
+        v_view2, mul, set_v_2, call_inner2, output \
         = graph.nodes
     """
     get_attr = GET_ATTR["v"]
-    var_v = getitem(get_attr, :)
+    var_v = getitem(get_attr, :)  # R v
 
-    v_view = getitem(var_v, :)
-    add = add(v_view, 1)
-    set_v = setitem(var_v, :, add)
+    v_view = getitem(var_v, :)  # R v
+    add = add(v_view, 1)  # R v
+    set_v = setitem(var_v, :, add)  # W v
 
     get_attr_r2 = GET_ATTR["intmd.r2"]
-    add_r2_3 = get_attr_r2.add_(3)
+    add_r2_3 = get_attr_r2.add_(3)  # RW r2
 
-    call_inter = CALL_MODULE["intmd"]  # RW: intmd.r, v
+    call_inter = CALL_MODULE["intmd"]  # RW: intmd.r, v, R: pure_inner
 
-    v_view2 = getitem(var_v, :)
-    mul = mul(v_view, get_attr_r2)
-    set_v_2 = setitem(var_v, :, mul)
+    v_view2 = getitem(var_v, :)  # R v
+    mul = mul(v_view2, get_attr_r2)
+    set_v_2 = setitem(var_v, :, mul)  # W v
+
+    CALL_MODULE["call_inner2"]  # RW: pure_inner
     """
 
     assert _get_viewsrc_node(get_attr) == get_attr
@@ -305,13 +305,18 @@ def test_data_dependency_nested_call():
     assert _get_viewsrc_node(v_view2) == get_attr
     assert _get_viewsrc_node(mul) == mul
     assert _get_viewsrc_node(set_v_2) == get_attr
+    assert _get_viewsrc_node(call_inner2) == None
 
     _assert_deps({
-        set_v: [v_view],
         call_intermediate: [set_v],
+
+        # Still many dep edges from call_intmd to reads/writes on self.v,
+        # as we didn't prune dep edges using dep connectivity.
         v_view2: [call_intermediate],  # cuz intermediate() writes self.v
-        mul: [add_r2_3],
-        set_v_2: [v_view2]
+        mul: [add_r2_3, call_intermediate],
+        set_v_2: [call_intermediate],
+
+        call_inner2: [call_intermediate]
     }, graph.nodes)
 
 
@@ -353,7 +358,8 @@ def test_data_dependency_nested_communication():
 
     m = Outer()
     from easier.core.jit import compile
-    [jm] = compile([m], 'torch')  # type: ignore
+    with patch(f'{compile.__module__}.JitEngine', new=JitEngine):
+        [jm] = compile([m], 'torch')  # type: ignore
     jm.forward()
 
     intmd, inner = m.intmd, m.intmd.inner
@@ -370,7 +376,7 @@ def test_data_dependency_nested_communication():
 
     je_outer = cast(JitEngine, m.forward.__self__)
     assert list(je_outer.read_tensors) == [v, intmd.r]
-    assert list(je_outer.write_tensors) == [v, intmd.r]
+    assert list(je_outer.write_tensors) == [intmd.r, v]
     assert je_outer.called_comm_primitive == True
 
     graph = cast(JitEngine, jm.forward.__self__).graph
@@ -401,7 +407,7 @@ def test_data_dependency_nested_communication():
 
     """
     get_attr = GET_ATTR["v"]
-    var_v2 = getitem(get_attr, :, 1:2)  # RW v
+    var_v2 = getitem(get_attr, :, 1:2)  # R v
 
     dmax = esr.max(get_attr)  # R v
     allgather_max = all_gather_into_tensor(dmax)  # W distenv
@@ -419,11 +425,7 @@ def test_data_dependency_nested_communication():
     rsum = torch.sum(allgather_sum)
     """
     _assert_deps({
-        dmax: [getitem],
-        call_intmd: [
-            getitem,
-            allgather_max  # cuz comm
-        ],
+        call_intmd: [allgather_max],  # cuz comm
         add_: [getitem, dmax, call_intmd],
 
         dprod: [add_],
@@ -514,6 +516,6 @@ def test_multi_res_separated_dep_subgraphs():
     assert get_node_view_src(log_) == get_node_view_src(s) == ViewSrc(svd, 1)
 
     _assert_deps({
-        abs_: [u],
+        abs_: [svd, u],
         log_: [s2, sin],
     }, graph.nodes)
