@@ -259,7 +259,7 @@ def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
         collect_meta(meta, lambda tm: tm.role, sentinel=Role.REPLICATED)
     ) == 0
 
-    if is_node_skipped(node):
+    if is_node_skipped(root, node):
         return NodeType.EXCLUDED  # skip
 
     if node.op == FX.GET_ATTR:
@@ -268,7 +268,7 @@ def get_node_type(root: esr.Module, node: fx.Node) -> NodeType:
     if node.target in esr.easier_aggregators:
         # TODO will esr.norm(x, p=p) have its nodes[0] be a replicated `p`?
         aggegator_input = node.all_input_nodes[0]
-        if is_node_skipped(aggegator_input):
+        if is_node_skipped(root, aggegator_input):
             return NodeType.EXCLUDED
         else:
             return NodeType.AGGREGATOR

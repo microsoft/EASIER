@@ -15,7 +15,7 @@ from easier.core.passes.dataflow_fusion.dataflow_fusion import \
 from easier.core.passes.dataflow_fusion.node_group import \
     GroupType, NodeGroup, get_node_group, set_node_group
 from easier.core.passes.life_range_analysis import \
-    analyze_life_range, get_nodes_end_at
+    analyze_life_range
 from easier.core.passes.utils import FX, OrderedSet
 from easier.core.runtime.jit_engine.jit_engine import JitEngine as _orig_JE
 from easier.core.runtime.metadata import \
@@ -313,29 +313,11 @@ def test_subgraph_node_metas():
     assert call_kernel_d.op == FX.CALL_MODULE
     assert call_kernel_d.args == (v1, v2, v3, v4, kc1, kc3)
 
-    assert get_nodes_end_at(setitem) == [v, sum, setitem], \
-        'original life range data'
     assert get_node_meta(setitem) == RuntimeTensorMeta(
         Role.DISTRIBUTED, (5, 2), dtype=torch.float32
     ), 'original TensorMeta'
     assert get_node_view_src(setitem) == ViewSrc(v, None), \
         'original ViewSrc'
-
-    # life range
-    assert get_nodes_end_at(call_kernel_c) == []
-    assert get_nodes_end_at(kc1) == []
-    assert get_nodes_end_at(kc2) == []
-    assert get_nodes_end_at(kc3) == [call_kernel_c]
-    assert set(get_nodes_end_at(call_kernel_d)) == set([v1, v2, v3])
-    assert get_nodes_end_at(kd1) == []
-    assert get_nodes_end_at(kd2) == []
-    assert get_nodes_end_at(kd3) == [call_kernel_d]
-
-    assert get_nodes_end_at(d2_b) == [d2_b]
-    assert get_nodes_end_at(d3_b) == [d3_b]
-    assert set(get_nodes_end_at(concat5)) == set([
-        c0, kc1, kc2, kc3, c4, d0, kd1, kd2, kd3, d4
-    ])
 
     # TensorMeta
     d_8_f32 = RuntimeTensorMeta(Role.DISTRIBUTED, (5, 8), dtype=torch.float32)

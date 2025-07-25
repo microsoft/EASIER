@@ -44,7 +44,8 @@ class LifeRangeAnalyzer(EasierInterpreter):
                 self.node2offset[n] = i
 
     def for_each_node(self):
-        # If no previous for_each_node added LAST_USES, still add a [].
+        # If no previous for_each_node added on this Node (as a user),
+        # still add a [].
         self.current_node.meta.setdefault(KEY__NODES_END_HERE, [])
 
         if len(self.current_node.users) == 0:

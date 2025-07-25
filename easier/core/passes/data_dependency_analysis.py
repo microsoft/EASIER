@@ -113,7 +113,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         # (in JitEngine ViewSrcTracker, we decide the ViewSrc by mem addr)
         class _SelfTensorViewSrcCollector(EasierInterpreter):
             def if_get_attr(self, submod_path: str, attr_name: str, attr_val):
-                if is_node_skipped(self.current_node):
+                if is_node_skipped(self.current_module, self.current_node):
                     return
                 if isinstance(attr_val, esr.Tensor):
                     etsrc = get_node_view_src(self.current_node)
@@ -260,14 +260,14 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
         # TODO any FX-traceable torch ops violate this convention? Or any way
         # to detect if the violation happens?
         #
-        if is_node_skipped(self.current_node):
+        if is_node_skipped(self.current_module, self.current_node):
             return
 
         self.arg_srcs: List[_TViewSrc] = collect_meta(
             [
                 get_node_view_src(arg)
                 for arg in self.current_node.all_input_nodes
-                if not is_node_skipped(arg)
+                if not is_node_skipped(self.current_module, arg)
             ],
             leaf_type=ViewSrc
         )
@@ -383,7 +383,7 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             # e.g. svd() returns 3 memory blocks, subsequent dependency edges
             # must be calculated on individual mem, rather than all 3 blocks.
             arg0 = self.current_node.all_input_nodes[0]
-            assert not is_node_skipped(arg0)
+            assert not is_node_skipped(self.current_module, arg0)
             is_tuple_indexing = not isinstance(
                 get_node_meta(arg0), RuntimeTensorMeta
             )

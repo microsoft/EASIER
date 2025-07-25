@@ -18,8 +18,6 @@ from easier.core.passes.dataflow_fusion.debug import \
 from easier.core.passes.dataflow_fusion.fusion_rules import \
     GroupRule, NodeRule, FuseDecision
 import easier.core.passes.dataflow_fusion.fusion_rules as rules
-from easier.core.passes.life_range_analysis import \
-    get_nodes_end_at, set_nodes_end_at
 from easier.core.passes.utils import \
     FX, EasierInterpreter, SubmodNameAllocator, get_called_module, tree_map
 from easier.core.runtime.metadata import \
@@ -138,14 +136,6 @@ def topo_sort_node_groups(
     ngids = [ng.id for ng in ngs]
     assert len(set(ngids)) == len(ngids)
 
-    def _get_raw_graph_offset(rowid: int):
-        ng = ngs[rowid]
-        if len(ng.nodes) == 1:
-            n, = ng.nodes
-            return raw_node_ids[n]
-        else:
-            return 0
-
     ids_tensor = torch.tensor(ngids)
     active_ng_conn_mat = ng_conn_mat[ids_tensor][:, ids_tensor]
 
@@ -158,22 +148,9 @@ def topo_sort_node_groups(
             if rowid != colid:
                 dag.add_edge(rowid, colid)
 
-    # TODO currently we must use lexicographically topo sort
-    # (it firstly guarantees topo sort, and secondly recover the original
-    # Node order in the raw Graph).
-    # TODO passes.analyze_life_range seems to only work AOT, but not JIT.
-    #
-    # Because AOT life range analysis is strictly based execution order, and
-    # we didn't insert control edges for it.
-    # The subsequence is, if we merely do topo sort without recovering Node
-    # order, a Node/Tensor may be released too early, and it will break
-    # runtime stakcframe.
-    groups = [
-        ngs[rowid] for rowid in networkx.lexicographical_topological_sort(
-            dag, key=_get_raw_graph_offset
-        )
-    ]
-    # groups = [ngs[rowid] for rowid in networkx.topological_sort(dag)]
+    # TODO Alternative: networkx.lexicographical_topological_sort()
+    # which can also maintain the original Node order.
+    groups = [ngs[rowid] for rowid in networkx.topological_sort(dag)]
 
     # Since output NG has 0 IO-degrees, it's put in the middle.
     # Because of JitEngine, forward() won't exit early, but better to put
@@ -272,9 +249,9 @@ def node_groups_to_graph_modules(
             gm = fx.GraphModule(module, kernel_g)
             set_node_group(gm, ng)
 
-            # e.g. easier3_select_reduce
+            # e.g. easier3_select_reduce209
             gm_name = gm_name_allocator.alloc_name(
-                module, f"_{ng.type.name.lower()}"
+                module, f"_{ng.type.name.lower()}{ng.id}"
             )
             module.add_module(gm_name, gm)
 
@@ -331,17 +308,11 @@ class NodeMetaCopier(EasierInterpreter):
     Basically, the rules are:
 
     -   life_range_analysis.get_nodes_end_at()
-        -   Union { nodes_end_at(n) for n in ng.nodes  }
-
-            NOTE this only works if we *lexicographically topo sort*
-            NodeGroups, because AOT life range data strictly relies on
-            original execution order, and we didn't insert such control edges.
-
-            Alternative it's to re-run life range analysis.
-            This would be acceptable as it's only for GC and less related
-            to semantics.
-            TODO but AOT life_range_analysis does not work within JitEngine,
-            maybe jit_skipped must be handled?
+        -   Not copied.
+        -   life_range_analysis relies strictly on the original execution
+            order, and we didn't insert such control edges, so life range
+            won't be correctly preserved during toposort.
+            We have to rerun life_range_analysis after fusion.
 
     -   ViewSrc(node, index)
         -   If `node` is outside any NodeGroup, its ViewSrc remains unchanged
@@ -389,13 +360,6 @@ class NodeMetaCopier(EasierInterpreter):
 
         raw_cur_node = self.outer2raw[self.current_node]
 
-        # life range
-        outer_ends = list(map(
-            self.raw2outer.__getitem__,
-            get_nodes_end_at(raw_cur_node)
-        ))
-        set_nodes_end_at(self.current_node, outer_ends)
-
         # Only plain data types like shape/dtype
         set_node_meta(self.current_node, get_node_meta(raw_cur_node))
 
@@ -430,12 +394,6 @@ class NodeMetaCopier(EasierInterpreter):
         assert isinstance(kernel_out_idx, int)
         ng = get_node_group(submod)
 
-        # life range
-        if kernel_out_idx + 1 == len(ng.all_output_nodes()):
-            set_nodes_end_at(self.current_node, [call_kernel])
-        else:
-            set_nodes_end_at(self.current_node, [])
-
         # Since the CALL_MODULE has been handled, we directly pick
         # element TensorMeta and ViewSrc from it.
         set_node_meta(
@@ -457,18 +415,6 @@ class NodeMetaCopier(EasierInterpreter):
         ng = get_node_group(submod)
         assert self.current_node not in self.outer2raw, \
             'Kernel calls are not in the original `outer_node_dict`'
-
-        # life range
-        ng_raw_ending_nodes: Set[fx.Node] = set()
-        for raw_n in ng.nodes:
-            raw_nodes_ending_in_ng = get_nodes_end_at(raw_n)
-            ng_raw_ending_nodes.update(raw_nodes_ending_in_ng)
-
-        ng_raw_ending_nodes.intersection_update(self.raw2outer.keys())
-        set_nodes_end_at(
-            self.current_node,
-            list(map(self.raw2outer.__getitem__, ng_raw_ending_nodes))
-        )
 
         # concat-ed TensorMeta
         raw_outputs = list(ng.all_output_nodes())

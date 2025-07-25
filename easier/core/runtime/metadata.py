@@ -10,7 +10,9 @@ from typing_extensions import TypeAlias
 import torch
 from torch.fx.node import Node
 
-from easier.core.passes.utils import tree_map
+import easier.core.module as esr
+from easier.core.passes.utils import FX, get_called_module, tree_map
+from easier.core.runtime.modules import HaloExchanger
 from easier.core.utils import EasierJitException
 
 
@@ -236,8 +238,28 @@ def collect_meta(  # type: ignore
     return ys
 
 
-def is_node_skipped(node: Node):
+def is_node_skipped(root: esr.Module, node: Node):
+    """
+    This method decides if the Node can be skipped:
+    -   HaloExchanger is always evaluated;
+    -   Inspect the Node meta, if it is DIST and zero-length, skip it.
+    """
+    if node.op == FX.CALL_MODULE:
+        submod = get_called_module(root, node)
+        if isinstance(submod, HaloExchanger):
+            return False
+
     meta = get_node_meta(node)
-    if isinstance(meta, RuntimeTensorMeta):
-        return meta.role == Role.DISTRIBUTED and meta.shape[0] == 0
+
+    def _get_dist_bs(x: RuntimeTensorMeta):
+        if x.role == Role.DISTRIBUTED:
+            return x.shape[0]
+        else:
+            return None
+    dist_sizes = set(collect_meta(meta, _get_dist_bs, sentinel=None))
+    if len(dist_sizes) == 1:
+        dist_size = dist_sizes.pop()
+        if dist_size == 0:
+            return True
+
     return False

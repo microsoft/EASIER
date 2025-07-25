@@ -23,7 +23,7 @@ from easier.core.runtime.metadata import \
     RuntimeTensorMeta, StructuredTensorMeta, Role, ViewSrc, \
     get_node_meta, set_node_meta, get_runtime_metadata_from_scalar, \
     StructuredViewSrc, set_node_view_src, get_node_view_src, \
-    IndexedAddr, StructuredIndexedAddr, collect_meta
+    IndexedAddr, StructuredIndexedAddr, collect_meta, is_node_skipped
 from easier.core.runtime.jit_engine.handlers import \
     NodeHandlerBase, PreprocessDecision
 from easier.core.runtime.jit_engine.values import \
@@ -605,25 +605,10 @@ class SkipZeroLengthNonHalo(NodeHandlerBase):
     def preprocess(
         self, current_node: Node, args, kwargs
     ) -> PreprocessDecision:
-        if current_node.op == FX.CALL_MODULE:
-            submod = get_called_module(self.current_module, current_node)
-            if isinstance(submod, HaloExchanger):
-                return PreprocessDecision.CONTINUE
-
-        meta = get_node_meta(current_node)
-
-        def _get_dist_bs(x: RuntimeTensorMeta):
-            if x.role == Role.DISTRIBUTED:
-                return x.shape[0]
-            else:
-                return None
-        dist_sizes = set(collect_meta(meta, _get_dist_bs, sentinel=None))
-        if len(dist_sizes) == 1:
-            dist_size = dist_sizes.pop()
-            if dist_size == 0:
-                return PreprocessDecision.SKIP_EVAL
-
-        return PreprocessDecision.CONTINUE
+        if is_node_skipped(self.current_module, current_node):
+            return PreprocessDecision.SKIP_EVAL
+        else:
+            return PreprocessDecision.CONTINUE
 
 
 class MetadataPropagation(NodeHandlerBase):
@@ -1231,11 +1216,13 @@ class JitEngine:
     def compile_after_first_run(self):
         ms, gs = [self.module], [self.graph]
 
-        # passes.analyze_data_dpendnecy() must be run after the 1st run,
+        # passes.analyze_data_dependency() must be run after the 1st run,
         # as it generates info of nested esr.Module calls for outer JIT runs.
         ms, gs = passes.analyze_data_dependency(ms, gs)
 
         ms, gs = passes.fuse_dataflow(ms, gs)
+        ms, gs = passes.analyze_life_range(ms, gs)
+
         # ms, gs = passes.codegen(ms, gs)
 
         [self.module], [self.graph] = ms, gs
