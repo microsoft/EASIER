@@ -7,6 +7,7 @@ from torch import fx
 
 from easier.core.passes.dataflow_fusion.node_group import \
     GroupType, NodeGroup, NodeType, get_node_group, get_node_type
+from easier.core.passes.utils import normalize_reducer_call_into_args
 
 
 class FuseDecision(Enum):
@@ -47,14 +48,14 @@ class GroupingEndsAfterAggregator(NodeRule):
 
 """
 The scheduling for hardware threads of Reducer are generally inconsistent
-with the scheduling of Mapped ops on Reducer input or output tensor.
+with the scheduling of Mapped ops on Reducer output tensors.
 
 Reducer outputs include:
 -   Reducer's dataflow users
     -   rejected by GroupingEndsAfterReducer
 
 -   Reducer's in-place out: `forward(input, out=self.x)`
-    -   `out=` target must be `self.x`, and it's an EXCLUDED group.
+    -   rejected by GroupingEndsAtReducerOut
 """
 
 
@@ -71,6 +72,21 @@ class GroupingEndsAfterReducer(NodeRule):
             return FuseDecision.REJECT
         else:
             return FuseDecision.PASS
+
+
+class GroupingEndsAtReducerOut(NodeRule):
+    def check(self, arg: fx.Node, user: fx.Node) -> FuseDecision:
+        user_ng = get_node_group(user)
+        assert user_ng is not None
+
+        if get_node_type(user_ng.root, user) == NodeType.REDUCE:
+            r_in, r_out = normalize_reducer_call_into_args(
+                *user.args, **user.kwargs
+            )
+            if arg is r_out:
+                return FuseDecision.REJECT
+
+        return FuseDecision.PASS
 
 
 class GroupRule(ABC):

@@ -164,7 +164,7 @@ def test_cycle():
 
 
 @pytest.mark.usefixtures('dummy_dist_env')
-def test_inplace_reducer():
+def test_inplace_reducer_self_attr():
     class Model(esr.Module):
         def __init__(self):
             super().__init__()
@@ -201,23 +201,101 @@ def test_inplace_reducer():
         assert get_data_dependency_inputs(r1a) == []
         assert get_data_dependency_inputs(r1b) == [r1a]
         assert get_data_dependency_inputs(mul_1) == [r1b]
-        assert get_data_dependency_inputs(
-            setitem) == [r1b]  # mul_1 already in DF
+        assert get_data_dependency_inputs(setitem) == [
+            r1b  # mul_1 already in DF
+        ]
 
-        assert get_node_group(add).nodes == OrderedSet([add])  # type: ignore
+        assert get_node_group(add).nodes == OrderedSet([add])
 
         ng_sr_nodes = OrderedSet([s1, add_1, r1a, r1b, mul, mul_1, setitem])
         for n in ng_sr_nodes:
             ng = get_node_group(n)
             assert ng.nodes == ng_sr_nodes
 
-        assert get_node_group(get_d).type == GroupType.EXCLUDED  # type: ignore
-        assert get_node_group(out).type == GroupType.EXCLUDED  # type: ignore
+        assert get_node_group(get_d).type == GroupType.EXCLUDED
+        assert get_node_group(out).type == GroupType.EXCLUDED
     _raw_scope()
 
     get_d, add, ker_sr, out = je.graph.nodes
     assert ker_sr.args == (add, get_d)
     assert len(ker_sr.users) == 0
+
+    assert get_node_meta(add) == RuntimeTensorMeta(
+        Role.DISTRIBUTED, (5,), torch.float64
+    ), 'original TensorMeta'
+    assert get_node_view_src(add) == ViewSrc(add, None), \
+        'original ViewSrc'
+
+    # TensorMeta
+    assert get_node_meta(ker_sr) == []
+
+    # ViewSrc
+    assert get_node_view_src(ker_sr) == []
+
+
+@pytest.mark.usefixtures('dummy_dist_env')
+def test_inplace_reducer_intermediate_variable():
+    class Model(esr.Module):
+        def __init__(self):
+            super().__init__()
+
+            self.d = esr.Tensor(
+                torch.rand((5), dtype=torch.float64), mode='partition'
+            )
+            self.s1 = esr.Selector(
+                torch.tensor([1, 2, 3, 4, 0], dtype=torch.int64))
+            self.r1 = esr.Reducer(
+                torch.tensor([2, 2, 1, 0, 0], dtype=torch.int64), n=5)
+
+        def forward(self):
+            add = self.d + self.d
+            exp = torch.exp(self.d)
+
+            s1 = self.s1(add)
+            add_1 = s1 + add
+            self.r1(add_1, out=exp)
+            self.r1(add_1, out=exp)
+            mul = add * exp
+            self.d[:] = mul
+
+    m = Model()
+    m.easier_hint_name = 'ROOT'
+    _fully_load_data_backend_none([m], 'cpu')
+    graph = EasierTracer().trace(m)
+    passes.analyze_life_range([m], [graph])
+    je = JitEngine(m, graph)
+    je.forward()
+
+    def _raw_scope():
+        get_d, add, exp, s1, add_1, r1a, r1b, mul, setitem, out = graph.nodes
+
+        assert get_data_dependency_inputs(r1a) == []
+        assert get_data_dependency_inputs(r1b) == [r1a]
+        assert get_data_dependency_inputs(mul) == [r1b]
+        assert get_data_dependency_inputs(setitem) == []  # already in DF
+
+        assert get_node_group(add).nodes == OrderedSet([add])
+        assert get_node_group(exp).nodes == OrderedSet([exp])
+
+        ng_sr_nodes = OrderedSet([s1, add_1, r1a, r1b])
+        for n in ng_sr_nodes:
+            ng = get_node_group(n)
+            assert ng.nodes == ng_sr_nodes
+
+        ng_map_nodes = OrderedSet([mul, setitem])
+        for n in ng_map_nodes:
+            ng = get_node_group(n)
+            assert ng.nodes == ng_map_nodes
+
+        assert get_node_group(get_d).type == GroupType.EXCLUDED
+        assert get_node_group(out).type == GroupType.EXCLUDED
+    _raw_scope()
+
+    get_d, add, exp, ker_sr, ker_map, out = je.graph.nodes
+    assert ker_sr.args == (add, exp)
+    assert len(ker_sr.users) == 0
+    assert ker_map.args == (add, exp, get_d)
+    assert len(ker_map.users) == 0
 
     assert get_node_meta(add) == RuntimeTensorMeta(
         Role.DISTRIBUTED, (5,), torch.float64
@@ -275,7 +353,6 @@ def test_data_dependency():
             assert get_node_group(n).nodes == ng3_nodes
     _raw_scope()
 
-    print(je.graph)
     a, b, exp, ker1, seta, out = je.graph.nodes
     assert a.target == 'a'
     assert exp.target == torch.exp

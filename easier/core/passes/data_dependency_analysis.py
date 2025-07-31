@@ -518,10 +518,7 @@ class TensorViewUsageChecker(EasierInterpreter):
 
     -   Inplace ops
         (e.g. operator.setitem, Reducer, torch.add_, Tensor.fill_):
-
-        -   If they have users, the users must be clone() too;
-        -   The inplace target must be in the form of
-            direct GET_ATTR like `self.x`.
+        If they have users, the users must be clone() too.
     """
 
     def __init__(self, modules: Sequence[esr.Module], graphs: Sequence[Graph]):
@@ -556,7 +553,7 @@ class TensorViewUsageChecker(EasierInterpreter):
             if (
                 user.op == FX.CALL_FUNCTION and user.target is torch.clone
             ) or (
-                user.op == FX.CALL_METHOD and user.target is 'clone'
+                user.op == FX.CALL_METHOD and user.target == 'clone'
             ):
                 return
 
@@ -567,31 +564,6 @@ class TensorViewUsageChecker(EasierInterpreter):
             " returns a view of an input, this operation must be followed"
             " by exactly one `Tensor.clone()` call"
         )
-
-    def _current_is_inplace_op(self):
-        """
-        Decide if current_node is an operator that may inplace write
-        using simple rules of PyTorch operator naming convention.
-        (it MAY write, but it may not really write at this call)
-        """
-        node = self.current_node
-        if node.op == FX.CALL_FUNCTION:
-            if node.target is operator.setitem:
-                return True
-            if node.target.__name__.endswith('_'):  # type: ignore
-                return True
-
-        if node.op == FX.CALL_METHOD:
-            if cast(str, node.target).endswith('_'):
-                return True
-
-        if node.op == FX.CALL_MODULE:
-            if isinstance(
-                get_called_module(self.current_module, node), esr.Reducer
-            ):
-                return True
-
-        return False
 
     def for_each_node(self):
         if is_node_skipped(self.current_module, self.current_node):
@@ -628,36 +600,6 @@ class TensorViewUsageChecker(EasierInterpreter):
 
         else:
             self._check_user_is_clone(self.current_node, args_viewsrcs)
-
-        #
-        # Check if current_node inplace writes any input ViewSrc.
-        #
-        # If there is such a ViewSrc, check if the ViewSrc is a GET_ATTR Node.
-        # Result ViewSrc of the current Node
-        if self._current_is_inplace_op():
-            # The Node is like `torch.xxx_`.
-            # This check filters out runtime detection of unknown view ops.
-            # NOTE the inplace target is not always `inputs[0]`.
-            this_res_viewsrcs: List[ViewSrc] = collect_meta(
-                get_node_view_src(self.current_node), leaf_type=ViewSrc
-            )
-            this_inplace_viewsrcs: Set[ViewSrc] = \
-                set(this_res_viewsrcs).intersection(args_viewsrcs)
-            # Actually at most one inplace ViewSrc.
-            for this_inplace_viewsrc in this_inplace_viewsrcs:
-                # Must be in form of ViewSrc(get_attr, None)
-                #
-                # Views after get_attr will be used only by clone(),
-                # so ViewSrc(get_attr, None) is of the get_attr Node itself.
-                if this_inplace_viewsrc.index is None:
-                    if this_inplace_viewsrc.node.op == FX.GET_ATTR:
-                        continue
-                raise EasierJitException(
-                    f"The operation '{self.current_node.format_node()}' in"
-                    f" '{self.current_module.easier_hint_name}'"
-                    " inplace writes to an input, and that input is a variable"
-                    " in the form of `self.x`"
-                )
 
 
 def analyze_data_dependency(modules: List[esr.Module], graphs: List[Graph]):

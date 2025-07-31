@@ -41,6 +41,7 @@ class NodeGrouper(EasierInterpreter):
         self.node_rules: List[NodeRule] = [
             rules.GroupingEndsBeforeSelector(),
             rules.GroupingEndsAfterReducer(),
+            rules.GroupingEndsAtReducerOut(),
             rules.GroupingEndsAfterAggregator(),
         ]
 
