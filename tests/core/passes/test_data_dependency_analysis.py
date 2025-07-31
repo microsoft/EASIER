@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import operator
 from typing import Dict, Iterable, List, Set, Union, cast
 from unittest.mock import patch
 import pytest
@@ -83,6 +84,7 @@ def test_data_dependency__none():
             d = esr.sum(c)
 
     m = M()
+    m.easier_hint_name = 'M'
     _fully_load_data_backend_none([m], 'cpu')
     graph = EasierTracer().trace(m)
     passes.analyze_life_range([m], [graph])
@@ -106,44 +108,46 @@ def test_data_dependency__two_path_inplace():
             self.v22 = Tensor(torch.zeros([22, 3]), mode='partition')
 
         def forward(self):
-            view22 = self.v22[:]
+            view22 = self.v22[:].clone()
             self.r55_22(self.v55, out=self.v22)
             a22 = view22 + 2
             self.v22[:] = 1
 
-            aview22 = a22[:]
-            self.r55_22(self.v55, out=a22)
+            aview22 = a22[:].clone()
+            self.r55_22(self.v55, out=self.v22)
             self.v22.add_(aview22)
 
             self.v22.sub_(view22)
 
     m = M()
+    m.easier_hint_name = 'M'
     from easier.core.jit import _fully_load_data_backend_none
     _fully_load_data_backend_none([m], 'cpu')
     graph = EasierTracer().trace(m)
     passes.analyze_life_range([m], [graph])
     JitEngine(m, graph).forward()
 
-    v22, view22, v55, r55_22_v22, a22_add, set1, \
-        aview22, r55_22_a22, add_, sub_, output = graph.nodes
+    v22, view22, clone22, v55, r55_1, a22_add, set1, \
+        aview22, clonea22, r55_2, add_, sub_, output = graph.nodes
 
     assert _get_viewsrc_node(v22) == v22
     assert _get_viewsrc_node(view22) == v22
+    assert _get_viewsrc_node(clone22) == clone22
     assert _get_viewsrc_node(v55) == v55
-    assert _get_viewsrc_node(r55_22_v22) == v22
+    assert _get_viewsrc_node(r55_1) == v22
     assert _get_viewsrc_node(a22_add) == a22_add
     assert _get_viewsrc_node(set1) == v22
     assert _get_viewsrc_node(aview22) == a22_add
-    assert _get_viewsrc_node(r55_22_a22) == a22_add
+    assert _get_viewsrc_node(clonea22) == clonea22
+    assert _get_viewsrc_node(r55_2) == v22
     assert _get_viewsrc_node(add_) == v22
     assert _get_viewsrc_node(sub_) == v22
 
     _assert_deps({
-        r55_22_v22: [view22],
-        a22_add: [r55_22_v22],
-        set1: [r55_22_v22, a22_add],
-        r55_22_a22: [aview22],
-        add_: [set1, r55_22_a22],
+        r55_1: [view22, clone22],
+        set1: [r55_1],
+        r55_2: [set1],
+        add_: [r55_2],
         sub_: [add_]
     }, graph.nodes)
 
@@ -156,25 +160,34 @@ def test_data_dependency__uncommon_data_type_str():
             self.v = Tensor(torch.zeros([55, 3]), mode='partition')
 
         def forward(self):
-            a = self.v[:]
-            b = torch.einsum('ab->ab', a)
-            c = b[:]
+            a = self.v[:].clone()
+            b = torch.einsum('ab->ab', a).clone()
+            c = b[:].clone()
             d = c + 2
             e = d[:]
 
     m = M()
+    m.easier_hint_name = 'M'
     from easier.core.jit import _fully_load_data_backend_none
     _fully_load_data_backend_none([m], 'cpu')
     graph = EasierTracer().trace(m)
     passes.analyze_life_range([m], [graph])
     JitEngine(m, graph).forward()
 
-    v, a, b, c, d, e, output = graph.nodes
+    v, slice1, a, einsum, b, slice2, c, \
+        d, e, output = graph.nodes
+
+    assert slice1.target == operator.getitem
+    assert einsum.target == torch.einsum
+    assert slice2.target == operator.getitem
 
     assert _get_viewsrc_node(v) == v
-    assert _get_viewsrc_node(a) == v
-    assert _get_viewsrc_node(b) == v
-    assert _get_viewsrc_node(c) == v
+    assert _get_viewsrc_node(slice1) == v
+    assert _get_viewsrc_node(a) == a
+    assert _get_viewsrc_node(einsum) == a
+    assert _get_viewsrc_node(b) == b
+    assert _get_viewsrc_node(slice2) == b
+    assert _get_viewsrc_node(c) == c
     assert _get_viewsrc_node(d) == d
     assert _get_viewsrc_node(e) == d
 
@@ -195,8 +208,7 @@ def test_data_dependency_nested_call():
             self.pure_inner = pure_inner
 
         def forward(self):
-            a = self.v[:]
-            a[:] += self.pure_inner
+            self.v.add_(self.pure_inner)
 
     class Inner2(esr.Module):
         def __init__(self):
@@ -225,12 +237,11 @@ def test_data_dependency_nested_call():
             self.inner2 = Inner2()
 
         def forward(self):
-            v = self.v[:]
-            v[:] += 1
+            self.v.add_(1)
             r2 = self.intmd.r2
             r2.add_(3)
             self.intmd()
-            v[:] *= r2
+            self.v.mul_(r2)
 
             # both inner1 and inner2 write pure_inner, even this Tensor
             # is not referenced in Outer, there must be a dep edge between
@@ -266,53 +277,39 @@ def test_data_dependency_nested_call():
     assert je_inner2.called_comm_primitive == False
 
     graph = cast(JitEngine, jm.forward.__self__).graph
-    get_attr, var_v, \
-        v_view, add, set_v, \
-        get_attr_r2,  add_r2_3, \
+    get_attr_v, vadd_, \
+        get_attr_r2,  r2add_, \
         call_intermediate, \
-        v_view2, mul, set_v_2, call_inner2, output \
+        mul_, call_inner2, output \
         = graph.nodes
     """
     get_attr = GET_ATTR["v"]
-    var_v = getitem(get_attr, :)  # R v
-
-    v_view = getitem(var_v, :)  # R v
-    add = add(v_view, 1)  # R v
-    set_v = setitem(var_v, :, add)  # W v
+    vadd_ = get_attr.add_(1)  # RW v
 
     get_attr_r2 = GET_ATTR["intmd.r2"]
-    add_r2_3 = get_attr_r2.add_(3)  # RW r2
+    r2add_ = get_attr_r2.add_(3)  # RW r2
 
-    call_inter = CALL_MODULE["intmd"]  # RW: intmd.r, v, R: pure_inner
+    CALL_MODULE["intmd"]  # RW intmd.r, RW v, R pure_inner
 
-    v_view2 = getitem(var_v, :)  # R v
-    mul = mul(v_view2, get_attr_r2)
-    set_v_2 = setitem(var_v, :, mul)  # W v
+    mul_ = get_attr.mul_(get_attr_r2)  # RW v R r2
 
     CALL_MODULE["call_inner2"]  # RW: pure_inner
     """
 
-    assert _get_viewsrc_node(get_attr) == get_attr
-    assert _get_viewsrc_node(var_v) == get_attr
-    assert _get_viewsrc_node(v_view) == get_attr
-    assert _get_viewsrc_node(add) == add  # view=a[:]; add=view+1; set(a,add)
-    assert _get_viewsrc_node(set_v) == get_attr
+    assert _get_viewsrc_node(get_attr_v) == get_attr_v
+    assert _get_viewsrc_node(vadd_) == get_attr_v
     assert _get_viewsrc_node(get_attr_r2) == get_attr_r2
-    assert _get_viewsrc_node(add_r2_3) == get_attr_r2
+    assert _get_viewsrc_node(r2add_) == get_attr_r2
     assert _get_viewsrc_node(call_intermediate) == None
-    assert _get_viewsrc_node(v_view2) == get_attr
-    assert _get_viewsrc_node(mul) == mul
-    assert _get_viewsrc_node(set_v_2) == get_attr
+    assert _get_viewsrc_node(mul_) == get_attr_v
     assert _get_viewsrc_node(call_inner2) == None
 
     _assert_deps({
-        call_intermediate: [set_v],
+        call_intermediate: [vadd_],
 
         # Still many dep edges from call_intmd to reads/writes on self.v,
         # as we didn't prune dep edges using dep connectivity.
-        v_view2: [call_intermediate],  # cuz intermediate() writes self.v
-        mul: [add_r2_3, call_intermediate],
-        set_v_2: [call_intermediate],
+        mul_: [r2add_, call_intermediate],
 
         call_inner2: [call_intermediate]
     }, graph.nodes)
@@ -347,7 +344,6 @@ def test_data_dependency_nested_communication():
             self.intmd = Intermediate()
 
         def forward(self):
-            v2 = self.v[:, 1:2]
             esr.max(self.v)
             self.intmd()
             self.v.add_(9)
@@ -378,7 +374,7 @@ def test_data_dependency_nested_communication():
     assert je_outer.called_comm_primitive == True
 
     graph = cast(JitEngine, jm.forward.__self__).graph
-    get_attr, getitem, \
+    get_attr, \
         dmax, allgather_max, rmax, \
         call_intmd, add_, \
         dprod, allgather_prod, rprod, \
@@ -386,7 +382,6 @@ def test_data_dependency_nested_communication():
         out = graph.nodes
 
     assert _get_viewsrc_node(get_attr) == get_attr
-    assert _get_viewsrc_node(getitem) == get_attr
 
     assert _get_viewsrc_node(dmax) == dmax
     assert _get_viewsrc_node(allgather_max) == allgather_max
@@ -405,7 +400,6 @@ def test_data_dependency_nested_communication():
 
     """
     get_attr = GET_ATTR["v"]
-    var_v2 = getitem(get_attr, :, 1:2)  # R v
 
     dmax = esr.max(get_attr)  # R v
     allgather_max = all_gather_into_tensor(dmax)  # W distenv
@@ -424,7 +418,7 @@ def test_data_dependency_nested_communication():
     """
     _assert_deps({
         call_intmd: [allgather_max],  # cuz comm
-        add_: [getitem, dmax, call_intmd],
+        add_: [dmax, call_intmd],
 
         dprod: [add_],
         allgather_prod: [call_intmd],  # cuz comm
@@ -448,15 +442,14 @@ def test_multi_res_separated_dep_subgraphs():
             self.x = Tensor(torch.zeros([11, 8, 3, 4]), mode='partition')
 
         def forward(self):
-            neg = torch.neg(self.x)
+            x = self.x
+            u, s, v = torch.svd(x)  # u is x
 
-            u, s, v = torch.svd(neg)
+            torch.abs_(self.x)  # connected only with u
 
-            torch.abs_(neg)  # connected only with u
-
-            s2 = s[:, 3]
-            sin = torch.sin(s2)
-            torch.log_(s)
+            u2 = u.clone()  # e.g., clone() at this line read abs_ result
+            s2 = s - 2
+            v2 = v / 2
 
     called_watcher = []
 
@@ -484,6 +477,7 @@ def test_multi_res_separated_dep_subgraphs():
             return handlers
 
     m = M()
+    m.easier_hint_name = 'M'
     graph = EasierTracer().trace(m)
     passes.analyze_life_range([m], [graph])
 
@@ -493,27 +487,22 @@ def test_multi_res_separated_dep_subgraphs():
 
     assert called_watcher == [1]
 
-    attr_x, neg, svd, u, s, v, abs_, s2, sin, log_, out = graph.nodes
+    attr_x, svd, u, s, v, abs_, clone_u, sub, div, out = graph.nodes
 
     assert _get_viewsrc_node(attr_x) == attr_x
-    assert _get_viewsrc_node(neg) == neg
     assert list(get_node_view_src(svd)) == [  # type: ignore
-        ViewSrc(neg, None),
+        ViewSrc(attr_x, None),
         ViewSrc(svd, 1),
         ViewSrc(svd, 2),
     ]
-    assert _get_viewsrc_node(u) == neg
+    assert _get_viewsrc_node(clone_u) == clone_u
 
     assert get_node_view_src(s) == ViewSrc(svd, 1)
     assert get_node_view_src(v) == ViewSrc(svd, 2)
 
-    assert _get_viewsrc_node(abs_) == neg
-
-    assert get_node_view_src(s2) == get_node_view_src(s) == ViewSrc(svd, 1)
-    assert _get_viewsrc_node(sin) == sin
-    assert get_node_view_src(log_) == get_node_view_src(s) == ViewSrc(svd, 1)
+    assert _get_viewsrc_node(abs_) == attr_x
 
     _assert_deps({
-        abs_: [svd, u],
-        log_: [s2, sin],
+        abs_: [svd, u],  # u(getitem) is regarded as read svd[0]
+        clone_u: [abs_],
     }, graph.nodes)

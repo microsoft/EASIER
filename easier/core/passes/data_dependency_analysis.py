@@ -5,7 +5,7 @@ import dataclasses
 import itertools
 import operator
 from typing import \
-    Dict, Iterable, List, Optional, Sequence, TypeAlias, Union, cast
+    Dict, Iterable, List, Optional, Sequence, Set, TypeAlias, Union, cast
 
 from torch import nn
 import torch
@@ -18,8 +18,9 @@ from easier.core.runtime.metadata import \
 import easier.core.module as esr
 
 from easier.core.passes.utils import \
-    EasierInterpreter, OrderedSet, get_dag_connectivity_matrix
+    FX, EasierInterpreter, OrderedSet, get_called_module, get_dag_connectivity_matrix
 from easier.core.runtime.modules import HaloExchanger, all_gather_into_tensor
+from easier.core.utils import EasierJitException
 
 
 KEY__DATA_DEPENDENCY_INPUTS = 'easier_dataDependency_inputs'
@@ -468,6 +469,197 @@ class DataDependencyAnalyzer(EasierInterpreter[None]):
             self.called_comm_primitive = True
 
 
+class TensorViewUsageChecker(EasierInterpreter):
+    """
+    NOTE Unless specifically mentioned, when talking about "views" we are
+    talking about **multiple** Tensor instances pointing to the same memory.
+    Since even a single Tensor is a view.
+
+    Based on standard PyTorch programming model,
+    EASIER programming model additionally requires, if an operation returns
+    a view of its input, that operation must be followed by exactly a call
+    to the function `torch.clone()` or the method `Tensor.clone()`.
+
+    TODO maybe `Tensor.to(copy=True)` or whatever function that essentially
+    clones.
+
+    This requirement eliminates the cases that:
+    -   EASIER programs deal with non-contiguous memory.
+
+        Such memory and access pattern which makes it inefficient
+        for CPU cache line, CUDA coalescing memory access etc.
+
+    -   A view Tensor gets accidentally created and written.
+
+        EASIER programs allow in-place Tensor modification, which is less
+        common in PyTorch workloads.
+        If a view gets accidentally written, it will casue big trouble
+        both for users to realize it or for EASIER devs to
+        systematically enhance the user experience.
+
+    -   Following passes need to deal with views.
+
+        By enforcing `.clone()`, every atomic unit of operations creates
+        a new memory.
+
+    This subpass covers:
+
+    -   User-program view ops
+        (e.g. operator.getitem, torch.view, torch.reshape)
+        must be followed by torch/Tensor.clone;
+
+        Including Nodes of both DIST and REPLICA roles.
+
+    -   EASIER-inserted Nodes may return a view, e.g. HaloExchanger,
+        as long as it has only one user and the user isn't a view,
+        we don't check it.
+
+        Also, it won't be fused.
+
+    -   Inplace ops
+        (e.g. operator.setitem, Reducer, torch.add_, Tensor.fill_):
+
+        -   If they have users, the users must be clone() too;
+        -   The inplace target must be in the form of
+            direct GET_ATTR like `self.x`.
+    """
+
+    def __init__(self, modules: Sequence[esr.Module], graphs: Sequence[Graph]):
+        super().__init__(modules, graphs)
+        self.visited = set()
+
+    def _check_user_is_clone(
+        self, alloctor_or_view: Node, input_viewsrcs: List[ViewSrc]
+    ):
+        """
+        If node creates a view, check it's followed by only and one clone().
+
+        Args:
+        -   node: generally it's `self.current_node`,
+                but for unpacking `getitem` Nodes after a multi-res Node
+                it's the multi-res Node itself.
+        -   input_viewsrcs: the ViewSrcs that are effectively representing
+                input memory addresses to `node`,
+                but not always got from `node.all_input_nodes`.
+        """
+        res_viewsrcs: List[ViewSrc] = collect_meta(
+            get_node_view_src(alloctor_or_view), leaf_type=ViewSrc
+        )
+        inplace_res_viewsrcs = set(res_viewsrcs).intersection(input_viewsrcs)
+        if len(inplace_res_viewsrcs) == 0:
+            return
+        if len(alloctor_or_view.users) == 0:
+            return
+
+        if len(alloctor_or_view.users) == 1:
+            user, = alloctor_or_view.users
+            if (
+                user.op == FX.CALL_FUNCTION and user.target is torch.clone
+            ) or (
+                user.op == FX.CALL_METHOD and user.target is 'clone'
+            ):
+                return
+
+        # TODO Better report which input (may be in nested args) is detected
+        raise EasierJitException(
+            f"The operation '{alloctor_or_view.format_node()}' in"
+            f" '{self.current_module.easier_hint_name}'"
+            " returns a view of an input, this operation must be followed"
+            " by exactly one `Tensor.clone()` call"
+        )
+
+    def _current_is_inplace_op(self):
+        """
+        Decide if current_node is an operator that may inplace write
+        using simple rules of PyTorch operator naming convention.
+        (it MAY write, but it may not really write at this call)
+        """
+        node = self.current_node
+        if node.op == FX.CALL_FUNCTION:
+            if node.target is operator.setitem:
+                return True
+            if node.target.__name__.endswith('_'):  # type: ignore
+                return True
+
+        if node.op == FX.CALL_METHOD:
+            if cast(str, node.target).endswith('_'):
+                return True
+
+        if node.op == FX.CALL_MODULE:
+            if isinstance(
+                get_called_module(self.current_module, node), esr.Reducer
+            ):
+                return True
+
+        return False
+
+    def for_each_node(self):
+        if is_node_skipped(self.current_module, self.current_node):
+            # NOTE since we are detecting view based on rumtime info
+            # (memory address), if the Node is skipped, we cannot check it.
+            return
+
+        if self.current_node.op == FX.CALL_MODULE:
+            submod = get_called_module(self.current_module, self.current_node)
+            if isinstance(submod, HaloExchanger):
+                return
+
+        if self.current_node in self.visited:
+            return
+        self.visited.add(self.current_node)
+
+        args_viewsrcs: List[ViewSrc] = collect_meta(
+            list(map(get_node_view_src, self.current_node.all_input_nodes)),
+            leaf_type=ViewSrc
+        )
+
+        #
+        # Check if a user-programmed view is immediately `.clone()`.
+        #
+        if not isinstance(
+            get_node_meta(self.current_node), RuntimeTensorMeta
+        ):
+            # Multi-res op is not handled on itself, but handled on its getitem
+            for user in self.current_node.users:
+                assert user.target is operator.getitem
+                self._check_user_is_clone(user, args_viewsrcs)
+
+            self.visited.update(self.current_node.users)
+
+        else:
+            self._check_user_is_clone(self.current_node, args_viewsrcs)
+
+        #
+        # Check if current_node inplace writes any input ViewSrc.
+        #
+        # If there is such a ViewSrc, check if the ViewSrc is a GET_ATTR Node.
+        # Result ViewSrc of the current Node
+        if self._current_is_inplace_op():
+            # The Node is like `torch.xxx_`.
+            # This check filters out runtime detection of unknown view ops.
+            # NOTE the inplace target is not always `inputs[0]`.
+            this_res_viewsrcs: List[ViewSrc] = collect_meta(
+                get_node_view_src(self.current_node), leaf_type=ViewSrc
+            )
+            this_inplace_viewsrcs: Set[ViewSrc] = \
+                set(this_res_viewsrcs).intersection(args_viewsrcs)
+            # Actually at most one inplace ViewSrc.
+            for this_inplace_viewsrc in this_inplace_viewsrcs:
+                # Must be in form of ViewSrc(get_attr, None)
+                #
+                # Views after get_attr will be used only by clone(),
+                # so ViewSrc(get_attr, None) is of the get_attr Node itself.
+                if this_inplace_viewsrc.index is None:
+                    if this_inplace_viewsrc.node.op == FX.GET_ATTR:
+                        continue
+                raise EasierJitException(
+                    f"The operation '{self.current_node.format_node()}' in"
+                    f" '{self.current_module.easier_hint_name}'"
+                    " inplace writes to an input, and that input is a variable"
+                    " in the form of `self.x`"
+                )
+
+
 def analyze_data_dependency(modules: List[esr.Module], graphs: List[Graph]):
     """
     PyTorch operations that take Nodes/tensors as inputs and return a
@@ -490,6 +682,8 @@ def analyze_data_dependency(modules: List[esr.Module], graphs: List[Graph]):
     assert len(modules) == len(graphs) == 1, \
         "One module/graph at a time, avoid adding dep edges cross graphs"
     m = modules[0]
+
+    TensorViewUsageChecker(modules, graphs).run()
 
     dda = DataDependencyAnalyzer(modules, graphs).run()
 

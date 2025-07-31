@@ -21,7 +21,7 @@ import easier.core.passes.dataflow_fusion.fusion_rules as rules
 from easier.core.passes.utils import \
     FX, EasierInterpreter, SubmodNameAllocator, get_called_module, tree_map
 from easier.core.runtime.metadata import \
-    get_node_meta, set_node_meta, StructuredViewSrc, \
+    collect_meta, get_node_meta, set_node_meta, StructuredViewSrc, \
     get_node_view_src, set_node_view_src, ViewSrc
 from easier.core.utils import logger
 
@@ -37,7 +37,6 @@ class NodeGrouper(EasierInterpreter):
             rules.RejectExcludedGroup(),
             rules.ReducerAggregatorGroupsConflict(),
             rules.ReducerInstancesConflict(),
-            rules.UnifyReducerScheduling(),
         ]
         self.node_rules: List[NodeRule] = [
             rules.GroupingEndsBeforeSelector(),
@@ -129,9 +128,6 @@ class NodeGrouper(EasierInterpreter):
 def topo_sort_node_groups(
     ng_conn_mat: torch.Tensor, graph: fx.Graph
 ) -> List[NodeGroup]:
-    raw_node_ids: Dict[fx.Node, int] = dict(
-        (n, i) for i, n in enumerate(graph.nodes)
-    )
     ngs: List[NodeGroup] = list(set(map(get_node_group, graph.nodes)))
     ngids = [ng.id for ng in ngs]
     assert len(set(ngids)) == len(ngids)
@@ -317,14 +313,14 @@ class NodeMetaCopier(EasierInterpreter):
     -   ViewSrc(node, index)
         -   If `node` is outside any NodeGroup, its ViewSrc remains unchanged
             (mapped to new Node instacnes).
-            I.e. if originally the same memory is in and then out,
-            we don't expect codegen to allocate a new memory and replace it.
 
             Otherwise, the whole ViewSrc is changed to the GraphModel Node
             (the allocator).
 
+            NOTE because all user-programmed views must be clone-ed,
+            the inputs and outputs of GraphModule won't be views.
+
         -   ViewSrc that's totally within the kernel Graph is no longer used.
-            (let codegen to handle the memory lifetime)
 
     -   TensorMeta
         -   Simply copied.
@@ -423,13 +419,25 @@ class NodeMetaCopier(EasierInterpreter):
         set_node_meta(self.current_node, metas)
 
         # concat-ed ViewSrc
-        def _map_kernel_output_viewsrc(out_idx: int, raw_vs: ViewSrc):
-            if raw_vs.node in ng.nodes:
-                return ViewSrc(self.current_node, out_idx)
-            else:
-                # Reflecting the progressively updated new ViewSrc.
-                return self.rawsrc2outersrc[raw_vs]
+        output_raw_srcs = collect_meta(
+            list(map(get_node_view_src, raw_outputs)),
+            leaf_type=ViewSrc
+        )
+        assert len(output_raw_srcs) == len(set(output_raw_srcs)), \
+            'Kernel output should not share memory'
 
+        def _map_kernel_output_viewsrc(out_idx: int, raw_vs: ViewSrc):
+            assert raw_vs.node in ng.nodes, \
+                'Kernel output memory must be allocated for' \
+                ' the operation originally within the fused subgraph'
+
+            # Assume each output represents an invidual new memory
+            # OTAH, they cannot be views to each other.
+            return ViewSrc(self.current_node, out_idx)
+
+        # NOTE if the NodeGroup has no output, the resultant ViewSrc on
+        # CALL_MODULE would be `[]` rather than None -- `[]` aligns with
+        # JitEngine.ViewSrcTrackerBase.
         kernel_srcs: List[ViewSrc] = []
         for i, raw_out in enumerate(raw_outputs):
             raw_src = get_node_view_src(raw_out)

@@ -5,8 +5,6 @@ from abc import ABC, abstractmethod
 from enum import Enum, auto
 from torch import fx
 
-from easier.core.passes.data_dependency_analysis import \
-    get_data_dependency_users
 from easier.core.passes.dataflow_fusion.node_group import \
     GroupType, NodeGroup, NodeType, get_node_group, get_node_type
 
@@ -45,6 +43,19 @@ class GroupingEndsAfterAggregator(NodeRule):
             return FuseDecision.REJECT
         else:
             return FuseDecision.PASS
+
+
+"""
+The scheduling for hardware threads of Reducer are generally inconsistent
+with the scheduling of Mapped ops on Reducer input or output tensor.
+
+Reducer outputs include:
+-   Reducer's dataflow users
+    -   rejected by GroupingEndsAfterReducer
+
+-   Reducer's in-place out: `forward(input, out=self.x)`
+    -   `out=` target must be `self.x`, and it's an EXCLUDED group.
+"""
 
 
 class GroupingEndsAfterReducer(NodeRule):
@@ -117,41 +128,3 @@ class ReducerInstancesConflict(GroupRule):
                 return FuseDecision.REJECT
 
         return FuseDecision.PASS
-
-
-class UnifyReducerScheduling(GroupRule):
-    """
-    The scheduling for hardware threads of Reducer are generally inconsistent
-    with the scheduling of Mapped ops on Reducer input or output tensor.
-
-    An example of inconsistency between Reducer and output tensor is
-    when Reducer is in-place: `forward(input, out=x)`
-    and out tensor `x` is then read/write by other Nodes.
-
-    The way to identify it is to check data dependency edges.
-
-    TODO although simple, this has side effects:
-    -   Data dependency edges regarding Reducer input is taken into
-        consideration too. Scheduling for Reducer input is less inconsistent
-        than scheduling for Reducer output.
-    -   Two Reducer calls writing the same memory block, the execution of which
-        can possibly be serialized, won't be grouped together.
-    """
-
-    def check(self, ng1: NodeGroup, ng2: NodeGroup) -> FuseDecision:
-        if self._reject(ng1, ng2) or self._reject(ng2, ng1):
-            return FuseDecision.REJECT
-        else:
-            return FuseDecision.PASS
-
-    def _reject(self, ng1: NodeGroup, ng2: NodeGroup) -> bool:
-        if ng1.representative_reduces is not None:
-            reducer, nodes = ng1.representative_reduces
-        else:
-            nodes = []
-
-        for reduce_node in nodes:
-            for dep_usr in get_data_dependency_users(reduce_node):
-                if dep_usr in ng2.nodes:
-                    return True
-        return False

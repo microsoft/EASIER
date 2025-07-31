@@ -66,15 +66,15 @@ class ShallowWaterMeshComponentsCollector(esr.Module):
 
         for i in range(3):
             # (ne,)
-            self.src_p[i].copy_(src_p[:, i])
-            self.dst_p[i].copy_(dst_p[:, i])
+            self.src_p[i].copy_(src_p[:, i].clone())
+            self.dst_p[i].copy_(dst_p[:, i].clone())
 
             # (nc,)
-            self.cells_p[i].copy_(self.cells[:, i])
+            self.cells_p[i].copy_(self.cells[:, i].clone())
 
         for i in range(2):
             # (nbc,)
-            self.bp[i].copy_(self.bpoints[:, i])
+            self.bp[i].copy_(self.bpoints[:, i].clone())
 
 
 class ShallowWaterInitializer(esr.Module):
@@ -152,14 +152,14 @@ class ShallowWaterInitializer(esr.Module):
         )
 
     def get_alpha(self, sc, dc, p0, p1):
-        x1 = sc[:, 0]
-        y1 = sc[:, 1]
-        x2 = dc[:, 0]
-        y2 = dc[:, 1]
-        x3 = p0[:, 0]
-        y3 = p0[:, 1]
-        x4 = p1[:, 0]
-        y4 = p1[:, 1]
+        x1 = sc[:, 0].clone()
+        y1 = sc[:, 1].clone()
+        x2 = dc[:, 0].clone()
+        y2 = dc[:, 1].clone()
+        x3 = p0[:, 0].clone()
+        y3 = p0[:, 1].clone()
+        x4 = p1[:, 0].clone()
+        y4 = p1[:, 1].clone()
 
         y21 = y2 - y1
         y43 = y4 - y3
@@ -171,12 +171,12 @@ class ShallowWaterInitializer(esr.Module):
         return (x31 * y43 - y31 * x43) / (x21 * y43 - y21 * x43)
 
     def get_face_norm(self, p0, p1, p2):
-        a1 = p0[:, 0]
-        a2 = p0[:, 1]
-        b1 = p1[:, 0]
-        b2 = p1[:, 1]
-        c1 = p2[:, 0]
-        c2 = p2[:, 1]
+        a1 = p0[:, 0].clone()
+        a2 = p0[:, 1].clone()
+        b1 = p1[:, 0].clone()
+        b2 = p1[:, 1].clone()
+        c1 = p2[:, 0].clone()
+        c2 = p2[:, 1].clone()
 
         s = torch.sign((b1 - c1) * (a2 - c2) - (b2 - c2) * (a1 - c1))
 
@@ -193,8 +193,6 @@ class ShallowWaterInitializer(esr.Module):
 
         src_cent = (src_p0 + src_p1 + src_p2) / 3.
         dst_cent = (dst_p0 + dst_p1 + dst_p2) / 3.
-
-        dist = dst_cent - src_cent
 
         norm01_x, norm01_y = self.get_face_norm(src_p2, src_p0, src_p1)
         norm12_x, norm12_y = self.get_face_norm(src_p0, src_p1, src_p2)
@@ -223,21 +221,21 @@ class ShallowWaterInitializer(esr.Module):
         self.alpha[:] = torch.where(condition, alpha, self.alpha)
 
         p0 = self.selector_cells_p[0](self.points)
-        x0 = p0[:, 0]
-        y0 = p0[:, 1]
+        x0 = p0[:, 0].clone()
+        y0 = p0[:, 1].clone()
         p1 = self.selector_cells_p[1](self.points)
-        x1 = p1[:, 0]
-        y1 = p1[:, 1]
+        x1 = p1[:, 0].clone()
+        y1 = p1[:, 1].clone()
         p2 = self.selector_cells_p[2](self.points)
-        x2 = p2[:, 0]
-        y2 = p2[:, 1]
+        x2 = p2[:, 0].clone()
+        y2 = p2[:, 1].clone()
 
         self.area[:] = 0.5 * torch.abs(
             x0 * (y1 - y2) + x1 * (y2 - y0) + x2 * (y0 - y1))
         centroid = (p0 + p1 + p2) / 3.
 
-        self.x[:] = centroid[:, 0]
-        self.y[:] = centroid[:, 1]
+        self.x[:] = centroid[:, 0].clone()
+        self.y[:] = centroid[:, 1].clone()
 
         self.h[:] = 1 + 0.1 * torch.exp(
             -100 * ((self.x - 0.0)**2 + (self.y - 0.0)**2)

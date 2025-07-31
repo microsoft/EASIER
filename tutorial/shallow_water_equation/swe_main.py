@@ -133,12 +133,15 @@ class ShallowWaterEquation(esr.Module):
             self.uh + self.dt * delta_uh3,
             self.vh + self.dt * delta_vh3,)
 
-        self.h[:] += self.dt / 6 * (
-            delta_h1 + delta_h2 + delta_h3 + delta_h4)
-        self.uh[:] += self.dt / 6 * (
-            delta_uh1 + delta_uh2 + delta_uh3 + delta_uh4)
-        self.vh[:] += self.dt / 6 * (
-            delta_vh1 + delta_vh2 + delta_vh3 + delta_vh4)
+        self.h.add_(
+            self.dt / 6 * (delta_h1 + delta_h2 + delta_h3 + delta_h4)
+        )
+        self.uh.add_(
+            self.dt / 6 * (delta_uh1 + delta_uh2 + delta_uh3 + delta_uh4)
+        )
+        self.vh.add_(
+            self.dt / 6 * (delta_vh1 + delta_vh2 + delta_vh3 + delta_vh4)
+        )
 
 
 if __name__ == "__main__":

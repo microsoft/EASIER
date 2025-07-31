@@ -61,7 +61,9 @@ class InitW(esr.Module):
             mode='replicate')
 
     def forward(self):
-        self.w[:] = self.A(self.M(self.V[:, ..., self.j].squeeze(-1)))
+        self.w[:] = self.A(self.M(
+            self.V[:, ..., self.j].squeeze(-1).clone()
+        ))
 
 
 class SumW(esr.Module):
@@ -76,7 +78,9 @@ class SumW(esr.Module):
             mode='replicate')
 
     def forward(self):
-        self.h[:] = esr.sum(self.V[:, ..., self.i].squeeze(-1) * self.w).sum()
+        self.h[:] = esr.sum(
+            self.V[:, ..., self.i].squeeze(-1).clone() * self.w
+        ).sum()
 
 
 class NormW(esr.Module):
@@ -102,7 +106,9 @@ class UpdateW(esr.Module):
             mode='replicate')
 
     def forward(self):
-        self.w.sub_(self.h * self.V[:, ..., self.i].squeeze(-1))
+        self.w.sub_(
+            self.h * self.V[:, ..., self.i].squeeze(-1).clone()
+        )
 
 
 class UpdateV(esr.Module):
@@ -117,7 +123,7 @@ class UpdateV(esr.Module):
             mode='replicate')
 
     def forward(self):
-        self.V[:, ..., self.i] = (self.w / self.h)[:, ..., None]
+        self.V[:, ..., self.i] = (self.w / self.h)[:, ..., None].clone()
 
 
 class UpdateX(esr.Module):
@@ -131,8 +137,8 @@ class UpdateX(esr.Module):
         self.i = i
 
     def forward(self):
-        V = self.V[:, ..., :self.i]
-        dx = torch.matmul(V, self.y[:self.i]).squeeze(dim=-1)
+        V = self.V[:, ..., :self.i].clone()
+        dx = torch.matmul(V, self.y[:self.i].clone()).squeeze(dim=-1).clone()
         self.x.add_(self.M(dx))
 
 

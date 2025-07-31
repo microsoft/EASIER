@@ -66,15 +66,15 @@ class PoissonMeshComponentsCollector(esr.Module):
 
         for i in range(3):
             # (ne,)
-            self.src_p[i].copy_(src_p[:, i])
-            self.dst_p[i].copy_(dst_p[:, i])
+            self.src_p[i].copy_(src_p[:, i].clone())
+            self.dst_p[i].copy_(dst_p[:, i].clone())
 
             # (nc,)
-            self.cells_p[i].copy_(self.cells[:, i])
+            self.cells_p[i].copy_(self.cells[:, i].clone())
 
         for i in range(2):
             # (nbc,)
-            self.bp[i].copy_(self.bpoints[:, i])
+            self.bp[i].copy_(self.bpoints[:, i].clone())
 
 
 class PoissonInitializer(esr.Module):
@@ -146,12 +146,12 @@ class PoissonInitializer(esr.Module):
         )
 
     def get_face_norm(self, p0, p1, p2):
-        a1 = p0[:, 0]
-        a2 = p0[:, 1]
-        b1 = p1[:, 0]
-        b2 = p1[:, 1]
-        c1 = p2[:, 0]
-        c2 = p2[:, 1]
+        a1 = p0[:, 0].clone()
+        a2 = p0[:, 1].clone()
+        b1 = p1[:, 0].clone()
+        b2 = p1[:, 1].clone()
+        c1 = p2[:, 0].clone()
+        c2 = p2[:, 1].clone()
 
         s = torch.sign((b1 - c1) * (a2 - c2) - (b2 - c2) * (a1 - c1))
 
@@ -192,18 +192,18 @@ class PoissonInitializer(esr.Module):
         norm_y = torch.where(condition, norm20_y, norm_y)
 
         dist = dist / (dist**2).sum(dim=1, keepdim=True)
-        self.Af[:] = dist[:, 0] * norm_x + dist[:, 1] * norm_y
+        self.Af[:] = dist[:, 0].clone() * norm_x + dist[:, 1].clone() * norm_y
         self.Ac[:] = - self.reducer(self.Af)
 
         p0 = self.selector_cells_p[0](self.points)
-        x0 = p0[:, 0]
-        y0 = p0[:, 1]
+        x0 = p0[:, 0].clone()
+        y0 = p0[:, 1].clone()
         p1 = self.selector_cells_p[1](self.points)
-        x1 = p1[:, 0]
-        y1 = p1[:, 1]
+        x1 = p1[:, 0].clone()
+        y1 = p1[:, 1].clone()
         p2 = self.selector_cells_p[2](self.points)
-        x2 = p2[:, 0]
-        y2 = p2[:, 1]
+        x2 = p2[:, 0].clone()
+        y2 = p2[:, 1].clone()
 
         area = 0.5 * torch.abs(
             x0 * (y1 - y2) + x1 * (y2 - y0) + x2 * (y0 - y1)
@@ -226,7 +226,7 @@ class PoissonInitializer(esr.Module):
         bdist = bdist / (bdist**2).sum(dim=-1, keepdim=True)
 
         self.Ac.sub_(self.breducer(
-            bdist[:, 0] * bnorm_x + bdist[:, 1] * bnorm_y
+            bdist[:, 0].clone() * bnorm_x + bdist[:, 1].clone() * bnorm_y
         ))
 
 

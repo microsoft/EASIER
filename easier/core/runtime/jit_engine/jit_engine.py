@@ -1,12 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-from typing import Dict, Final, List, Tuple, cast, Optional
+from typing import Callable, Dict, Final, List, Tuple, TypeVar, cast, Optional
 
 import torch
 from torch.fx.node import Node
 from torch.fx.graph import Graph
-from torch import fx
 
 import easier as esr
 from easier.core import passes
@@ -46,20 +45,46 @@ jit_skipped_meta = RuntimeTensorMeta(
 )
 
 
-def get_value_shape_dtype(
-    node: Node, val,
+_T = TypeVar('_T')
+
+
+def get_value_runtime_info(
+    root: esr.Module, node: Node, val,
+    meta_ctor: Callable[[Tuple[int, ...], torch.dtype], _T],
     *,
     _rec_depth=0  # debug-only
-):  # result may be nested
+):
+    """
+    Recursive call.
+
+    Get a probably nested runtime info structure, e.g. RuntimeTensorMeta,
+    for some runtime value.
+    Such a value is normally about the result of evaluating `current_node`
+    or about jit_skipped.
+
+    Args:
+    -   node
+    -   val:
+            the runtime value, will be recursively inspected if there is a
+            nested structure.
+    -   meta_ctor:
+            a callable, inputs are (shape, dtype), the result is the
+            target runtime info object.
+    """
     if isinstance(val, torch.Tensor):
-        return tuple(val.shape), val.dtype
+        tensor_runtime_meta = meta_ctor(tuple(val.shape), val.dtype)
+        return tensor_runtime_meta
 
     elif val is None:
-        return replica_none_meta.shape, replica_none_meta.dtype
+        # TODO assert _rec_depth == 0  # possible?
+
+        # nested esr.Module calls may return None
+        return meta_ctor(replica_none_meta.shape, replica_none_meta.dtype)
 
     elif val is jit_skipped:
         assert _rec_depth == 0, "jit_skipped is always not nested"
-        return jit_skipped_meta.shape, jit_skipped_meta.dtype
+
+        return meta_ctor(jit_skipped_meta.shape, jit_skipped_meta.dtype)
 
     elif isinstance(val, (tuple, list)):
         n_items = len(val)
@@ -75,13 +100,14 @@ def get_value_shape_dtype(
 
         for i in range(n_items):
             item = val[i]
-            item_meta = get_value_shape_dtype(
-                node, item,
+            item_meta = get_value_runtime_info(
+                root, node, item, meta_ctor,
                 _rec_depth=_rec_depth+1
             )
 
             # assume being only one level nested.
             assert isinstance(item, torch.Tensor)
+
             item_metas.append(item_meta)
 
         item_metas = type(val)(item_metas)  # tuple or list
@@ -91,90 +117,7 @@ def get_value_shape_dtype(
         # Scalar cases may happen for `t.item()` that returns the scalar
         # Python object for singleton tensors.
         scalar_meta = get_runtime_metadata_from_scalar(val)
-        return scalar_meta.shape, scalar_meta.dtype
-
-
-def get_static_single_role_value_meta(
-    root: esr.Module, node: Node, role: Role, val,
-    *,
-    _rec_depth=0  # debug-only
-) -> StructuredTensorMeta:
-    """
-    Recursive call.
-
-    Get a probably nested RuntimeTensorMeta structure for some runtime value.
-    Such a value is normally the result of evaluating `current_node`
-    or jit_skipped.
-
-    This method can only be used on value that expected to have a single Role:
-    -   All PyTorch ops (EASIER assumes this is true)
-    -   EASIER primitives, Selector/Reducer/aggregator
-
-    -   NOTE a fused GraphModule is NOT!
-
-    Args:
-    -   node
-    -   role:
-            the statically inferred role for this Node
-    -   val:
-            the runtime value, will be recursively inspected if there is a
-            nested structure.
-    """
-    assert not (
-        node.op == FX.CALL_MODULE and isinstance(
-            get_called_module(root, node), fx.GraphModule
-        )
-    ), 'Fused GraphModule calls do not always have a single role'
-
-    if isinstance(val, torch.Tensor):
-        tensor_runtime_meta = RuntimeTensorMeta(
-            role, tuple(val.shape), val.dtype
-        )
-        return tensor_runtime_meta
-
-    elif val is None:
-        # TODO assert _rec_depth == 0  # possible?
-
-        # nested esr.Module calls may return None
-        return replica_none_meta
-
-    elif val is jit_skipped:
-        assert _rec_depth == 0, "jit_skipped is always not nested"
-
-        return jit_skipped_meta
-
-    elif isinstance(val, (tuple, list)):
-        n_items = len(val)
-        item_metas = []
-
-        if _rec_depth > 0:
-            # TODO if any such ops, we need View=(Node, List[int]) for
-            # arbitrary nested structures and depths.
-            raise EasierJitException(
-                "Unexpected nested result with nested depth > 1 from"
-                f" {node.format_node()}"
-            )
-
-        for i in range(n_items):
-            item = val[i]
-            item_meta = get_static_single_role_value_meta(
-                root, node, role, item,
-                _rec_depth=_rec_depth+1
-            )
-
-            # assume being only one level nested.
-            assert isinstance(item, torch.Tensor)
-            assert isinstance(item_meta, RuntimeTensorMeta)
-
-            item_metas.append(item_meta)
-
-        item_metas = type(val)(item_metas)  # tuple or list
-        return item_metas
-
-    else:
-        # Scalar cases may happen for `t.item()` that returns the scalar
-        # Python object for singleton tensors.
-        return get_runtime_metadata_from_scalar(val)
+        return meta_ctor(scalar_meta.shape, scalar_meta.dtype)
 
 
 def get_meta_role_size(meta: StructuredTensorMeta) -> Tuple[Role, int]:
@@ -571,7 +514,9 @@ class ShapeDtypeValidation(NodeHandlerBase):
                 return x
         prev_s_d = tree_map(prev_meta, _get_shape_dtype)
 
-        result_s_d = get_value_shape_dtype(current_node, res)
+        result_s_d = get_value_runtime_info(
+            self.current_module, current_node, res, (lambda s, d: (s, d))
+        )
 
         # TODO if we support meta changes on the fly, we can just check
         # if batch sizes change.
@@ -757,9 +702,18 @@ class MetadataPropagation(NodeHandlerBase):
         Validate Role and batch size consistency between the inferred info
         and runtime, possibly nested, data.
         """
+        # During 1st run, TensorMetas of each Node (may be multi-res)
+        # have a unique role.
         role = self.expected_role_size[0]
-        runtime_meta = get_static_single_role_value_meta(
-            self.current_module, current_node, role, res
+
+        # During 1st run, without analysis involving types of Selector/Reducer
+        # (e.g. passes.tensor_grouping) we cannot **infer** the role,
+        # what we do here is only to reuse the role inferred in AOT passes.
+        def _meta_from_shape_dtype(shape, dtype):
+            return RuntimeTensorMeta(role, shape, dtype)
+
+        runtime_meta = get_value_runtime_info(
+            self.current_module, current_node, res, _meta_from_shape_dtype
         )
 
         # TODO wrong! releasing Node or releasing the tensor don't mean
@@ -1214,6 +1168,12 @@ class JitEngine:
         return runtime_handlers
 
     def compile_after_first_run(self):
+        """
+        Generally, transformations and validations can be organized as passes
+        here, if:
+        -   They need runtime information like Tensor.storage();
+        -   They are run only once.
+        """
         ms, gs = [self.module], [self.graph]
 
         # passes.analyze_data_dependency() must be run after the 1st run,

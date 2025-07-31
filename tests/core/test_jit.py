@@ -52,7 +52,7 @@ class Model(esr.Module):
         self.vertex_tensor[:] = res
         self.edge_tensor[:] = (dst + src) * 0.5
         self.tensor[:] = esr.sum(self.vertex_tensor) / self.nv
-        self.out1[:] = esr.norm(res, 2)[0]
+        self.out1[:] = esr.norm(res, 2)[0].clone()
 
 
 @pytest.mark.usefixtures('dummy_dist_env')
@@ -591,11 +591,19 @@ class NotFullModel(esr.Module):
         )
 
     def forward(self):
-        self.edge[:] += self.selector(self.vertex)
-        self.edge[:] += torch.einsum('ij,ij->ij', self.edge, self.edge)
+        self.edge.add_(
+            self.selector(self.vertex)
+        )
+        self.edge.add_(
+            torch.einsum('ij,ij->ij', self.edge, self.edge)
+        )
 
-        self.vertex[:] += self.reducer(self.edge)
-        self.vertex[:] += torch.einsum('ij,ij->ij', self.vertex, self.vertex)
+        self.vertex.add_(
+            self.reducer(self.edge)
+        )
+        self.vertex.add_(
+            torch.einsum('ij,ij->ij', self.vertex, self.vertex)
+        )
 
         self.replica[:] \
             = esr.sum(self.edge) * 1.2 \
