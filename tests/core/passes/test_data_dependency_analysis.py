@@ -443,13 +443,13 @@ def test_multi_res_separated_dep_subgraphs():
 
         def forward(self):
             x = self.x
-            u, s, v = torch.svd(x)  # u is x
+            u, s, v = torch.svd(x)  # u v are both x
+            u2 = u.clone()  # e.g., clone() at this line read self.x
+            v2 = v.clone()
 
-            torch.abs_(self.x)  # connected only with u
+            torch.abs_(self.x)  # dep on u.clone()
 
-            u2 = u.clone()  # e.g., clone() at this line read abs_ result
             s2 = s - 2
-            v2 = v / 2
 
     called_watcher = []
 
@@ -466,7 +466,7 @@ def test_multi_res_separated_dep_subgraphs():
                 called_watcher.append(1)
 
                 neg: torch.Tensor = args[0]  # type: ignore
-                return neg, torch.zeros_like(neg), torch.ones_like(neg)
+                return neg, torch.zeros_like(neg), neg
             else:
                 return res
 
@@ -487,22 +487,25 @@ def test_multi_res_separated_dep_subgraphs():
 
     assert called_watcher == [1]
 
-    attr_x, svd, u, s, v, abs_, clone_u, sub, div, out = graph.nodes
+    attr_x, svd, u, s, v, clone_u, clone_v, abs_, sub, out = graph.nodes
+    assert clone_u.target == 'clone'
+    assert clone_v.target == 'clone'
 
     assert _get_viewsrc_node(attr_x) == attr_x
     assert list(get_node_view_src(svd)) == [  # type: ignore
         ViewSrc(attr_x, None),
         ViewSrc(svd, 1),
-        ViewSrc(svd, 2),
+        ViewSrc(attr_x, None),
+    ] == [
+        get_node_view_src(u),
+        get_node_view_src(s),
+        get_node_view_src(v),
     ]
     assert _get_viewsrc_node(clone_u) == clone_u
-
-    assert get_node_view_src(s) == ViewSrc(svd, 1)
-    assert get_node_view_src(v) == ViewSrc(svd, 2)
+    assert _get_viewsrc_node(clone_v) == clone_v
 
     assert _get_viewsrc_node(abs_) == attr_x
 
     _assert_deps({
-        abs_: [svd, u],  # u(getitem) is regarded as read svd[0]
-        clone_u: [abs_],
+        abs_: [svd, u, v, clone_u, clone_v],
     }, graph.nodes)

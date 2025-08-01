@@ -5,7 +5,7 @@ import dataclasses
 import itertools
 import operator
 from typing import \
-    Dict, Iterable, List, Optional, Sequence, Set, TypeAlias, Union, cast
+    Dict, Iterable, List, Optional, Sequence, TypeAlias, Union, cast
 
 from torch import nn
 import torch
@@ -18,7 +18,8 @@ from easier.core.runtime.metadata import \
 import easier.core.module as esr
 
 from easier.core.passes.utils import \
-    FX, EasierInterpreter, OrderedSet, get_called_module, get_dag_connectivity_matrix
+    FX, EasierInterpreter, OrderedSet, get_called_module, \
+    get_dag_connectivity_matrix
 from easier.core.runtime.modules import HaloExchanger, all_gather_into_tensor
 from easier.core.utils import EasierJitException
 
@@ -477,8 +478,9 @@ class TensorViewUsageChecker(EasierInterpreter):
 
     Based on standard PyTorch programming model,
     EASIER programming model additionally requires, if an operation returns
-    a view of its input, that operation must be followed by exactly a call
-    to the function `torch.clone()` or the method `Tensor.clone()`.
+    a view of its input, that operation must be followed by,
+    immediately and exactly,
+    a call to the function `torch.clone()` or the method `Tensor.clone()`.
 
     TODO maybe `Tensor.to(copy=True)` or whatever function that essentially
     clones.
@@ -499,8 +501,18 @@ class TensorViewUsageChecker(EasierInterpreter):
 
     -   Following passes need to deal with views.
 
-        By enforcing `.clone()`, every atomic unit of operations creates
-        a new memory.
+        By enforcing immediate `.clone()`, it leaves no space for extra
+        control flow or deadlock in fusion,
+        therefore we can consider it an atomic unit of operations
+        that creates a new memory.
+
+        If not immediate cloned, it may cause deadlock in fusion,
+        and make views to be outputs of NodeGroups, e.g.:
+        ```
+        view = v.view(...)
+        reducer(..., out=v)  # Reducer.out dataflow edge is cut
+        clone = view.clone()  # Control-flow depended on reducer, deadlock
+        ```
 
     This subpass covers:
 
@@ -525,11 +537,15 @@ class TensorViewUsageChecker(EasierInterpreter):
         super().__init__(modules, graphs)
         self.visited = set()
 
-    def _check_user_is_clone(
-        self, alloctor_or_view: Node, input_viewsrcs: List[ViewSrc]
-    ):
+    def _check_immediate_user_is_clone(
+        self,
+        alloctor_or_view: Node,
+        input_viewsrcs: List[ViewSrc],
+        immediate_node: Node
+    ) -> bool:
         """
-        If node creates a view, check it's followed by only and one clone().
+        If node creates a view, check it's followed by
+        only and one and immediate clone().
 
         Args:
         -   node: generally it's `self.current_node`,
@@ -538,15 +554,28 @@ class TensorViewUsageChecker(EasierInterpreter):
         -   input_viewsrcs: the ViewSrcs that are effectively representing
                 input memory addresses to `node`,
                 but not always got from `node.all_input_nodes`.
+        -   immediate_node: the immediate following Node in the Graph,
+                if `self.current_node` has a user, this arg should be the user.
+                (not always exactly `self.current_node.next`)
+
+        Returns:
+        -   True: the immediate_node is really the correct `.clone()`
+        -   False: for valid cases:
+            -   this Node is not a view;
+            -   this Node does not have any users at all.
+
+        -   raise EasierJitException: for bad cases:
+            -   view is not cloned;
+            -   not immediately cloned.
         """
         res_viewsrcs: List[ViewSrc] = collect_meta(
             get_node_view_src(alloctor_or_view), leaf_type=ViewSrc
         )
         inplace_res_viewsrcs = set(res_viewsrcs).intersection(input_viewsrcs)
         if len(inplace_res_viewsrcs) == 0:
-            return
+            return False
         if len(alloctor_or_view.users) == 0:
-            return
+            return False
 
         if len(alloctor_or_view.users) == 1:
             user, = alloctor_or_view.users
@@ -555,14 +584,15 @@ class TensorViewUsageChecker(EasierInterpreter):
             ) or (
                 user.op == FX.CALL_METHOD and user.target == 'clone'
             ):
-                return
+                if user is immediate_node:
+                    return True
 
         # TODO Better report which input (may be in nested args) is detected
         raise EasierJitException(
             f"The operation '{alloctor_or_view.format_node()}' in"
             f" '{self.current_module.easier_hint_name}'"
             " returns a view of an input, this operation must be followed"
-            " by exactly one `Tensor.clone()` call"
+            " immediately by exactly one `Tensor.clone()` call"
         )
 
     def for_each_node(self):
@@ -592,14 +622,31 @@ class TensorViewUsageChecker(EasierInterpreter):
             get_node_meta(self.current_node), RuntimeTensorMeta
         ):
             # Multi-res op is not handled on itself, but handled on its getitem
+
+            # Calls to clone() must be after unpacking getitem Nodes.
+            # TODO currently the checks for views in multi-res are simple:
+            # - disallowed unnecessary clone() Nodes,
+            # - disallowed order of clone() is not the same as getitem()
+            immediate_after_unpack = self.current_node.next
             for user in self.current_node.users:
+                immediate_after_unpack = immediate_after_unpack.next
+
+            for i, user in enumerate(self.current_node.users):
                 assert user.target is operator.getitem
-                self._check_user_is_clone(user, args_viewsrcs)
+                assert user.args == (self.current_node, i)
+                correctly_cloned = self._check_immediate_user_is_clone(
+                    user, args_viewsrcs, immediate_after_unpack
+                )
+
+                if correctly_cloned:
+                    immediate_after_unpack = immediate_after_unpack.next
 
             self.visited.update(self.current_node.users)
 
         else:
-            self._check_user_is_clone(self.current_node, args_viewsrcs)
+            self._check_immediate_user_is_clone(
+                self.current_node, args_viewsrcs, self.current_node.next
+            )
 
 
 def analyze_data_dependency(modules: List[esr.Module], graphs: List[Graph]):
