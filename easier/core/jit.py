@@ -220,7 +220,9 @@ def _fully_load_data_backend_none(
         if isinstance(obj, (esr.Selector, esr.Reducer)):
             assert obj.easier_index_status in ['placeholder', 'rewritten']
             if obj.easier_index_status == 'placeholder':
-                obj.idx = obj.easier_data_loader.fully_load(device)
+                obj.idx = obj.easier_data_loader.fully_load(
+                    device, replicated=False
+                )
                 obj.easier_index_status = 'rewritten'
 
         if isinstance(obj, esr.Module):

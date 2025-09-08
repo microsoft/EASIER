@@ -23,6 +23,9 @@ from torch.fx.node import Node, Argument
 from torch.fx.operator_schemas import normalize_function, ArgsKwargsPair
 
 import easier.core.module as esr
+from easier.core.runtime.data_loader.base import DataLoaderBase
+from easier.core.runtime.data_loader.utils import NormalizedSlice
+from easier.core.runtime.dist_env import get_default_dist_env
 from easier.core.utils import EasierJitException
 
 
@@ -352,8 +355,20 @@ def get_selector_reducer_idx_partition(
     """
     assert module.easier_index_status in ['placeholder', 'partially_loaded']
     if module.easier_index_status == 'placeholder':
-        partial_idx, pstart, pend = \
-            module.easier_data_loader.partially_load_by_rank()
+
+        dist_env = get_default_dist_env()
+        dimlen = module.easier_data_loader.shape[0]
+
+        per_worker_len = dimlen // dist_env.world_size
+        pstart = per_worker_len * dist_env.rank
+        if dist_env.rank + 1 == dist_env.world_size:
+            pend = dimlen
+        else:
+            pend = pstart + per_worker_len
+
+        partial_idx = module.easier_data_loader.partially_load_by_range(
+            NormalizedSlice(dimlen, pstart, 1, pend - pstart)
+        )
         module.idx = partial_idx
         module.easier_idx_part_range = (pstart, pend)
         module.easier_index_status = 'partially_loaded'
@@ -458,8 +473,22 @@ def get_easier_tensors(
 
 
 EasierObj: TypeAlias = Union[
-    esr.Module, esr.Selector, esr.Reducer, esr.Tensor, esr.DataLoaderBase
+    esr.Module, esr.Selector, esr.Reducer, esr.Tensor, DataLoaderBase
 ]
+
+
+def _enum_data_loaders(
+    dl: DataLoaderBase, dl_name: str
+) -> Iterator[Tuple[DataLoaderBase, str]]:
+    # Including the input DataLoader
+    yield dl, dl_name
+
+    immediate_children, postfixes = \
+        dl.enumerate_children_data_loaders_and_postfixes()
+
+    for immediate_child, postfix in zip(immediate_children, postfixes):
+        child_name = dl_name + postfix
+        yield from _enum_data_loaders(immediate_child, child_name)
 
 
 def get_easier_objects(
@@ -508,10 +537,15 @@ def get_easier_objects(
                 objs.setdefault(obj, []).append(obj_name)
 
                 if isinstance(obj, (esr.Selector, esr.Reducer, esr.Tensor)):
-                    dt_name = obj_name + (
+                    obj_dl_name = obj_name + (
                         ".data" if isinstance(obj, esr.Tensor) else ".idx"
                     )
-                    objs.setdefault(obj.easier_data_loader, []).append(dt_name)
+                    obj_dl = obj.easier_data_loader
+
+                    for dl, dl_name in _enum_data_loaders(
+                        obj_dl, obj_dl_name
+                    ):
+                        objs.setdefault(dl, []).append(dl_name)
 
     return objs
 

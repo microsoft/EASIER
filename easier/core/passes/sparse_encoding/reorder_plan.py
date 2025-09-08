@@ -10,6 +10,7 @@ import more_itertools
 from torch import nn
 from torch.fx.graph import Graph
 
+from easier.core.runtime.data_loader.utils import NormalizedSlice
 from easier.core.runtime.dist_env import get_runtime_dist_env
 from easier.core.utils import logger
 import easier.core.module as esr
@@ -303,11 +304,16 @@ def build_cascade_reorder_plan_on_rank0(graph_builder: ReorderGraphBuilder):
                 ))
             elif isinstance(pattern, esr.Reducer):
                 nnodes = graph_builder.reducer_nnodes[pattern]
+                ns = NormalizedSlice(
+                    pattern.easier_data_loader.shape[0],
+                    0, 1,
+                    pattern.easier_data_loader.shape[0]
+                )
                 cyc0_weighted_reducers.append((
                     (
                         # fullness = len(unique(R.idx)) / R.n
                         float(
-                            pattern.easier_data_loader.count_unique()
+                            pattern.easier_data_loader.count_unique(ns)
                         ) / pattern.n,
                         idxlen * nnodes,
                     ),

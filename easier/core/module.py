@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 
 from typing import \
-    Dict, List, Optional, Sequence, Tuple, Union, overload, TYPE_CHECKING
+    Dict, List, Optional, Tuple, Union, overload, TYPE_CHECKING
 from typing_extensions import TypeAlias, Self
 import os
 
@@ -22,225 +22,15 @@ import h5py
 
 from easier.core.runtime.dist_env import \
     get_runtime_dist_env, get_default_dist_env
-from easier.core.runtime.data_loader import \
-    ArangeTensorLoader, DataLoaderBase, InMemoryTensorLoader, H5DataLoader, \
-    FulledTensorLoader, ATTRIBUTE_PLACEHOLDER, torch_dtype_to_numpy_dtype
+from easier.core.runtime.data_loader.base import \
+    DataLoaderBase, ATTRIBUTE_PLACEHOLDER
+from easier.core.runtime.data_loader.factories import \
+    InMemoryTensorLoader, torch_dtype_to_numpy_dtype
 
 
 if TYPE_CHECKING:
     from easier.core.passes.tensor_group_partition import ElemPart
     from easier.core.passes.tensor_grouping import EasierTensorGroup
-
-
-def hdf5(
-    file: str, dataset: str,
-    dtype: Optional[torch.dtype] = None,
-    device: Union[torch.device, str, None] = None,
-    **h5_file_kwargs
-):
-    """
-    The call to this function must be collectively.
-
-    Create a handle to a HDF5 dataset.
-
-    The specified dataset must be accessible from rank-0.
-    """
-    if device is None:
-        # TODO like torch.set_default_device()
-        device = 'cpu'
-    return H5DataLoader(file, dataset, dtype=dtype, device=device,
-                        **h5_file_kwargs)
-
-
-def full(
-    size: Sequence[int],
-    fill_value,
-    *,
-    dtype: Optional[torch.dtype] = None,
-    device: Optional[Union[torch.device, str]] = None
-):
-    """
-    Args:
-    - dtype: Optional[torch.dtype]:
-        If None, the default dtype is `torch.int64` for integer `fill_value`
-        and `torch.float64` for floating-poin `fill_value`.
-    - device: Optional[torch.Device]:
-        If None, the default device is `"cpu"`.
-    """
-    if isinstance(fill_value, int):
-        default_dtype = torch.int64
-    elif isinstance(fill_value, float):
-        default_dtype = torch.float64
-    else:
-        raise TypeError('fill_value must be integer or floating-point')
-
-    if dtype is None:
-        dtype = default_dtype
-
-    if device is None:
-        # TODO like torch.set_default_device()
-        device = 'cpu'
-    return FulledTensorLoader(fill_value, size, dtype, device)
-
-
-def zeros(
-    size: Sequence[int],
-    dtype: Optional[torch.dtype] = None,
-    device: Optional[Union[torch.device, str]] = None
-):
-    # TODO torch.zeros/ones can have `size` be both tuple and `*size:int`.
-    """
-    Args:
-    - dtype: Optional[torch.dtype]:
-        If None, the default dtype is `torch.int64`.
-    - device: Optional[torch.Device]:
-        If None, the default device is `"cpu"`.
-    """
-    if dtype is None:
-        dtype = torch.float64
-    if device is None:
-        # TODO like torch.set_default_device()
-        device = 'cpu'
-    return full(size, 0, dtype=dtype, device=device)
-
-
-def ones(
-    size: Sequence[int],
-    dtype: Optional[torch.dtype] = None,
-    device: Optional[Union[torch.device, str]] = None
-):
-    """
-    Args:
-    - dtype: Optional[torch.dtype]:
-        If None, the default dtype is `torch.int64`.
-    - device: Optional[torch.Device]:
-        If None, the default device is `"cpu"`.
-    """
-    if dtype is None:
-        dtype = torch.float64
-    if device is None:
-        # TODO like torch.set_default_device()
-        device = 'cpu'
-    return full(size, 1, dtype=dtype, device=device)
-
-
-def _dtype_device_like(
-    input: Union[DataLoaderBase, torch.Tensor],
-    dtype: Optional[torch.dtype] = None,
-    device: Optional[Union[torch.device, str]] = None
-) -> Tuple[torch.dtype, torch.device]:
-    if dtype is None:
-        dtype = input.dtype
-
-    if device is None:
-        device = input.device
-    device = torch.device(device)
-
-    return dtype, device
-
-
-def full_like(
-    input: Union[DataLoaderBase, torch.Tensor],
-    fill_value,
-    *,
-    dtype: Optional[torch.dtype] = None,
-    device: Optional[Union[torch.device, str]] = None
-):
-    """
-    Args:
-    - dtype: Optional[torch.dtype]:
-        If None, the default dtype is `torch.int64` for integer `fill_value`
-        and `torch.float64` for floating-poin `fill_value`.
-    - device: Optional[torch.Device]:
-        If None, the default device is `"cpu"`.
-    """
-    size = input.shape
-    dtype, device = _dtype_device_like(input, dtype, device)
-    return full(size, fill_value, dtype=dtype, device=device)
-
-
-def zeros_like(
-    input: Union[DataLoaderBase, torch.Tensor],
-    dtype: Optional[torch.dtype] = None,
-    device: Optional[Union[torch.device, str]] = None
-):
-    """
-    Args:
-    - dtype: Optional[torch.dtype]:
-        If None, the default dtype is `torch.int64` for integer `fill_value`
-        and `torch.float64` for floating-poin `fill_value`.
-    - device: Optional[torch.Device]:
-        If None, the default device is `"cpu"`.
-    """
-    dtype, device = _dtype_device_like(input, dtype, device)
-    return zeros(input.shape, dtype=dtype, device=device)
-
-
-def ones_like(
-    input: Union[DataLoaderBase, torch.Tensor],
-    dtype: Optional[torch.dtype] = None,
-    device: Optional[Union[torch.device, str]] = None
-):
-    """
-    Args:
-    - dtype: Optional[torch.dtype]:
-        If None, the default dtype is `torch.int64` for integer `fill_value`
-        and `torch.float64` for floating-poin `fill_value`.
-    - device: Optional[torch.Device]:
-        If None, the default device is `"cpu"`.
-    """
-    dtype, device = _dtype_device_like(input, dtype, device)
-    return ones(input.shape, dtype=dtype, device=device)
-
-
-@overload
-def arange(end, dtype=None, device=None): ...
-@overload
-def arange(start, end, step=1, dtype=None, device=None): ...
-
-
-def arange(*args, **kwargs):
-    def _end_matcher(end, dtype=None, device=None):
-        return (0, end, 1, dtype, device)
-
-    def _start_end_matcher(start, end, step=1, dtype=None, device=None):
-        return (start, end, step, dtype, device)
-
-    def _resolve():
-        try:
-            return _start_end_matcher(*args, **kwargs)
-        except TypeError:
-            pass
-
-        try:
-            return _end_matcher(*args, **kwargs)
-        except TypeError:
-            pass
-
-        raise TypeError(f'Unexpected arguments {args} to easier.arange')
-
-    start, end, step, dtype, device = _resolve()
-
-    for arg in [start, end, step]:
-        if not isinstance(arg, (int, float)):
-            raise TypeError(
-                'argument to easier.arange must be integer or floating-point')
-
-    promoted_value = start + end + step
-    if isinstance(promoted_value, int):
-        default_dtype = torch.int64
-    elif isinstance(promoted_value, float):
-        default_dtype = torch.float64
-    else:
-        raise TypeError(
-            'argument to easier.arange must be integer or floating-point')
-
-    if dtype is None:
-        dtype = default_dtype
-    if device is None:
-        # TODO like torch.set_default_device()
-        device = 'cpu'
-    return ArangeTensorLoader(start, end, step, dtype, device)
 
 
 def _resolve_data_loader(arg) -> DataLoaderBase:

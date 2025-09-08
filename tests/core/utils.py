@@ -7,13 +7,13 @@ import contextlib
 import torch
 
 from easier.core.passes.tensor_grouping import EasierTensorGroup
-from easier.core.runtime.data_loader import \
-    _get_offset_exactly_nparts
+from easier.core.passes.utils import get_selector_reducer_idx_partition
 from easier.core.distpart import \
     metis_wrapper as _metis
 from easier.core.passes.tensor_group_partition import ElemPart, \
     distpart_kway as _kway, \
     synchronize_partition_result as _sync_elempart
+from easier.core.runtime.data_loader.utils import NormalizedSlice
 from easier.core.runtime.dist_env import get_runtime_dist_env
 
 
@@ -66,20 +66,28 @@ def multi_stage_zero_length_partition(
     rank = dist_env.rank
     world_size = dist_env.world_size
 
-    def _get_dt_nparts_0len(orig_len: int, nparts: int, part: int):
-        # last worker has no assignment
-        per_worker_len = orig_len // nparts
-        start = per_worker_len * part
+    def _get_selector_reducer_idx_partition_0len(
+        module
+    ) -> Tuple[torch.Tensor, Tuple[int, int]]:
+        if module.easier_index_status == 'placeholder':
+            dimlen = module.easier_data_loader.shape[0]
+            per_worker_len = dimlen // dist_env.world_size
+            pstart = per_worker_len * dist_env.rank
 
-        if part + 1 == nparts:
-            start = orig_len
-            end = orig_len
-        elif part + 2 == nparts:
-            end = orig_len
-        else:
-            end = per_worker_len * (part + 1)
+            if dist_env.rank + 1 == dist_env.world_size:
+                pend = pstart
+            elif dist_env.rank + 2 == dist_env.world_size:
+                pend = dimlen
+            else:
+                pend = pstart + per_worker_len
 
-        return start, end
+            partial_idx = module.easier_data_loader.partially_load_by_range(
+                NormalizedSlice(dimlen, pstart, 1, pend - pstart)
+            )
+            module.idx = partial_idx
+            module.easier_idx_part_range = (pstart, pend)
+            module.easier_index_status = 'partially_loaded'
+        return module.idx, module.easier_idx_part_range
 
     def _metis_wrapper_0len(*args, **kwargs) -> Tuple[int, torch.Tensor]:
         # only run on rank-0
@@ -160,13 +168,13 @@ def multi_stage_zero_length_partition(
 
         return elemparts
 
-    dataloader_module = _get_offset_exactly_nparts.__module__
     distpart_module = _metis.__module__
     tensor_partition_module = _sync_elempart.__module__
 
     with patch(
-        f'{dataloader_module}.{_get_offset_exactly_nparts.__name__}',
-    ) as dt_mock, \
+        f'{get_selector_reducer_idx_partition.__module__}'
+        f'.{get_selector_reducer_idx_partition.__name__}',
+    ) as get_part_mock, \
         patch(
         f'{distpart_module}.{_metis.__name__}',
     ) as metis_mock, \
@@ -176,14 +184,14 @@ def multi_stage_zero_length_partition(
         patch(
         f'{tensor_partition_module}.{_sync_elempart.__name__}',
     ) as sync_ep_mock:
-        dt_mock.side_effect = _get_dt_nparts_0len
+        get_part_mock.side_effect = _get_selector_reducer_idx_partition_0len
         metis_mock.side_effect = _metis_wrapper_0len
         kway_mock.side_effect = _kway_0len
         sync_ep_mock.side_effect = _sync_elempart_0len
 
         yield
 
-        dt_mock.assert_called()
+        get_part_mock.assert_called()
         if rank == 0:
             metis_mock.assert_called_once()
         kway_mock.assert_called_once()

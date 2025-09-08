@@ -1,6 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import inspect
 from typing import List, Literal, Tuple
 import os
 import sys
@@ -149,6 +150,102 @@ def torchrun_singlenode(
         nprocs=nprocs,
         join=True
     )
+
+
+class _DeferredBinderForSpawningWorkerMethod:
+    def __init__(self, public_name, worker_func, spawner) -> None:
+        self.public_name = public_name
+        self.worker_func = worker_func
+        self.spawner: _WorkerMethodSpawner = spawner
+
+    def __set_name__(self, owner, name):
+        # Python protocol, gets called when the class definition is finalized
+        self.spawner.test_cls_obj = owner
+        setattr(owner, self.public_name, self.spawner.spawn)
+        setattr(owner, self.worker_func.__name__, self.worker_func)
+
+    def __setattr__(self, name, value):
+        if not all(
+            n in self.__dict__ for n in
+            ['public_name', 'worker_func', 'spawn_func']
+        ):
+            super().__setattr__(name, value)
+
+        else:
+            assert False, \
+                f'{self.__class__}.__setattr__ is not expected to be called,' \
+                ' ensure @torchrun_spawn is the last decorator to apply'
+
+
+class _WorkerMethodSpawner:
+    def __init__(self, nprocs: int, worker_func, init_type: str):
+        self.nprocs = nprocs
+        self.worker_func = worker_func
+        self.init_type = init_type
+
+        self.test_cls_obj = None
+
+    def spawn_target(self, world_size, local_rank):
+        args = ()
+        if self.test_cls_obj is not None:
+            args = (self.test_cls_obj,) + args
+        self.worker_func(*args)
+
+    def spawn(self):
+        torchrun_singlenode(
+            self.nprocs, self.spawn_target, (), {},
+            self.init_type  # type: ignore
+        )
+
+
+def torchrun_spawn(  # type: ignore
+    nprocs: int = 2,
+    init_type: Literal['none', 'cpu', 'cuda'] = 'cpu'
+):
+    """
+    A decorator to make a global function test_xxx or a method TestXXX.test_xxx
+    to be spawned by torchrun.
+
+    TODO
+    -   @pytest.parameterize is not supported, use torchrun_singlenode instead.
+
+    Usage (class method as example):
+    ```
+    class Test:
+
+        # must be the first decorator (as decorators are stacked bottom-up)
+        @torchrun_spawn()  
+
+        # must be named with 'worker__'
+        def worker__test(self, dev_type: str, dtype: torch.dtype):
+
+            # to get world_size and rank
+            dist_env = get_default_dist_env()
+            dist_env.rank
+    ```
+    """
+    def wrapper(func):
+        qualname: str = func.__qualname__
+        orig_name: str = func.__name__
+        assert orig_name.startswith('worker__test')
+
+        public_name = orig_name[len('worker__'):]
+
+        spawner = _WorkerMethodSpawner(nprocs, func, init_type)
+
+        if qualname == orig_name:
+            # global function
+            module = inspect.getmodule(func)
+            setattr(module, orig_name, func)
+            setattr(module, public_name, spawner.spawn)
+
+            return spawner.spawn
+        else:
+            return _DeferredBinderForSpawningWorkerMethod(
+                public_name, func, spawner
+            )
+
+    return wrapper
 
 
 def _mpirun_spawn_target(

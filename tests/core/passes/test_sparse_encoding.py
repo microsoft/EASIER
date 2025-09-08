@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 
+import pytest
 import torch
 from easier.core.passes.tensor_grouping import EasierTensorGroup
 from easier.core.passes.tensor_group_partition import \
@@ -27,6 +28,7 @@ def ElemPart(idx, lengths):
     return _EP_raw(None, idx, lengths, 'NOHINT')
 
 
+@pytest.mark.usefixtures('dummy_dist_env')
 def test_break_reducer_cycle():
     g1 = EasierTensorGroup(OrderedSet(), 11, 'g1')
     g2 = EasierTensorGroup(OrderedSet(), 22, 'g2')
@@ -59,6 +61,7 @@ def test_break_reducer_cycle():
     ]
 
 
+@pytest.mark.usefixtures('dummy_dist_env')
 def test_break_selector_reducer_cycle():
     g1 = EasierTensorGroup(OrderedSet(), 11, 'g1')
     g2 = EasierTensorGroup(OrderedSet(), 22, 'g2')
@@ -103,6 +106,7 @@ def test_break_selector_reducer_cycle():
     ]
 
 
+@pytest.mark.usefixtures('dummy_dist_env')
 def test_resolve_conflict():
     g1 = EasierTensorGroup(OrderedSet(), 11, 'g1')
     g2 = EasierTensorGroup(OrderedSet(), 22, 'g2')

@@ -24,7 +24,7 @@ from easier.core.passes.utils import EasierInterpreter, OrderedSet, \
     fx_graph_to_serializable_ir, serializable_ir_to_fx_graph
 from easier.core.runtime.dist_env import get_runtime_dist_env
 from easier.core.runtime.modules import HaloExchanger
-from easier.core.runtime.data_loader import \
+from easier.core.runtime.data_loader.factories import \
     DataLoaderBase, InMemoryTensorLoader
 from easier.core.passes.tensor_group_partition import \
     ElemPart, ElemPartArangeIdx
@@ -1093,6 +1093,8 @@ def rank0_validates_dumps(
             )
             return False
 
+        # TODO this does not detect InMemTensorLoader in a nested DataLoader,
+        # the whole DataLoader stack of which will be recorded as repr-only.
         jit_repr_type, jit_repr_tensor, jit_repr_str = _get_data_loader_repr(
             submod.easier_data_loader
         )

@@ -15,13 +15,17 @@ from tests.utils import when_ngpus_ge_2, torchrun_singlenode, have_cuda
 def fully_load_data(t: easier.Tensor):
     assert not t.easier_data_ready
     is_replica = t.is_replica
-    t.data = t.easier_data_loader.fully_load('cpu', replicated=is_replica)
+    t.data = t.easier_data_loader.fully_load(
+        torch.device('cpu'), replicated=is_replica
+    )
     t.easier_data_ready = is_replica or 'rank0_only'
 
 
 def fully_load_idx(m: Union[easier.Selector, easier.Reducer]):
     assert m.easier_index_status == 'placeholder'
-    m.idx = m.easier_data_loader.fully_load('cpu')
+    m.idx = m.easier_data_loader.fully_load(
+        torch.device('cpu'), replicated=False
+    )
     m.easier_index_status = 'rewritten'
 
 

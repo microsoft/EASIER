@@ -1,6 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import contextlib
+from unittest.mock import patch
 import torch
 import pytest
 
@@ -8,6 +10,9 @@ import tempfile
 import os
 
 import easier as esr
+from easier.core.dump import load_dumps as _orig_load_dumps
+from easier.core.runtime.data_loader.factories import InMemoryTensorLoader
+from easier.core.runtime.data_loader.ops import StridedDataLoader
 from easier.core.utils import get_random_str
 
 from ..utils import \
@@ -31,8 +36,12 @@ class Model(esr.Module):
         self.selector_src = esr.Selector(eqn.src)
         self.selector_dst = esr.Selector(eqn.dst)
 
-        self.vertex_tensor = esr.Tensor(
-            torch.randn((nv, nf)).to(device=device), mode='partition')
+        dl = InMemoryTensorLoader(
+            torch.randn((nv, nf)).to(device=device)
+        )[:, :]
+        assert isinstance(dl, StridedDataLoader)
+
+        self.vertex_tensor = esr.Tensor(dl, mode='partition')
         self.edge_tensor = esr.Tensor(torch.randn(
             (ne, nf)).to(device=device), mode='partition')
         self.tensor = esr.Tensor(torch.randn(
@@ -94,6 +103,19 @@ def _equal_jitted_reducer(r1: esr.Reducer, r2: esr.Reducer):
     assert r1.n == r2.n
 
 
+@contextlib.contextmanager
+def expect_load_succeeds():
+    def _stub_load_dumps(*args, **kwargs):
+        loaded_graphs = _orig_load_dumps(*args, **kwargs)
+        assert loaded_graphs != None
+        return loaded_graphs
+    with patch(
+        f'{esr.compile.__module__}.{_orig_load_dumps.__name__}',
+        new=_stub_load_dumps
+    ) as mock_load_dumps:
+        yield
+
+
 def worker__test_jitted_dump(
     local_rank: int, world_size: int, dev_type: str, dumpdir: str
 ):
@@ -108,9 +130,10 @@ def worker__test_jitted_dump(
 
     torch.manual_seed(2345)
     m = Model(3, model_dev)  # type: ignore
-    jm2, = esr.compile(
-        [m], 'torch', load_dir=dumpdir, partition_mode='evenly'  # type: ignore
-    )
+    with expect_load_succeeds():
+        jm2, = esr.compile(
+            [m], 'torch', load_dir=dumpdir, partition_mode='evenly'  # type: ignore
+        )
     jm2: Model
 
     _equal_jitted_selector(jm1.selector_src, jm2.selector_src)
@@ -151,9 +174,10 @@ def worker__test_jitted_shared(
     torch.manual_seed(2345)
     m1 = Model(3, model_dev)  # type: ignore
     m2 = Model2(m1, 3)
-    jm1b, jm2b = esr.compile(
-        [m1, m2], 'torch', load_dir=dumpdir, partition_mode='evenly'
-    )  # type: ignore
+    with expect_load_succeeds():
+        jm1b, jm2b = esr.compile(
+            [m1, m2], 'torch', load_dir=dumpdir, partition_mode='evenly'
+        )  # type: ignore
     jm1b: Model
     jm2b: Model2
 
@@ -229,7 +253,8 @@ def worker__test_smoke_zerolength_dump(
 
     torch.manual_seed(2345)
     m = Model(3, model_dev)  # type: ignore
-    jm2, = esr.compile([m], 'torch', load_dir=dumpdir)  # type: ignore
+    with expect_load_succeeds():
+        jm2, = esr.compile([m], 'torch', load_dir=dumpdir)  # type: ignore
     jm2: Model
     jm2()
 

@@ -9,6 +9,7 @@ import torch
 from torch.fx.graph import Graph
 from torch.fx.node import Node
 
+from easier.core.runtime.data_loader.utils import NormalizedSlice
 from easier.core.utils import logger, EasierJitException
 import easier.core.module as esr
 
@@ -213,15 +214,23 @@ class TensorGrouper(EasierInterpreter[Optional[EasierTensorDef]]):
             )
         in_size = _get_tensordef_batch_size(input_def)
 
+        idxlen = module.easier_data_loader.shape[0]
+        idxslice = NormalizedSlice(idxlen, 0, 1, idxlen)
+
         if isinstance(module, esr.Selector):
-            idx_max = int(module.easier_data_loader.minmax()
-                          [1])  # type: ignore
+            # `0 <= idx_min` has been checked in
+            # collective_initialization pass.
+            idx_max = int(
+                module.easier_data_loader.minmax(idxslice)[1]
+            )
             if not (idx_max < in_size):
                 raise EasierJitException(
                     "Selector.idx is out of bounds for the"
                     " input distributed tensor"
                 )
         if isinstance(module, esr.Reducer):
+            # `0 <= idx_min and idx_max < reducer.n` has been checked in
+            # collective_initialization pass.
             if in_size != module.easier_data_loader.shape[0]:
                 raise EasierJitException(
                     "The length of the first dimension of the"

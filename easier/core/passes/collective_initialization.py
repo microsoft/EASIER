@@ -11,6 +11,7 @@ from easier.core.passes.utils import \
     EasierInterpreter, OrderedSet, fx_graph_to_serializable_ir, \
     get_easier_objects, get_easier_tensors, get_selectors_reducers
 
+from easier.core.runtime.data_loader.utils import NormalizedSlice
 from easier.core.utils import EasierJitException
 import easier.core.module as _EsrMod
 
@@ -86,7 +87,8 @@ def validate_idx_range(
             f"{hint_name}.idx must be integer"
         )
 
-    idxmin, idxmax = cast(Tuple[int, int], dl.minmax())
+    idxslice = NormalizedSlice(dl.shape[0], 0, 1, dl.shape[0])
+    idxmin, idxmax = cast(Tuple[int, int], dl.minmax(idxslice))
 
     if not (0 <= idxmin):
         raise ValueError(

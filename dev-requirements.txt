@@ -9,3 +9,4 @@ torch
 pymetis
 h5py
 networkx
+sympy

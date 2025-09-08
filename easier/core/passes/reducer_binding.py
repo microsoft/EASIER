@@ -7,6 +7,8 @@ from torch import nn
 from torch.fx.graph import Graph
 from torch.fx.node import Node
 
+from easier.core.runtime.data_loader.factories import arange as esr_arange
+from easier.core.runtime.data_loader.utils import NormalizedSlice
 from easier.core.utils import logger
 import easier.core.module as esr
 
@@ -80,7 +82,7 @@ class CsrSelectorInserter(EasierInterpreter[None]):
             # as normal Selectors, and during loading this Selector will be
             # created again -- it's ok as this is merely a data loader,
             # till its `.idx` get directly overwritten with the loaded data.
-            csr_selector = esr.Selector(esr.arange(
+            csr_selector = esr.Selector(esr_arange(
                 submod.easier_data_loader.shape[0],
                 dtype=submod.easier_data_loader.dtype,
                 device=submod.easier_data_loader.device
@@ -126,8 +128,18 @@ def bind_reducer(modules: List[esr.Module], graphs: List[Graph]):
         #
         # tuple (fullness, nnodes) are ordered lexicographically
         weighted_reducers = [
-            ((float(r.easier_data_loader.count_unique()) / r.n, nnodes), r)
-            for r, nnodes in reducer2nnodes.items()
+            (
+                (
+                    float(r.easier_data_loader.count_unique(
+                        NormalizedSlice(
+                            r.easier_data_loader.shape[0],
+                            0, 1,
+                            r.easier_data_loader.shape[0]
+                        )
+                    )) / r.n,
+                    nnodes
+                ), r
+            ) for r, nnodes in reducer2nnodes.items()
         ]
         _maxweight, target = max(weighted_reducers, key=lambda tp: tp[0])
 
