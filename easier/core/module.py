@@ -834,7 +834,11 @@ def sum(tensor: torch.Tensor) -> torch.Tensor:
     -   tensor:
         At JIT-time, must be a distributed tensor.
     """
-    return _allreduce(torch.sum, tensor)
+    # Unless specifying `dtype=`, some dtypes like int32 may get promoted to
+    # int64 implicitly.
+    # TODO overflow-prone aggregators esr.xxx should support dtype etc.
+    # parameters like their torch.xxx counterparts.
+    return _allreduce(torch.sum, tensor, dtype=tensor.dtype)
 
 
 def prod(tensor: torch.Tensor) -> torch.Tensor:
@@ -845,7 +849,7 @@ def prod(tensor: torch.Tensor) -> torch.Tensor:
     -   tensor:
         At JIT-time, must be a distributed tensor.
     """
-    return _allreduce(torch.prod, tensor)
+    return _allreduce(torch.prod, tensor, dtype=tensor.dtype)
 
 
 def norm(tensor: torch.Tensor, p: Union[int, str] = 2) -> torch.Tensor:
@@ -856,7 +860,7 @@ def norm(tensor: torch.Tensor, p: Union[int, str] = 2) -> torch.Tensor:
     -   tensor:
         At JIT-time, must be a distributed tensor.
     """
-    return _allreduce(torch.norm, tensor, p)
+    return _allreduce(torch.norm, tensor, p, dtype=tensor.dtype)
 
 
 def max(tensor: torch.Tensor) -> torch.Tensor:

@@ -43,18 +43,22 @@ class ReducerBinder(EasierInterpreter[None]):
         nnodes[submod] = nnodes.get(submod, 0) + 1
 
 
-class CsrSelectorInserter(EasierInterpreter[None]):
+class CsrSelectorCallInserter(EasierInterpreter[None]):
     def __init__(
         self, modules: Sequence[esr.Module], graphs: Sequence[Graph],
-        tgrp2reducer: Dict[EasierTensorGroup, esr.Reducer]
+        csr_selectors: Dict[esr.Reducer, esr.Selector]
     ) -> None:
         super().__init__(modules, graphs)
 
-        self.tgrp2reducer = tgrp2reducer
+        self.csr_selectors = csr_selectors
         self.selector_name_allocator = SubmodNameAllocator('csr_selector')
 
     def if_call_module(self, submod: nn.Module) -> None:
         if not isinstance(submod, esr.Reducer):
+            return
+
+        if submod not in self.csr_selectors:
+            # Reducers that do not need CSR Selectors are not included.
             return
 
         args = self.current_node.args
@@ -63,58 +67,51 @@ class CsrSelectorInserter(EasierInterpreter[None]):
             normalize_reducer_call_into_args(*args, **kwargs)
         assert isinstance(input_node, Node)
 
-        tgrp = get_node_tensor_group(input_node)
-        assert tgrp is not None
+        csr_selector = self.csr_selectors[submod]
 
-        bound_reducer = self.tgrp2reducer[tgrp]
-        if bound_reducer is not submod:
+        # OK to add names per-Node.
+        selector_attrname = self.selector_name_allocator.alloc_name(
+            self.current_module, hint=self.current_node.name
+        )
+        self.current_module.add_module(selector_attrname, csr_selector)
 
-            # TODO reuse selector instance if <tgrp, reducer> met.
-
-            selector_attrname = self.selector_name_allocator.alloc_name(
-                self.current_module, hint=self.current_node.name
+        with self.current_graph.inserting_before(self.current_node):
+            csr_selector_node = self.current_graph.call_module(
+                selector_attrname, (input_node,)
+            )
+            self.current_node.replace_input_with(
+                input_node, csr_selector_node
             )
 
-            # Collectively create and insert.
-            # During module dumping, this Selector will be dumped
-            # as normal Selectors, and during loading this Selector will be
-            # created again -- it's ok as this is merely a data loader,
-            # till its `.idx` get directly overwritten with the loaded data.
-            csr_selector = esr.Selector(esr.arange(
-                submod.easier_data_loader.shape[0],
-                dtype=submod.easier_data_loader.dtype,
-                device=submod.easier_data_loader.device
-            ))
-            csr_selector.easier_hint_name = \
-                f"{submod.easier_hint_name}.{selector_attrname}"
-            # TODO if we reuse the Selector instance the naming will be
-            # as consistent as dataflow_distribution
-            # f"{submod.easier_hint_name}.reorderingSelector"
-
-            self.current_module.add_module(selector_attrname, csr_selector)
-
-            with self.current_graph.inserting_before(self.current_node):
-                csr_selector_node = self.current_graph.call_module(
-                    selector_attrname, (input_node,)
-                )
-                self.current_node.replace_input_with(
-                    input_node, csr_selector_node
-                )
-
-            logger.info(f"Insert arange-Selector for {self.current_node.name}")
+        logger.info(
+            f"Insert call to {csr_selector.easier_hint_name}"
+            f" for {self.current_node.name}"
+        )
 
 
 def bind_reducer(modules: List[esr.Module], graphs: List[Graph]):
     """
     Analyze which Reducer decides (CSR-encoded) layout of each tensor.
-    If one tensor is used by multiple Reducers, insert Selectors for
+    If one TensorGroup is used by multiple Reducers, insert Selectors for
     extra Reducers.
+
+    After the insertion of such _CSR Selectors_, the input TensorGroups of
+    Reducers are mutually isolated.
+    Therefore, during TensorGroup partitioning, the partitioning on I/O
+    TensorGroups of a Reducer won't affect the partitioning for other Reducers,
+    and each of them can be tuned to the best.
+
+    NOTE However, due to the heuristic nature of partitioning, occasionally a
+    Reducer may still need data exchange (HaloExchanger), for such edge cases,
+    a _reordering Selector_ will be added, which is for memory locality
+    and not the same as _CSR Selector_ here.
     """
     reducer_binder = ReducerBinder(modules, graphs)
     reducer_binder.run()
 
-    # pick one Reducer instance with the maximum number of Nodes.
-    target_reducers: Dict[EasierTensorGroup, esr.Reducer] = {}
+    # Reducers that do not need CSR Selectors are not included.
+    csr_selectors: Dict[esr.Reducer, esr.Selector] = {}
+    
     for grp, reducer2nnodes in reducer_binder.tengrp2reducer.items():
 
         # If multiple Reducers are reducing the same input tensor group,
@@ -129,11 +126,30 @@ def bind_reducer(modules: List[esr.Module], graphs: List[Graph]):
             ((float(r.easier_data_loader.count_unique()) / r.n, nnodes), r)
             for r, nnodes in reducer2nnodes.items()
         ]
-        _maxweight, target = max(weighted_reducers, key=lambda tp: tp[0])
+        _maxweight, main_reducer = max(weighted_reducers, key=lambda tp: tp[0])
 
-        target_reducers[grp] = target
+        for reducer, nnodes in reducer2nnodes.items():
+            if reducer is main_reducer:
+                continue
 
-    selector_inserter = CsrSelectorInserter(modules, graphs, target_reducers)
+            # Prepare a CSR Selector
+            # (without validation like passes/collective_initialization.py)
+            #
+            # During module dumping, this Selector will be dumped
+            # as normal Selectors, and during loading this Selector will be
+            # created again -- it's ok as this is merely a data loader,
+            # till its `.idx` get directly overwritten with the loaded data.
+            csr_selector = esr.Selector(esr.arange(
+                reducer.easier_data_loader.shape[0],
+                dtype=reducer.easier_data_loader.dtype,
+                device=reducer.easier_data_loader.device
+            ))
+            csr_selector.easier_hint_name = \
+                f"{reducer.easier_hint_name}.CSRSelector"
+            
+            csr_selectors[reducer] = csr_selector
+
+    selector_inserter = CsrSelectorCallInserter(modules, graphs, csr_selectors)
     selector_inserter.run()
 
     return modules, graphs

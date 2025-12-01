@@ -258,17 +258,8 @@ class ViewSrcTrackerBase(NodeHandlerBase):
         self.addr2refcount: Dict[int, int] = {}
         self.addr2viewsrc: Dict[int, ViewSrc] = {}
 
-        # TODO record (within storage lifetime) the address of a tensor,
-        # we need the invariant that tensor storage never changes
-        # because they are allocated by EASIER AOT.
-        # E.g. Tensor.set_ resets the storage, but Tensor.copy_ does not.
-        # self.tensor2addr: Dict[torch.Tensor, int] = {}
-        #
-        # NOTE but if it's not an esr.Tensor, but an immediate tensors, can
-        # their storage be changed? We can detect the change and decr refcount
-        # before resetting and incr refcount of the shared storage.
 
-    def _get_indexed_addr(
+    def get_indexed_addr(
         self, iaddr_node: Node, val: RuntimeValue,
         *,
         _rec_depth=0  # debug-only
@@ -316,7 +307,7 @@ class ViewSrcTrackerBase(NodeHandlerBase):
 
             indexed_addrs = []
             for i, item in enumerate(val):
-                item_iaddr = self._get_indexed_addr(
+                item_iaddr = self.get_indexed_addr(
                     iaddr_node, item,
                     _rec_depth=_rec_depth+1
                 )
@@ -361,7 +352,7 @@ class ViewSrcTrackerBase(NodeHandlerBase):
         # Increase ref count;
         # If previous ref count is 0, set current_node as ViewSrc.
         #
-        res_siaddr: StructuredIndexedAddr = self._get_indexed_addr(
+        res_siaddr: StructuredIndexedAddr = self.get_indexed_addr(
             current_node, res
         )
 
@@ -438,7 +429,7 @@ class ViewSrcTrackerBase(NodeHandlerBase):
             # NOTE currently for the sake of simplicity _get_indexed_addr()
             # cannot handle nester layer > 1, so we cannot concat `env_val`s
             # into a list first.
-            end_siaddr: StructuredIndexedAddr = self._get_indexed_addr(
+            end_siaddr: StructuredIndexedAddr = self.get_indexed_addr(
                 node_ends_here, end_val
             )
             end_item_iaddrs: List[IndexedAddr] = collect_meta(
@@ -461,6 +452,52 @@ class ViewSrcTrackerBase(NodeHandlerBase):
 
 
 class ViewSrcTracker(ViewSrcTrackerBase):
+    """
+    Calculate ViewSrcs of evaluated results and record them in the Node.
+
+    Additional to ViewSrc, only in the 1st run do we check
+    against operations that change the storage of tensor,
+    for example, Tensor.set_, Tensor.resize_.
+    """
+    def _get_args_siaddrs(self, current_node: Node):
+        # Simply store the flattened IndexAddr objects.
+        args_siaddrs = []
+
+        for arg_node in current_node.all_input_nodes:
+            arg_val = self.stackframe[arg_node]
+            arg_siaddr: StructuredIndexedAddr = self.get_indexed_addr(
+                arg_node, arg_val
+            )
+            args_siaddrs.append(arg_siaddr)
+        return args_siaddrs
+
+    def preprocess(
+        self,
+        current_node: Node,
+        args: List[RuntimeValue],
+        kwargs: Dict[str, RuntimeValue]
+    ) -> PreprocessDecision:
+        # Record (within storage lifetime) the address of a tensor,
+        # we need the invariant that tensor storage never changes
+        # because they are allocated by EASIER AOT or managed by codegen.
+        # E.g. Tensor.set_ resets the storage, but Tensor.copy_ does not.
+        self.args_siaddrs: List[StructuredIndexedAddr] = \
+            self._get_args_siaddrs(current_node)
+
+        return PreprocessDecision.CONTINUE
+
+    def postprocess(
+        self, current_node: Node, res: RuntimeValue, args, kwargs
+    ) -> RuntimeValue:
+        post_eval_args_siaddrs = self._get_args_siaddrs(current_node)
+        if post_eval_args_siaddrs != self.args_siaddrs:
+            raise EasierJitException(
+                f"The operation '{current_node.format_node()}' is not allowed,"
+                " because it changes the storage of the input tensor"
+            )
+
+        return super().postprocess(current_node, res, args, kwargs)
+        
     def handle_view_src(
         self, current_node: Node, view_src: StructuredViewSrc
     ) -> None:
@@ -1103,8 +1140,8 @@ class JitEngine:
             # <- Store result into stackframe, release unused tensors
             StackframeManager(self.module, stackframe),
 
-            # ->
-            # <- Updates refcount and sets view_src
+            # -> Records tensor storage info
+            # <- Detects storage changes; Updates refcount and sets view_src
             ViewSrcTracker(self.module, stackframe),
 
             # -> Calculates expected role and batchsize --/
